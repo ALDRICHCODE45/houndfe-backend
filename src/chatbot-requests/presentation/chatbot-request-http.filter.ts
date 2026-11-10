@@ -33,6 +33,7 @@ const MESSAGES: Record<string, string> = {
   CANCEL_NOT_ALLOWED: 'This request cannot be cancelled now',
   IDEMPOTENCY_CONFLICT: 'Idempotency-Key was already used with another body',
   USER_NOT_ASSIGNABLE: 'The user cannot be assigned to chatbot requests',
+  ZONE_SET_CHANGED: 'The customers waiting on this zone changed; review again',
   RATE_LIMITED: 'Too many requests',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',

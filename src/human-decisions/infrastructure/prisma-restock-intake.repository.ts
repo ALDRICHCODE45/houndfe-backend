@@ -36,8 +36,9 @@
  * `isInTransaction()` is true. The current contract caller is a standalone bot
  * route, so nested intake is intentionally unsupported (no savepoints yet).
  */
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   canonicalizeRestockRequest,
@@ -101,7 +102,12 @@ function toPersistedDecision(
 
 @Injectable()
 export class PrismaRestockIntakeRepository implements IRestockIntakeRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    // Optional so specs that build the repository alone keep their behavior;
+    // the module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
+  ) {}
 
   async submit(input: RestockIntakeInput): Promise<RestockIntakeResult> {
     // Fail closed BEFORE any query/transaction; see the class-level
@@ -178,6 +184,13 @@ export class PrismaRestockIntakeRepository implements IRestockIntakeRepository {
           },
         });
 
+        await this.wrapper?.wrapHumanDecision({
+          id: created.id,
+          type: 'RESTOCK',
+          productId: created.productId,
+          productName: created.productName,
+          variantId: created.variantId,
+        });
         return { status: 'created', request: toPersistedDecision(created) };
       });
     } catch (error) {

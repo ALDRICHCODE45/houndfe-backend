@@ -1,6 +1,6 @@
 /**
- * Chatbot request inbox (human-intervention unit 2): staff commands claim,
- * release, reassign and cancel. `AuthModule` provides `JwtAuthGuard` and
+ * Chatbot request inbox (human-intervention units 2 and 3): staff commands
+ * claim, release, reassign, cancel and resolve. `AuthModule` provides `JwtAuthGuard` and
  * `PermissionsGuard`; `ActiveUserGuard` resolves `PrismaService` from the
  * global `DatabaseModule`.
  */
@@ -12,12 +12,13 @@ import {
   CHATBOT_REQUEST_COMMAND_STORE,
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
+import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
 
 @Module({
-  imports: [DatabaseModule, AuthModule],
+  imports: [DatabaseModule, AuthModule, WrappedRequestResolutionModule],
   controllers: [ChatbotRequestCommandsController],
   providers: [
     ActiveUserGuard,

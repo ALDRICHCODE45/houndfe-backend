@@ -16,7 +16,16 @@ import type {
   ChatbotRequestRow,
   ChatbotRequestView,
 } from '../application/chatbot-request-commands.service';
-import { refreshCustomerGroup } from './chatbot-request-writes';
+import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
+import {
+  applyRequestPatch,
+  findZoneOf,
+  lockOpenWrapping,
+  lockRequestRow,
+  readZoneImpact,
+  refreshCustomerGroup,
+  refreshCustomerGroups,
+} from './chatbot-request-writes';
 
 @Injectable()
 export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandStore {
@@ -109,16 +118,8 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     return membership ? { userId, displayName: membership.user.name } : null;
   }
 
-  async lockRequest(id: string): Promise<ChatbotRequestRow | null> {
-    const rows = await this.tx.$queryRaw<ChatbotRequestRow[]>(Prisma.sql`
-      SELECT "id", "folio", "kind"::text AS "kind", "subtype"::text AS "subtype",
-             "status"::text AS "status", "version", "customerKey",
-             "assigneeUserId", "assigneeDisplayName", "claimedAt", "overdueAt",
-             "closedAt"
-      FROM "chatbot_requests"
-      WHERE "tenantId" = ${this.tenantId} AND "id" = ${id}
-      FOR UPDATE`);
-    return rows[0] ?? null;
+  lockRequest(id: string): Promise<ChatbotRequestRow | null> {
+    return lockRequestRow(this.tx, this.tenantId, id);
   }
 
   async apply(
@@ -126,21 +127,52 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     patch: ChatbotRequestPatch,
     event: ChatbotRequestEventDraft,
   ): Promise<void> {
-    const { tx, tenantId } = this;
-    // The row is locked, so the CAS cannot lose; a miss is a broken invariant.
-    const { count } = await tx.chatbotRequest.updateMany({
-      where: { tenantId, id: row.id, version: row.version },
-      data: patch,
+    await this.applyPatch(row, patch, event);
+    await refreshCustomerGroup(this.tx, this.tenantId, row.customerKey);
+  }
+
+  applyPatch(
+    row: ChatbotRequestRow,
+    patch: ChatbotRequestPatch,
+    event: ChatbotRequestEventDraft,
+  ): Promise<void> {
+    return applyRequestPatch(this.tx, this.tenantId, row, patch, event);
+  }
+
+  refreshGroups(customerKeys: string[]): Promise<void> {
+    return refreshCustomerGroups(this.tx, this.tenantId, customerKeys);
+  }
+
+  async lockZoneOf(requestId: string): Promise<void> {
+    const zone = await findZoneOf(this.tx, this.tenantId, requestId);
+    if (zone) await lockZipCode(this.tx, this.tenantId, zone.zipCode);
+  }
+
+  async lockZoneSet(row: ChatbotRequestRow) {
+    const zone = await findZoneOf(this.tx, this.tenantId, row.id);
+    if (!zone) return null;
+    const siblings = await lockOpenWrapping(this.tx, this.tenantId, {
+      validationId: zone.validationId,
     });
-    if (count !== 1) throw new Error('chatbot request CAS missed a locked row');
-    await tx.chatbotRequestEvent.create({
-      data: {
-        ...event,
-        tenantId,
-        requestId: row.id,
-        data: event.data as Prisma.InputJsonObject,
-      },
+    const impact = await readZoneImpact(
+      this.tx,
+      this.tenantId,
+      zone.validationId,
+    );
+    return { siblings, impact };
+  }
+
+  async readZoneImpact(requestId: string) {
+    const exists = await this.tx.chatbotRequest.count({
+      where: { tenantId: this.tenantId, id: requestId },
     });
-    await refreshCustomerGroup(tx, tenantId, row.customerKey);
+    if (exists === 0) return { found: false, impact: null };
+    const zone = await findZoneOf(this.tx, this.tenantId, requestId);
+    return {
+      found: true,
+      impact: zone
+        ? await readZoneImpact(this.tx, this.tenantId, zone.validationId)
+        : null,
+    };
   }
 }

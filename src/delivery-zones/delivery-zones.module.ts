@@ -6,6 +6,7 @@
  * (`DELIVERY_ZONE_BOT_REPOSITORY`, exported). Contract: docs/delivery-zones.md.
  */
 import { Module } from '@nestjs/common';
+import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request-wrapper.module';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { DELIVERY_ZONE_BOT_REPOSITORY } from './domain/delivery-zone-bot.repository';
@@ -21,7 +22,7 @@ import { DeliveryZoneValidationsController } from './presentation/delivery-zone-
 import { DeliveryZonesController } from './presentation/delivery-zones.controller';
 
 @Module({
-  imports: [DatabaseModule, AuthModule],
+  imports: [DatabaseModule, AuthModule, ChatbotRequestWrapperModule],
   controllers: [DeliveryZonesController, DeliveryZoneValidationsController],
   providers: [
     DeliveryZoneHttpFilter,
@@ -48,6 +49,7 @@ import { DeliveryZonesController } from './presentation/delivery-zones.controlle
     DELIVERY_ZONE_BOT_REPOSITORY,
     DELIVERY_ZONE_VALIDATOR_LOOKUP,
     DELIVERY_ZONE_REPOSITORY,
+    DELIVERY_ZONE_VALIDATION_REPOSITORY,
   ],
 })
 export class DeliveryZonesModule {}

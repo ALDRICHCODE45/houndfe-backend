@@ -42,6 +42,8 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
   );
   const service = new ChatbotRequestCommandsService(
     new PrismaChatbotRequestCommandStore(tenantPrisma),
+    // These specs never reach a wrapped use case (see the wrapping spec).
+    { resolve: () => Promise.reject(new Error('resolver not expected')) },
   );
   const tenantA = randomUUID();
   const tenantB = randomUUID();
@@ -391,7 +393,10 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
           tenantA,
           request.id,
           users.ana,
-          { kind: 'resolve', action: 'X' },
+          {
+            kind: 'resolve',
+            action: { type: 'CONFIRM_RECEIPT', amountCents: 100 },
+          },
           {
             expectedVersion: 3,
           },

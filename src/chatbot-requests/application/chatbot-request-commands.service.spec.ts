@@ -2,6 +2,7 @@ import {
   ChatbotRequestCommandError,
   ChatbotRequestCommandsService,
   type ChatbotRequestCommandStore,
+  type ChatbotRequestResolver,
   type ChatbotRequestRow,
   type ChatbotRequestView,
   type StaffCommandInput,
@@ -24,12 +25,25 @@ function row(over: Partial<ChatbotRequestRow> = {}): ChatbotRequestRow {
     claimedAt: null,
     overdueAt: null,
     closedAt: null,
+    humanDecisionId: null,
+    deliveryZoneRequestId: null,
+    receiptEvidenceId: null,
     ...over,
   };
 }
 
+const noResolver: ChatbotRequestResolver = {
+  resolve: () => Promise.reject(new Error('resolver not expected')),
+};
+
 /** In-memory store that records the order of every port call. */
-function fakeStore(initial: ChatbotRequestRow | null) {
+function fakeStore(
+  initial: ChatbotRequestRow | null,
+  zone: {
+    siblings: ChatbotRequestRow[];
+    impact: { requests: number; customers: number; setVersion: number };
+  } | null = null,
+) {
   const calls: string[] = [];
   const receipts = new Map<
     string,
@@ -77,6 +91,28 @@ function fakeStore(initial: ChatbotRequestRow | null) {
       current = { ...locked, ...patch } as ChatbotRequestRow;
       return Promise.resolve();
     },
+    applyPatch: (locked, patch, event) => {
+      calls.push(`applyPatch:${locked.id}`);
+      applied.push({ id: locked.id, patch, event });
+      if (current?.id === locked.id) {
+        current = { ...locked, ...patch } as ChatbotRequestRow;
+      }
+      return Promise.resolve();
+    },
+    refreshGroups: (keys) => {
+      calls.push(`refreshGroups:${keys.join(',')}`);
+      return Promise.resolve();
+    },
+    lockZoneOf: () => {
+      calls.push('lockZoneOf');
+      return Promise.resolve();
+    },
+    lockZoneSet: () => {
+      calls.push('lockZoneSet');
+      return Promise.resolve(zone);
+    },
+    readZoneImpact: () =>
+      Promise.resolve({ found: true, impact: zone?.impact ?? null }),
   };
   return { store, calls, applied, receipts };
 }
@@ -106,9 +142,10 @@ async function failure(promise: Promise<unknown>) {
 describe('ChatbotRequestCommandsService', () => {
   it('claims in one transaction: key lock, receipt, row lock, apply, receipt', async () => {
     const { store, calls, applied } = fakeStore(row());
-    const view = await new ChatbotRequestCommandsService(store).execute(
-      input(),
-    );
+    const view = await new ChatbotRequestCommandsService(
+      store,
+      noResolver,
+    ).execute(input());
 
     expect(calls).toEqual([
       'begin',
@@ -150,7 +187,7 @@ describe('ChatbotRequestCommandsService', () => {
 
   it('replays the stored response for the same key and body, without a write', async () => {
     const { store, calls } = fakeStore(row());
-    const service = new ChatbotRequestCommandsService(store);
+    const service = new ChatbotRequestCommandsService(store, noResolver);
     const first = await service.execute(input());
     calls.length = 0;
 
@@ -161,7 +198,7 @@ describe('ChatbotRequestCommandsService', () => {
 
   it('answers 409 IDEMPOTENCY_CONFLICT for the same key with another body', async () => {
     const { store } = fakeStore(row());
-    const service = new ChatbotRequestCommandsService(store);
+    const service = new ChatbotRequestCommandsService(store, noResolver);
     await service.execute(input());
 
     const error = await failure(
@@ -176,7 +213,7 @@ describe('ChatbotRequestCommandsService', () => {
   it('answers 404 NOT_FOUND for a missing or foreign-tenant request', async () => {
     const { store, calls } = fakeStore(null);
     const error = await failure(
-      new ChatbotRequestCommandsService(store).execute(input()),
+      new ChatbotRequestCommandsService(store, noResolver).execute(input()),
     );
     expect(error).toMatchObject({ code: 'NOT_FOUND', httpStatus: 404 });
     expect(calls).not.toContain('saveReceipt');
@@ -193,7 +230,7 @@ describe('ChatbotRequestCommandsService', () => {
       }),
     );
     const error = await failure(
-      new ChatbotRequestCommandsService(store).execute(
+      new ChatbotRequestCommandsService(store, noResolver).execute(
         input({ expectedVersion: 4 }),
       ),
     );
@@ -219,7 +256,7 @@ describe('ChatbotRequestCommandsService', () => {
       claimedAt: new Date('2026-11-10T16:00:00Z'),
     });
     const { store } = fakeStore(claimed);
-    const service = new ChatbotRequestCommandsService(store);
+    const service = new ChatbotRequestCommandsService(store, noResolver);
 
     const error = await failure(
       service.execute(
@@ -249,7 +286,10 @@ describe('ChatbotRequestCommandsService', () => {
 
   it('cancels with the staff reason and closes the request', async () => {
     const { store, applied } = fakeStore(row());
-    const view = await new ChatbotRequestCommandsService(store).execute(
+    const view = await new ChatbotRequestCommandsService(
+      store,
+      noResolver,
+    ).execute(
       input({
         command: {
           kind: 'cancel',
@@ -277,7 +317,7 @@ describe('ChatbotRequestCommandsService', () => {
     const denied = fakeStore(held);
     await expect(
       failure(
-        new ChatbotRequestCommandsService(denied.store).execute(
+        new ChatbotRequestCommandsService(denied.store, noResolver).execute(
           input({ expectedVersion: 2, command: { kind: 'release' } }),
         ),
       ),
@@ -285,7 +325,7 @@ describe('ChatbotRequestCommandsService', () => {
 
     const allowed = fakeStore(held);
     await expect(
-      new ChatbotRequestCommandsService(allowed.store).execute(
+      new ChatbotRequestCommandsService(allowed.store, noResolver).execute(
         input({
           expectedVersion: 2,
           actorCanReassign: true,
@@ -295,27 +335,249 @@ describe('ChatbotRequestCommandsService', () => {
     ).resolves.toMatchObject({ status: 'NEW', assignee: null, version: 3 });
   });
 
-  it('keeps resolve of a DECISION on a typed ACTION_NOT_ALLOWED until unit 3 wires it', async () => {
-    const { store, calls } = fakeStore(
-      row({ kind: 'DECISION', subtype: 'RESTOCK' }),
-    );
-    const error = await failure(
-      new ChatbotRequestCommandsService(store).execute(
-        input({ command: { kind: 'resolve', action: 'PROVIDE' } }),
-      ),
-    );
-    expect(error).toMatchObject({
-      code: 'ACTION_NOT_ALLOWED',
-      httpStatus: 422,
-      current: { version: 1, status: 'NEW', claimedBy: null },
+  describe('resolve (unit 3)', () => {
+    const decision = (over: Partial<ChatbotRequestRow> = {}) =>
+      row({
+        kind: 'DECISION',
+        subtype: 'RESTOCK',
+        humanDecisionId: 'hd-1',
+        ...over,
+      });
+    const restock = (over: Partial<StaffCommandInput> = {}) =>
+      input({
+        command: {
+          kind: 'resolve',
+          action: { type: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 },
+        },
+        ...over,
+      });
+    const okResolver = () => {
+      const seen: unknown[] = [];
+      const resolver: ChatbotRequestResolver = {
+        resolve: (call) => {
+          seen.push(call);
+          return Promise.resolve();
+        },
+      };
+      return { resolver, seen };
+    };
+
+    it('closes the request, then calls the wrapped use case, then refreshes the group', async () => {
+      const { store, calls, applied } = fakeStore(decision());
+      const { resolver, seen } = okResolver();
+      const view = await new ChatbotRequestCommandsService(
+        store,
+        resolver,
+      ).execute(restock({ actorIsSuperAdmin: true }));
+
+      expect(calls).toEqual([
+        'begin',
+        expect.stringContaining('lockKey'),
+        'findReceipt',
+        'findActor',
+        'lockZoneOf',
+        'lockRequest',
+        'applyPatch:req-1',
+        'refreshGroups:525512345678',
+        'saveReceipt',
+        'commit',
+      ]);
+      expect(view).toMatchObject({ status: 'RESOLVED', version: 2 });
+      expect(applied[0]).toMatchObject({
+        patch: {
+          status: 'RESOLVED',
+          assigneeUserId: ANA.userId,
+          resolution: { action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 },
+        },
+        event: {
+          type: 'RESOLVED',
+          data: { action: 'PROVIDE_RESTOCK_ESTIMATE' },
+        },
+      });
+      expect(seen).toEqual([
+        expect.objectContaining({
+          actor: ANA,
+          actorIsSuperAdmin: true,
+          resolutionKey: '5f0b2c1e-6a43-4f7e-9c1d-2b3a4c5d6e7f',
+        }),
+      ]);
     });
-    expect(calls).not.toContain('apply');
+
+    it('refuses a non-decision and an action of another subtype without writing', async () => {
+      const clarification = fakeStore(row());
+      expect(
+        await failure(
+          new ChatbotRequestCommandsService(
+            clarification.store,
+            noResolver,
+          ).execute(restock()),
+        ),
+      ).toMatchObject({
+        code: 'ACTION_NOT_ALLOWED',
+        httpStatus: 422,
+        current: { version: 1, status: 'NEW', claimedBy: null },
+      });
+
+      const wrongFamily = fakeStore(decision());
+      const error = await failure(
+        new ChatbotRequestCommandsService(
+          wrongFamily.store,
+          noResolver,
+        ).execute(
+          input({
+            command: {
+              kind: 'resolve',
+              action: { type: 'CONFIRM_RECEIPT', amountCents: 100 },
+            },
+          }),
+        ),
+      );
+      expect(error).toMatchObject({ code: 'ACTION_NOT_ALLOWED' });
+      for (const { calls } of [clarification, wrongFamily]) {
+        expect(calls.some((call) => call.startsWith('applyPatch'))).toBe(false);
+      }
+    });
+
+    it('answers the staff conflict codes before touching the wrapped row', async () => {
+      const held = fakeStore(
+        decision({
+          status: 'IN_PROGRESS',
+          assigneeUserId: LUIS.userId,
+          assigneeDisplayName: LUIS.displayName,
+          claimedAt: new Date(),
+        }),
+      );
+      expect(
+        await failure(
+          new ChatbotRequestCommandsService(held.store, noResolver).execute(
+            restock(),
+          ),
+        ),
+      ).toMatchObject({ code: 'REQUEST_CLAIMED_BY_OTHER', httpStatus: 409 });
+      const stale = fakeStore(decision({ version: 4 }));
+      expect(
+        await failure(
+          new ChatbotRequestCommandsService(stale.store, noResolver).execute(
+            restock(),
+          ),
+        ),
+      ).toMatchObject({ code: 'VERSION_CONFLICT', httpStatus: 409 });
+    });
+
+    it('adds the request state to an error the wrapped use case threw', async () => {
+      const { store } = fakeStore(decision());
+      const resolver: ChatbotRequestResolver = {
+        resolve: () =>
+          Promise.reject(
+            new ChatbotRequestCommandError('VERSION_CONFLICT', 409),
+          ),
+      };
+      const error = await failure(
+        new ChatbotRequestCommandsService(store, resolver).execute(restock()),
+      );
+      expect(error).toMatchObject({
+        code: 'VERSION_CONFLICT',
+        current: { version: 1, status: 'NEW' },
+      });
+    });
+
+    describe('delivery zone', () => {
+      const zoneRow = (id: string, key: string, over = {}) =>
+        row({
+          id,
+          kind: 'DECISION',
+          subtype: 'DELIVERY_ZONE',
+          customerKey: key,
+          deliveryZoneRequestId: `dzr-${id}`,
+          ...over,
+        });
+      const impact = { requests: 3, customers: 3, setVersion: 7 };
+      const approve = (expectedZoneSetVersion: number) =>
+        input({
+          command: {
+            kind: 'resolve',
+            action: {
+              type: 'APPROVE_DELIVERY_ZONE',
+              settings: { type: 'FREE', surchargeCents: null, etaDays: 2 },
+              expectedZoneSetVersion,
+            },
+          },
+        });
+
+      it('answers ZONE_SET_CHANGED with the new zoneImpact and writes nothing', async () => {
+        const main = zoneRow('req-1', '5200000001');
+        const { store, calls } = fakeStore(main, { siblings: [main], impact });
+        const error = await failure(
+          new ChatbotRequestCommandsService(store, noResolver).execute(
+            approve(6),
+          ),
+        );
+        expect(error).toMatchObject({
+          code: 'ZONE_SET_CHANGED',
+          httpStatus: 409,
+          current: { version: 1, status: 'NEW', zoneImpact: impact },
+        });
+        expect(calls.some((call) => call.startsWith('applyPatch'))).toBe(false);
+      });
+
+      it('closes every sibling with SIBLING_RESOLVED and refreshes groups in sorted order', async () => {
+        const main = zoneRow('req-2', '5200000009');
+        const siblings = [
+          zoneRow('req-1', '5200000005'),
+          main,
+          zoneRow('req-3', '5200000001'),
+        ];
+        const { store, calls, applied } = fakeStore(main, { siblings, impact });
+        const { resolver } = okResolver();
+        await new ChatbotRequestCommandsService(store, resolver).execute(
+          input({
+            requestId: 'req-2',
+            command: approve(7).command,
+          }),
+        );
+
+        expect(calls.filter((call) => call.startsWith('applyPatch'))).toEqual([
+          'applyPatch:req-2',
+          'applyPatch:req-1',
+          'applyPatch:req-3',
+        ]);
+        expect(calls).toContain(
+          'refreshGroups:5200000009,5200000005,5200000001',
+        );
+        expect(applied[1]).toMatchObject({
+          patch: {
+            status: 'RESOLVED',
+            resolution: { action: 'SIBLING_RESOLVED', viaRequestId: 'req-2' },
+          },
+          event: {
+            type: 'RESOLVED',
+            data: { action: 'SIBLING_RESOLVED', viaRequestId: 'req-2' },
+          },
+        });
+      });
+    });
+  });
+
+  it('reads the zone impact and maps missing and non-zone requests', async () => {
+    const impact = { requests: 2, customers: 2, setVersion: 3 };
+    const zone = fakeStore(row(), { siblings: [], impact });
+    await expect(
+      new ChatbotRequestCommandsService(zone.store, noResolver).zoneImpact('x'),
+    ).resolves.toEqual(impact);
+    const plain = fakeStore(row());
+    expect(
+      await failure(
+        new ChatbotRequestCommandsService(plain.store, noResolver).zoneImpact(
+          'x',
+        ),
+      ),
+    ).toMatchObject({ code: 'ACTION_NOT_ALLOWED', httpStatus: 422 });
   });
 
   it('answers 401 when the actor account no longer exists', async () => {
     const { store } = fakeStore(row());
     const error = await failure(
-      new ChatbotRequestCommandsService(store).execute(
+      new ChatbotRequestCommandsService(store, noResolver).execute(
         input({ actorUserId: 'u-ghost' }),
       ),
     );

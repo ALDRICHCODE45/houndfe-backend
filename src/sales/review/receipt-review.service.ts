@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { SalesService } from '../sales.service';
 import {
   InvalidReceiptCursorError,
@@ -15,6 +15,7 @@ import {
   SALE_REPOSITORY,
   type ISaleRepository,
 } from '../domain/sale.repository';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ConfirmReceiptDto } from './dto/confirm-receipt.dto';
 import type { RejectReceiptDto } from './dto/reject-receipt.dto';
@@ -74,6 +75,9 @@ export class ReceiptReviewService {
     private readonly saleRepository: ISaleRepository,
     private readonly tenantPrisma: TenantPrismaService,
     private readonly outboxWriter: OutboxWriterService,
+    // Optional so specs that build the service alone keep their behavior; the
+    // module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
   ) {}
 
   /**
@@ -150,6 +154,8 @@ export class ReceiptReviewService {
     this.ensureSaleReviewable(receipt);
 
     return this.saleRepository.runInTransaction(async () => {
+      // Lock order: the wrapping request before the receipt row (unit 3).
+      await this.wrapper?.lockLegacy({ receiptEvidenceId: receiptId });
       const confirmedAt = new Date();
       const claimed = await this.receiptReviewRepository.markConfirmed(
         receiptId,
@@ -178,6 +184,12 @@ export class ReceiptReviewService {
         paymentResult,
         confirmedAt,
       });
+      await this.wrapper?.closeLegacy(
+        { receiptEvidenceId: receiptId },
+        { userId: reviewerUserId },
+        'CONFIRM_RECEIPT',
+        { amountCents: dto.amountCents },
+      );
 
       return paymentResult;
     });
@@ -204,6 +216,7 @@ export class ReceiptReviewService {
     );
 
     await this.saleRepository.runInTransaction(async () => {
+      await this.wrapper?.lockLegacy({ receiptEvidenceId: receiptId });
       const claimed = await this.receiptReviewRepository.markRejected(
         receiptId,
         tenantId,
@@ -217,6 +230,12 @@ export class ReceiptReviewService {
         reviewerUserId,
         reason: dto.reason,
       });
+      await this.wrapper?.closeLegacy(
+        { receiptEvidenceId: receiptId },
+        { userId: reviewerUserId },
+        'REJECT_RECEIPT',
+        { reason: dto.reason },
+      );
     });
   }
 

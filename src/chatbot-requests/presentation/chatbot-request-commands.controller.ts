@@ -6,6 +6,8 @@
  *   POST /chatbot-requests/:id/cancel    read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/reassign  read:ChatbotRequest +
  *                                        update:ChatbotRequestAssignment
+ *   POST /chatbot-requests/:id/resolve   read + update:ChatbotRequest
+ *   GET  /chatbot-requests/:id/zone-impact  read:ChatbotRequest
  *
  * Releasing or cancelling someone else's request also needs
  * `update:ChatbotRequestAssignment`; that comes from the guard-built ability
@@ -17,6 +19,7 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  Get,
   Header,
   HttpCode,
   HttpStatus,
@@ -47,6 +50,7 @@ import {
   ReassignDto,
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
+import { parseResolveBody } from './chatbot-request-resolve.body';
 
 type StaffRequest = Request & {
   user?: AuthenticatedUser;
@@ -123,6 +127,32 @@ export class ChatbotRequestCommandsController {
     });
   }
 
+  /**
+   * Flat body per subtype (§12.6). The wrapped use case gets the
+   * Idempotency-Key as its own resolution id and `expectedVersion = 1` (R4).
+   */
+  @Post(':id/resolve')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  resolve(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() raw: unknown,
+    @Req() req: StaffRequest,
+  ) {
+    const { expectedVersion, action } = parseResolveBody(raw, key);
+    return this.run(req, id, key, expectedVersion, { kind: 'resolve', action });
+  }
+
+  /** What approving or rejecting the zone would settle (R9, §3.8). */
+  @Get(':id/zone-impact')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'])
+  zoneImpact(@Param('id', ParseUUIDPipe) id: string) {
+    return this.commands.zoneImpact(id);
+  }
+
   private async run(
     req: StaffRequest,
     requestId: string,
@@ -136,6 +166,7 @@ export class ChatbotRequestCommandsController {
       requestId,
       actorUserId: req.user.userId,
       actorCanReassign: req.ability.can('update', 'ChatbotRequestAssignment'),
+      actorIsSuperAdmin: req.user.isSuperAdmin === true,
       idempotencyKey,
       expectedVersion,
       command,

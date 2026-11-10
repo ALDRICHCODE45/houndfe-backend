@@ -10,6 +10,7 @@
  * and on InventoryModule (stock journal) for the charge/cancel stock writes.
  */
 import { Module } from '@nestjs/common';
+import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request-wrapper.module';
 import { CashRegisterModule } from '../cash-register/cash-register.module';
 import { SalesController } from './sales.controller';
 import { SalesCatalogController } from './sales-catalog.controller';
@@ -53,6 +54,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     PromotionsModule,
     AdminPaymentMethodModule,
     CashRegisterModule,
+    ChatbotRequestWrapperModule,
   ],
   controllers: [
     SalesController,
@@ -75,6 +77,6 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     },
     SaleEventListener,
   ],
-  exports: [SalesService, SALE_REPOSITORY],
+  exports: [SalesService, SALE_REPOSITORY, ReceiptReviewService],
 })
 export class SalesModule {}

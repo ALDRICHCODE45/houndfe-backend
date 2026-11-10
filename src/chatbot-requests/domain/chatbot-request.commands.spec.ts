@@ -6,6 +6,7 @@ import {
   cancelByCustomer,
   cancelByStaff,
   claim,
+  closeWrapped,
   displayStatus,
   reassign,
   release,
@@ -56,6 +57,7 @@ const REQUEST_COLUMNS = new Set([
   'staffCancelReason',
   'closedAt',
   'nextSlaCheckAt',
+  'resolution',
 ]);
 
 describe('claim', () => {
@@ -320,6 +322,67 @@ describe('resolve', () => {
       'VERSION_CONFLICT',
     );
     expect(fail(resolve(request({ status: 'CANCELLED' }), args)).code).toBe(
+      'REQUEST_CLOSED',
+    );
+  });
+});
+
+describe('resolve with a resolution (unit 3)', () => {
+  it('stores the chosen option on the request without touching the event data', () => {
+    const resolution = { action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 };
+    const { patch, event } = ok(
+      resolve(request(), {
+        actor: ana,
+        expectedVersion: 3,
+        action: resolution.action,
+        resolution,
+        now,
+      }),
+    );
+    expect(patch.resolution).toEqual(resolution);
+    expect(event.data).toEqual({ action: 'PROVIDE_RESTOCK_ESTIMATE' });
+  });
+});
+
+describe('closeWrapped (legacy routes and zone siblings, §2.4, R9)', () => {
+  const cmd = {
+    actor: ana,
+    action: 'SIBLING_RESOLVED',
+    resolution: { action: 'SIBLING_RESOLVED', viaRequestId: 'r-1' },
+    data: { viaRequestId: 'r-1' },
+    now,
+  };
+
+  it('closes a NEW request with an implicit claim and no version check', () => {
+    const { patch, event } = ok(closeWrapped(request({ version: 9 }), cmd));
+    expect(patch).toMatchObject({
+      status: 'RESOLVED',
+      version: 10,
+      assigneeUserId: 'u-ana',
+      claimedAt: now,
+      resolvedByActorId: 'u-ana',
+      resolution: cmd.resolution,
+    });
+    expect(event).toMatchObject({
+      type: 'RESOLVED',
+      fromStatus: 'NEW',
+      toStatus: 'RESOLVED',
+      version: 10,
+      data: { action: 'SIBLING_RESOLVED', viaRequestId: 'r-1' },
+    });
+  });
+
+  it('closes a request held by someone else and keeps that assignee', () => {
+    const { patch } = ok(closeWrapped(taken({ assignee: juan }), cmd));
+    expect(patch.status).toBe('RESOLVED');
+    expect(patch).not.toHaveProperty('assigneeUserId');
+  });
+
+  it('refuses a request that is already closed', () => {
+    expect(fail(closeWrapped(request({ status: 'RESOLVED' }), cmd)).code).toBe(
+      'REQUEST_CLOSED',
+    );
+    expect(fail(closeWrapped(request({ status: 'CANCELLED' }), cmd)).code).toBe(
       'REQUEST_CLOSED',
     );
   });

@@ -71,6 +71,8 @@ export interface ChatbotRequestPatch {
   staffCancelReason?: StaffCancelReason;
   closedAt?: Date;
   nextSlaCheckAt?: null;
+  /** Chosen option and its parameters, staff-visible only (§2.1). */
+  resolution?: Record<string, unknown>;
 }
 
 /** Row for the append-only `chatbot_request_events` table (§6.2). */
@@ -280,27 +282,17 @@ export function reassign(
   );
 }
 
-/**
- * Only `kind = DECISION` resolves (§12.6). Resolving a NEW request claims it
- * implicitly in the same write (§2.2). The wrapped repository is called by the
- * application with its own expected version (R4).
- */
-export function resolve(
+/** Everything `resolve` and `closeWrapped` write when a decision closes. */
+function resolved(
   state: ChatbotRequestState,
   cmd: {
     actor: StaffActor;
-    expectedVersion: number;
     action: string;
     now: Date;
+    resolution?: Record<string, unknown>;
+    data?: Record<string, unknown>;
   },
 ): CommandResult {
-  if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
-  if (state.kind !== 'DECISION')
-    return reject(state, 'ACTION_NOT_ALLOWED', 422);
-  if (heldByOther(state, cmd.actor))
-    return reject(state, 'REQUEST_CLAIMED_BY_OTHER', 409);
-  if (state.version !== cmd.expectedVersion)
-    return reject(state, 'VERSION_CONFLICT', 409);
   const implicitClaim =
     state.status === 'NEW'
       ? {
@@ -319,9 +311,60 @@ export function resolve(
       resolvedByDisplayName: cmd.actor.displayName,
       closedAt: cmd.now,
       nextSlaCheckAt: null,
+      ...(cmd.resolution ? { resolution: cmd.resolution } : {}),
     },
-    { type: 'RESOLVED', ...userEvent(cmd.actor), data: { action: cmd.action } },
+    {
+      type: 'RESOLVED',
+      ...userEvent(cmd.actor),
+      data: { action: cmd.action, ...cmd.data },
+    },
   );
+}
+
+/**
+ * Only `kind = DECISION` resolves (§12.6). Resolving a NEW request claims it
+ * implicitly in the same write (§2.2). The wrapped repository is called by the
+ * application with its own expected version (R4).
+ */
+export function resolve(
+  state: ChatbotRequestState,
+  cmd: {
+    actor: StaffActor;
+    expectedVersion: number;
+    action: string;
+    now: Date;
+    resolution?: Record<string, unknown>;
+  },
+): CommandResult {
+  if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
+  if (state.kind !== 'DECISION')
+    return reject(state, 'ACTION_NOT_ALLOWED', 422);
+  if (heldByOther(state, cmd.actor))
+    return reject(state, 'REQUEST_CLAIMED_BY_OTHER', 409);
+  if (state.version !== cmd.expectedVersion)
+    return reject(state, 'VERSION_CONFLICT', 409);
+  return resolved(state, cmd);
+}
+
+/**
+ * Closes an open request whose wrapped row was resolved by something other
+ * than its own `resolve` command: the legacy staff routes (§2.4) and the
+ * sibling requests of a shared zone validation (R9). The wrapped row is the
+ * source of truth, so this takes no `expectedVersion` and ignores who holds
+ * the request; it only refuses a request that is already closed.
+ */
+export function closeWrapped(
+  state: ChatbotRequestState,
+  cmd: {
+    actor: StaffActor;
+    action: string;
+    now: Date;
+    resolution: Record<string, unknown>;
+    data: Record<string, unknown>;
+  },
+): CommandResult {
+  if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
+  return resolved(state, cmd);
 }
 
 /**

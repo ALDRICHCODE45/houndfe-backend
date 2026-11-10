@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request-wrapper.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationConfigModule } from '../notification-config/notification-config.module';
@@ -27,7 +28,13 @@ import { PrismaReceiptReviewerLookup } from './infrastructure/prisma-receipt-rev
  * (JWT + tenant + read ReceiptEvidence), streamed by the backend.
  */
 @Module({
-  imports: [DatabaseModule, AuthModule, NotificationConfigModule, OutboxModule],
+  imports: [
+    DatabaseModule,
+    AuthModule,
+    NotificationConfigModule,
+    OutboxModule,
+    ChatbotRequestWrapperModule,
+  ],
   controllers: [ReceiptFileController],
   providers: [
     ReceiptUploadService,

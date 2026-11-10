@@ -91,6 +91,7 @@
  */
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   RESTOCK_SOURCE,
@@ -191,6 +192,9 @@ function fail(code: HumanDecisionReviewResolveErrorCode): never {
 const NESTED_TRANSACTION_ERROR =
   'PrismaHumanDecisionReviewResolveRepository.resolve must be called outside an ambient transaction';
 
+const AMBIENT_TRANSACTION_REQUIRED_ERROR =
+  'PrismaHumanDecisionReviewResolveRepository.resolveInAmbientTransaction must be called inside an ambient transaction';
+
 /**
  * Value-free programmer-context error for an unexpected `updateMany` count.
  * The CAS is scoped by the primary-key `id`, so it can only affect 0 or 1 row;
@@ -215,6 +219,9 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     @Optional()
     @Inject(HUMAN_DECISION_REVIEW_RESOLVE_CLOCK)
     private readonly clock?: HumanDecisionReviewResolveClock,
+    // Optional so specs that build the repository alone keep their behavior;
+    // the module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
   ) {}
 
   async resolve(
@@ -225,7 +232,27 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     if (this.tenantPrisma.isInTransaction()) {
       throw new Error(NESTED_TRANSACTION_ERROR);
     }
+    return this.run(command);
+  }
 
+  /**
+   * The chatbot-request `resolve` command (unit 3) joins its own READ
+   * COMMITTED transaction: it locked the common request first and closes it
+   * itself. Same logic and errors as `resolve`; only the guard is inverted, so
+   * calling it outside a transaction is still a server bug.
+   */
+  resolveInAmbientTransaction(
+    command: ResolveHumanDecisionCommand,
+  ): Promise<HumanDecisionReviewResolveResult> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(AMBIENT_TRANSACTION_REQUIRED_ERROR);
+    }
+    return this.run(command);
+  }
+
+  private async run(
+    command: ResolveHumanDecisionCommand,
+  ): Promise<HumanDecisionReviewResolveResult> {
     // Tenant is ALWAYS from the CLS context, never the command, and is
     // resolved unconditionally so a tenantless superadmin fails closed. The
     // exact decision `type` is inferred from the action (never supplied).
@@ -240,6 +267,8 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         await this.assertTenantMembership(db, tenantId, command.actorUserId);
       }
 
+      // Lock order: the wrapping request before the decision row (unit 3).
+      await this.wrapper?.lockLegacy({ humanDecisionId: command.decisionId });
       const current = await this.findDecisionState(
         db,
         tenantId,
@@ -252,6 +281,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
 
       if (current.status === 'RESOLVED') {
         this.assertExactReplay(current, command);
+        await this.closeWrapping(command, actor);
         return {
           status: 'replayed',
           decision: await this.readProjection(
@@ -280,6 +310,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
       });
 
       if (updated.count === 1) {
+        await this.closeWrapping(command, actor);
         return {
           status: 'resolved',
           decision: await this.readProjection(
@@ -322,6 +353,18 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         ),
       };
     });
+  }
+
+  /** Closes the wrapping chatbot request in the same transaction (§2.4). */
+  private async closeWrapping(
+    command: ResolveHumanDecisionCommand,
+    actor: ReviewerActor,
+  ): Promise<void> {
+    await this.wrapper?.closeLegacy(
+      { humanDecisionId: command.decisionId },
+      { userId: actor.id, displayName: actor.name },
+      command.action,
+    );
   }
 
   /** Load the persisted reviewer identity; fail closed when unusable. */

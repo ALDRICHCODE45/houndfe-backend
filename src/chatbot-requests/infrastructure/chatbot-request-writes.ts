@@ -5,7 +5,14 @@
  */
 import { Prisma } from '@prisma/client';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
+import {
+  ChatbotRequestCommandError,
+  type ChatbotRequestRow,
+} from '../application/chatbot-request-commands.service';
+import type {
+  ChatbotRequestEventDraft,
+  ChatbotRequestPatch,
+} from '../domain/chatbot-request.commands';
 
 export type TenantClient = ReturnType<TenantPrismaService['getClient']>;
 
@@ -123,4 +130,150 @@ export async function assertTenantLinks(
       throw new ChatbotRequestCommandError('NOT_FOUND', 404);
     }
   }
+}
+
+/** The `chatbot_requests` columns a command reads, shared by every lock. */
+const REQUEST_ROW = Prisma.sql`
+  SELECT cr."id", cr."folio", cr."kind"::text AS "kind",
+         cr."subtype"::text AS "subtype", cr."status"::text AS "status",
+         cr."version", cr."customerKey", cr."assigneeUserId",
+         cr."assigneeDisplayName", cr."claimedAt", cr."overdueAt", cr."closedAt",
+         cr."humanDecisionId", cr."deliveryZoneRequestId", cr."receiptEvidenceId"
+  FROM "chatbot_requests" cr`;
+
+/** `SELECT … FOR UPDATE` on one tenant request; `null` for a missing id. */
+export async function lockRequestRow(
+  tx: TenantClient,
+  tenantId: string,
+  id: string,
+): Promise<ChatbotRequestRow | null> {
+  const rows = await tx.$queryRaw<ChatbotRequestRow[]>(Prisma.sql`
+    ${REQUEST_ROW}
+    WHERE cr."tenantId" = ${tenantId} AND cr."id" = ${id}
+    FOR UPDATE OF cr`);
+  return rows[0] ?? null;
+}
+
+export type WrappedLink =
+  | { humanDecisionId: string }
+  | { receiptEvidenceId: string }
+  | { validationId: string };
+
+/**
+ * Locks the OPEN requests that wrap a legacy row (id order, §12.11). A zone
+ * validation wraps one request per customer that asked for the postal code.
+ * Closed requests are skipped: they never change again.
+ */
+export async function lockOpenWrapping(
+  tx: TenantClient,
+  tenantId: string,
+  link: WrappedLink,
+): Promise<ChatbotRequestRow[]> {
+  const where =
+    'humanDecisionId' in link
+      ? Prisma.sql`cr."humanDecisionId" = ${link.humanDecisionId}`
+      : 'receiptEvidenceId' in link
+        ? Prisma.sql`cr."receiptEvidenceId" = ${link.receiptEvidenceId}`
+        : Prisma.sql`cr."deliveryZoneRequestId" IN (
+            SELECT dzr."id" FROM "delivery_zone_requests" dzr
+            WHERE dzr."tenantId" = ${tenantId}
+              AND dzr."validationId" = ${link.validationId})`;
+  return tx.$queryRaw<ChatbotRequestRow[]>(Prisma.sql`
+    ${REQUEST_ROW}
+    WHERE cr."tenantId" = ${tenantId} AND ${where}
+      AND cr."status" IN ('NEW', 'IN_PROGRESS')
+    ORDER BY cr."id"
+    FOR UPDATE OF cr`);
+}
+
+/** CAS patch plus its audit event, on a request row the caller has locked. */
+export async function applyRequestPatch(
+  tx: TenantClient,
+  tenantId: string,
+  row: Pick<ChatbotRequestRow, 'id' | 'version'>,
+  patch: ChatbotRequestPatch,
+  event: ChatbotRequestEventDraft,
+): Promise<void> {
+  const { resolution, ...columns } = patch;
+  // The row is locked, so the CAS cannot lose; a miss is a broken invariant.
+  const { count } = await tx.chatbotRequest.updateMany({
+    where: { tenantId, id: row.id, version: row.version },
+    data: {
+      ...columns,
+      ...(resolution
+        ? { resolution: resolution as Prisma.InputJsonObject }
+        : {}),
+    },
+  });
+  if (count !== 1) throw new Error('chatbot request CAS missed a locked row');
+  await tx.chatbotRequestEvent.create({
+    data: {
+      ...event,
+      tenantId,
+      requestId: row.id,
+      data: event.data as Prisma.InputJsonObject,
+    },
+  });
+}
+
+/**
+ * Refreshes each customer's group in sorted `customerKey` order (lock-order
+ * rule 3). Call it after every request row of the transaction is written.
+ */
+export async function refreshCustomerGroups(
+  tx: TenantClient,
+  tenantId: string,
+  customerKeys: Iterable<string>,
+): Promise<void> {
+  for (const key of [...new Set(customerKeys)].sort()) {
+    await refreshCustomerGroup(tx, tenantId, key);
+  }
+}
+
+export interface ZoneImpact {
+  requests: number;
+  customers: number;
+  setVersion: number;
+}
+
+/**
+ * What resolving a zone validation settles (R9). `setVersion` counts every
+ * time the set changed: each request that ever joined (+1) and each one that
+ * left by cancelling (+1). It only grows, so a requester that arrived or
+ * withdrew after the preview always yields a different number, and it needs
+ * no column on `delivery_zone_validations`.
+ */
+export async function readZoneImpact(
+  tx: TenantClient,
+  tenantId: string,
+  validationId: string,
+): Promise<ZoneImpact> {
+  const [row] = await tx.$queryRaw<ZoneImpact[]>(Prisma.sql`
+    SELECT
+      (count(*) FILTER (WHERE cr."status" IN ('NEW', 'IN_PROGRESS')))::int AS "requests",
+      (count(DISTINCT cr."customerKey")
+        FILTER (WHERE cr."status" IN ('NEW', 'IN_PROGRESS')))::int AS "customers",
+      (count(*) + count(*) FILTER (WHERE cr."status" = 'CANCELLED'))::int AS "setVersion"
+    FROM "chatbot_requests" cr
+    JOIN "delivery_zone_requests" dzr ON dzr."id" = cr."deliveryZoneRequestId"
+    WHERE cr."tenantId" = ${tenantId} AND dzr."tenantId" = ${tenantId}
+      AND dzr."validationId" = ${validationId}`);
+  return row;
+}
+
+/** Zone validation and postal code behind a DELIVERY_ZONE request, if any. */
+export async function findZoneOf(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+): Promise<{ validationId: string; zipCode: string } | null> {
+  const rows = await tx.$queryRaw<{ validationId: string; zipCode: string }[]>(
+    Prisma.sql`
+    SELECT dzr."validationId", dzr."zipCode"
+    FROM "chatbot_requests" cr
+    JOIN "delivery_zone_requests" dzr ON dzr."id" = cr."deliveryZoneRequestId"
+    WHERE cr."tenantId" = ${tenantId} AND cr."id" = ${requestId}
+      AND dzr."tenantId" = ${tenantId} AND dzr."validationId" IS NOT NULL`,
+  );
+  return rows[0] ?? null;
 }

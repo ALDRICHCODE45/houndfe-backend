@@ -55,3 +55,30 @@ export function canonicalPhone(
   const key = cc + national;
   return key.length >= 8 && key.length <= 15 ? key : null;
 }
+
+/**
+ * The `(phoneCountryCode, phone)` pairs a stored `Customer` can hold for one
+ * canonical key. `Customer` stores digits as typed, so `52` + `5512345678` and
+ * `521` + `5512345678` are the same person. The result feeds an indexed
+ * `IN (…)` lookup (`customers (tenantId, phoneCountryCode, phone)`); callers
+ * still compare `canonicalPhone` of each hit, so a loose variant never links a
+ * different number. Empty when the input has no canonical form.
+ */
+export function phoneLookupVariants(
+  countryCode: string,
+  phone: string,
+): { countryCodes: string[]; phones: string[] } {
+  const key = canonicalPhone(countryCode, phone);
+  if (!key) return { countryCodes: [], phones: [] };
+  const digits = countryCode.replace(/\D/g, '');
+  const cc = digits === '521' ? '52' : digits;
+  const national = key.slice(cc.length);
+  const countryCodes = cc === '52' ? ['52', '521'] : [cc];
+  const phones =
+    cc === '52'
+      ? [national, `1${national}`, `52${national}`, `521${national}`]
+      : cc === '1'
+        ? [national, `1${national}`]
+        : [national];
+  return { countryCodes, phones };
+}

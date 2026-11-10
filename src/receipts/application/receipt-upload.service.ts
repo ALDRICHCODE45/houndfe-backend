@@ -1,6 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   assertReceiptFile,
@@ -83,6 +84,9 @@ export class ReceiptUploadService {
       'find'
     >,
     private readonly outboxWriter: OutboxWriterService,
+    // Optional so specs that build the service alone keep their behavior; the
+    // module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
   ) {}
 
   async upload(input: {
@@ -232,6 +236,7 @@ export class ReceiptUploadService {
     return this.tenantPrisma.runInTransaction(async () => {
       const prisma = this.tenantPrisma.getClient();
       const row = await prisma.receiptEvidence.create({ data });
+      await this.wrapper?.wrapReceipt({ id: row.id, saleId: data.saleId });
 
       const config = await this.notificationConfig.find();
       if (

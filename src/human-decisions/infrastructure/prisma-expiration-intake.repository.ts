@@ -13,8 +13,9 @@
  * closed on a null unit or variant metadata inconsistent with `variantId`; the
  * out-of-scope DTO must render it as the immutable `PENDING`/v1 receipt.
  */
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   hashExpirationIntakeIdentity,
@@ -99,7 +100,12 @@ function toPersistedDecision(
 
 @Injectable()
 export class PrismaExpirationIntakeRepository implements IExpirationIntakeRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    // Optional so specs that build the repository alone keep their behavior;
+    // the module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
+  ) {}
 
   async submit(input: ExpirationIntakeInput): Promise<ExpirationIntakeResult> {
     if (this.tenantPrisma.isInTransaction()) {
@@ -157,6 +163,13 @@ export class PrismaExpirationIntakeRepository implements IExpirationIntakeReposi
             status: 'PENDING',
             version: 1,
           },
+        });
+        await this.wrapper?.wrapHumanDecision({
+          id: created.id,
+          type: 'EXPIRATION',
+          productId: created.productId,
+          productName: created.productName,
+          variantId: created.variantId,
         });
         return { status: 'created', request: toPersistedDecision(created) };
       });

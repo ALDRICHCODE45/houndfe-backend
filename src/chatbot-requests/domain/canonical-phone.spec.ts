@@ -1,4 +1,4 @@
-import { canonicalPhone } from './canonical-phone';
+import { canonicalPhone, phoneLookupVariants } from './canonical-phone';
 
 describe('canonicalPhone (R1)', () => {
   it.each([
@@ -63,5 +63,33 @@ describe('canonicalPhone (R1)', () => {
   it('rejects non-string input without throwing', () => {
     expect(canonicalPhone(52 as unknown as string, '5512345678')).toBeNull();
     expect(canonicalPhone('52', null as unknown as string)).toBeNull();
+  });
+});
+
+describe('phoneLookupVariants (R1: stored customer phones)', () => {
+  it('covers every stored form of a Mexican mobile number', () => {
+    const { countryCodes, phones } = phoneLookupVariants('52', '5215512345678');
+    expect(countryCodes.sort()).toEqual(['52', '521']);
+    expect(phones.sort()).toEqual(
+      ['15512345678', '5215512345678', '5512345678', '525512345678'].sort(),
+    );
+  });
+
+  it('keeps one form for other countries and for NANP', () => {
+    expect(phoneLookupVariants('57', '3001234567')).toEqual({
+      countryCodes: ['57'],
+      phones: ['3001234567'],
+    });
+    expect(phoneLookupVariants('1', '15555550123').phones.sort()).toEqual([
+      '15555550123',
+      '5555550123',
+    ]);
+  });
+
+  it('is empty when the phone has no canonical form', () => {
+    expect(phoneLookupVariants('52', 'abc')).toEqual({
+      countryCodes: [],
+      phones: [],
+    });
   });
 });

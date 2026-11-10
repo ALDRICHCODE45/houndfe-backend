@@ -66,12 +66,16 @@ class StubGuard implements CanActivate {
 describe('ChatbotRequestCommandsController', () => {
   let app: INestApplication;
   const execute = jest.fn();
+  const zoneImpact = jest.fn();
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [ChatbotRequestCommandsController],
       providers: [
-        { provide: ChatbotRequestCommandsService, useValue: { execute } },
+        {
+          provide: ChatbotRequestCommandsService,
+          useValue: { execute, zoneImpact },
+        },
       ],
     })
       .overrideGuard(JwtAuthGuard)
@@ -92,6 +96,7 @@ describe('ChatbotRequestCommandsController', () => {
 
   beforeEach(() => {
     execute.mockReset().mockResolvedValue(VIEW);
+    zoneImpact.mockReset();
     canReassign = false;
     denyPermissions = false;
   });
@@ -137,6 +142,14 @@ describe('ChatbotRequestCommandsController', () => {
       ],
     ],
     [
+      'resolve',
+      [
+        ['read', 'ChatbotRequest'],
+        ['update', 'ChatbotRequest'],
+      ],
+    ],
+    ['zoneImpact', [['read', 'ChatbotRequest']]],
+    [
       'reassign',
       [
         ['read', 'ChatbotRequest'],
@@ -157,6 +170,7 @@ describe('ChatbotRequestCommandsController', () => {
       requestId: ID,
       actorUserId: 'u-ana',
       actorCanReassign: false,
+      actorIsSuperAdmin: false,
       idempotencyKey: KEY,
       expectedVersion: 1,
       command: { kind: 'claim' },
@@ -284,5 +298,185 @@ describe('ChatbotRequestCommandsController', () => {
       code: 'INTERNAL_ERROR',
       message: 'Internal server error',
     });
+  });
+
+  describe('resolve (unit 3)', () => {
+    const lastCommand = () =>
+      (
+        execute.mock.lastCall as [{ command: unknown; expectedVersion: number }]
+      )[0];
+
+    it.each([
+      [
+        'a restock estimate',
+        { action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 },
+        { type: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 7 },
+      ],
+      [
+        'an unavailable restock',
+        { action: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE' },
+        { type: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE' },
+      ],
+      [
+        'an expiration text',
+        { action: 'PROVIDE_EXPIRATION_TEXT', expirationText: 'Dic 2026' },
+        { type: 'PROVIDE_EXPIRATION_TEXT', expirationText: 'Dic 2026' },
+      ],
+      [
+        'an unavailable expiration',
+        { action: 'REPORT_EXPIRATION_UNAVAILABLE' },
+        { type: 'REPORT_EXPIRATION_UNAVAILABLE' },
+      ],
+      [
+        'a zone approval',
+        {
+          action: 'APPROVE_DELIVERY_ZONE',
+          zoneType: 'SURCHARGE',
+          surchargeCents: 5000,
+          etaDays: 3,
+          expectedZoneSetVersion: 7,
+        },
+        {
+          type: 'APPROVE_DELIVERY_ZONE',
+          settings: { type: 'SURCHARGE', surchargeCents: 5000, etaDays: 3 },
+          expectedZoneSetVersion: 7,
+        },
+      ],
+      [
+        'a zone rejection',
+        { action: 'REJECT_DELIVERY_ZONE', expectedZoneSetVersion: 2 },
+        { type: 'REJECT_DELIVERY_ZONE', expectedZoneSetVersion: 2 },
+      ],
+      [
+        'a receipt confirmation',
+        { action: 'CONFIRM_RECEIPT', amountCents: 12000 },
+        { type: 'CONFIRM_RECEIPT', amountCents: 12000 },
+      ],
+      [
+        'a receipt rejection',
+        {
+          action: 'REJECT_RECEIPT',
+          reason: 'borroso',
+          customerReason: ' Envíanos una foto más clara. ',
+        },
+        {
+          type: 'REJECT_RECEIPT',
+          reason: 'borroso',
+          customerReason: 'Envíanos una foto más clara.',
+        },
+      ],
+    ])('parses %s', async (_case, body, action) => {
+      await post('resolve', { expectedVersion: 3, ...body }).expect(200);
+      expect(lastCommand()).toMatchObject({
+        expectedVersion: 3,
+        command: { kind: 'resolve', action },
+      });
+    });
+
+    it.each([
+      ['an unknown action', { action: 'NOPE' }],
+      ['a missing action', {}],
+      [
+        'a client-sent resolutionRequestId',
+        {
+          action: 'REPORT_EXPIRATION_UNAVAILABLE',
+          resolutionRequestId: KEY,
+        },
+      ],
+      [
+        'restockDays on the negative restock action',
+        { action: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE', restockDays: 1 },
+      ],
+      [
+        'restockDays out of range',
+        { action: 'PROVIDE_RESTOCK_ESTIMATE', restockDays: 400 },
+      ],
+      [
+        'a zone action without expectedZoneSetVersion',
+        { action: 'REJECT_DELIVERY_ZONE' },
+      ],
+      [
+        'a zone approval with an extra key',
+        {
+          action: 'APPROVE_DELIVERY_ZONE',
+          zoneType: 'FREE',
+          etaDays: 2,
+          expectedZoneSetVersion: 1,
+          tenantId: 'x',
+        },
+      ],
+      [
+        'a receipt confirmation of 0',
+        { action: 'CONFIRM_RECEIPT', amountCents: 0 },
+      ],
+      [
+        'a receipt rejection without customerReason',
+        { action: 'REJECT_RECEIPT', reason: 'borroso' },
+      ],
+      [
+        'a customerReason over 300 characters',
+        {
+          action: 'REJECT_RECEIPT',
+          reason: 'borroso',
+          customerReason: 'x'.repeat(301),
+        },
+      ],
+    ])('answers 400 VALIDATION_ERROR for %s', async (_case, body) => {
+      const response = await post('resolve', {
+        expectedVersion: 1,
+        ...body,
+      }).expect(400);
+      expect(response.body).toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('requires the Idempotency-Key and expectedVersion', async () => {
+      await post('resolve', { action: 'REPORT_EXPIRATION_UNAVAILABLE' }).expect(
+        400,
+      );
+      await post(
+        'resolve',
+        { expectedVersion: 1, action: 'REPORT_EXPIRATION_UNAVAILABLE' },
+        null,
+      ).expect(400);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('answers 409 ZONE_SET_CHANGED with the new zoneImpact', async () => {
+      const current = {
+        version: 1,
+        status: 'NEW' as const,
+        claimedBy: null,
+        zoneImpact: { requests: 4, customers: 4, setVersion: 8 },
+      };
+      execute.mockRejectedValue(
+        new ChatbotRequestCommandError('ZONE_SET_CHANGED', 409, current),
+      );
+      const response = await post('resolve', {
+        expectedVersion: 1,
+        action: 'REJECT_DELIVERY_ZONE',
+        expectedZoneSetVersion: 7,
+      }).expect(409);
+      expect(response.body).toMatchObject({
+        code: 'ZONE_SET_CHANGED',
+        current,
+      });
+    });
+  });
+
+  it('serves GET zone-impact as {requests, customers, setVersion}', async () => {
+    const impact = { requests: 4, customers: 3, setVersion: 7 };
+    zoneImpact.mockResolvedValue(impact);
+    const response = await request(
+      app.getHttpServer() as Parameters<typeof request>[0],
+    )
+      .get(`/chatbot-requests/${ID}/zone-impact`)
+      .expect(200);
+    expect(response.body).toEqual(impact);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(zoneImpact).toHaveBeenCalledWith(ID);
   });
 });
