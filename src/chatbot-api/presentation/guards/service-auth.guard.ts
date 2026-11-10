@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -21,6 +22,12 @@ import {
   REQUIRED_SCOPES_KEY,
 } from '../decorators/required-scopes.decorator';
 import { CredentialRateLimiter } from './credential-rate-limiter';
+import { ROUTE_CLASS_KEY, type BotRouteClassName } from './route-class';
+import {
+  DEFAULT_CLASS_LIMITS,
+  ROUTE_RATE_LIMITER,
+  type RouteRateLimiter,
+} from './route-rate-limiter';
 
 type ServiceRequest = {
   headers?: Record<string, string | string[] | undefined>;
@@ -34,17 +41,21 @@ type ServiceResponse = {
 @Injectable()
 export class ServiceAuthGuard implements CanActivate {
   /**
-   * Single-node deployment assumption from the Slice 7 design.
-   * If the chatbot API ever scales horizontally, swap this in-memory limiter
-   * for a shared store such as Redis.
+   * Fallback for graphs that do not wire the shared limiter (unit specs
+   * that build the guard alone). It counts per process, so production wires
+   * `ROUTE_RATE_LIMITER` (PostgreSQL counters shared by every replica, R2) in
+   * the global `BotRateLimitModule`.
    */
-  private readonly rateLimiter = new CredentialRateLimiter();
+  private readonly memoryLimiter = new CredentialRateLimiter();
 
   constructor(
     @Inject(SERVICE_CREDENTIAL_REPOSITORY)
     private readonly credentials: IServiceCredentialRepository,
     private readonly cls: ClsService<TenantClsStore>,
     private readonly reflector: Reflector,
+    @Optional()
+    @Inject(ROUTE_RATE_LIMITER)
+    private readonly sharedLimiter?: RouteRateLimiter,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -83,10 +94,26 @@ export class ServiceAuthGuard implements CanActivate {
       throw new ForbiddenException('Insufficient service scope');
     }
 
-    const decision = this.rateLimiter.check({
-      credentialId: credential.id,
-      limit: credential.rateLimit,
-    });
+    // Routes without a class keep the credential's own budget (`default`).
+    const routeClass =
+      this.reflector.getAllAndOverride<BotRouteClassName>(ROUTE_CLASS_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? 'default';
+    const defaultLimit =
+      routeClass === 'default'
+        ? credential.rateLimit
+        : DEFAULT_CLASS_LIMITS[routeClass];
+    const decision = this.sharedLimiter
+      ? await this.sharedLimiter.check({
+          credentialId: credential.id,
+          routeClass,
+          defaultLimit,
+        })
+      : this.memoryLimiter.check({
+          credentialId: `${credential.id}:${routeClass}`,
+          limit: defaultLimit,
+        });
 
     if (!decision.allowed) {
       response.setHeader(

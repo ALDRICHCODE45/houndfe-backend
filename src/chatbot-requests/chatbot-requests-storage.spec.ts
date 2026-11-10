@@ -146,3 +146,43 @@ describe('chatbot requests storage (human-intervention unit 2)', () => {
     expect(sql).not.toMatch(/REFERENCES "users"/);
   });
 });
+
+describe('bot intake storage (unit 5, slice 5a)', () => {
+  const botSql = readFileSync(
+    join(
+      process.cwd(),
+      'prisma/migrations/20261110030000_chatbot_request_bot_intake/migration.sql',
+    ),
+    'utf8',
+  );
+
+  it('is additive: two new tables and one nullable column, nothing dropped', () => {
+    expect(botSql).not.toMatch(
+      /DROP |ALTER COLUMN|RENAME|NOT NULL DEFAULT.*service_credentials/,
+    );
+    expect(
+      [...botSql.matchAll(/CREATE TABLE "(\w+)"/g)].map((m) => m[1]).sort(),
+    ).toEqual(['chatbot_bot_receipts', 'service_rate_buckets']);
+    expect(botSql).toContain(
+      'ALTER TABLE "service_credentials" ADD COLUMN "rateLimits" JSONB;',
+    );
+  });
+
+  it('bounds lock waits and documents the recovery', () => {
+    const first = botSql
+      .split('\n')
+      .find((line) => line.trim() && !line.startsWith('--'));
+    expect(first).toBe("SET LOCAL lock_timeout = '5s';");
+    expect(botSql).toContain(
+      'prisma migrate resolve --rolled-back 20261110030000_chatbot_request_bot_intake',
+    );
+  });
+
+  it('keys the route budget by credential and class, and the receipts by tenant, kind and key', () => {
+    expect(botSql).toContain('PRIMARY KEY ("credentialId","routeClass")');
+    expect(botSql).toContain(
+      'PRIMARY KEY ("tenantId","kind","idempotencyKey")',
+    );
+    expect(model('ServiceRateBucket')).not.toContain('tenantId');
+  });
+});
