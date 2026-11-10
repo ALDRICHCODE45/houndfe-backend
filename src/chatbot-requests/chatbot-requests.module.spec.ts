@@ -1,6 +1,10 @@
 import 'reflect-metadata';
 import { Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ClsService } from 'nestjs-cls';
+import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { SERVICE_CREDENTIAL_REPOSITORY } from '../chatbot-api/domain/service-credential.repository';
+import { DELIVERY_ZONE_BOT_REPOSITORY } from '../delivery-zones/domain/delivery-zone-bot.repository';
 import { AuthModule } from '../auth/auth.module';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -17,7 +21,9 @@ import { HumanDecisionsModule } from '../human-decisions/human-decisions.module'
 import { ReceiptsModule } from '../receipts/receipts.module';
 import { SalesModule } from '../sales/sales.module';
 import { ChatbotRequestWrapperModule } from './chatbot-request-wrapper.module';
+import { BotRequestIntakeService } from './application/bot-request-intake.service';
 import { ChatbotRequestsModule } from './chatbot-requests.module';
+import { BotRequestsController } from './presentation/bot-requests.controller';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 
@@ -41,6 +47,23 @@ class IsolatedAuthModule {}
 })
 class IsolatedResolutionModule {}
 
+// The bot guard's collaborators (credential repository, CLS) and the zone
+// intake port come from modules that need the whole application.
+@Module({
+  providers: [
+    { provide: SERVICE_CREDENTIAL_REPOSITORY, useValue: {} },
+    { provide: ClsService, useValue: {} },
+  ],
+  exports: [SERVICE_CREDENTIAL_REPOSITORY, ClsService],
+})
+class IsolatedChatbotApiModule {}
+
+@Module({
+  providers: [{ provide: DELIVERY_ZONE_BOT_REPOSITORY, useValue: {} }],
+  exports: [DELIVERY_ZONE_BOT_REPOSITORY],
+})
+class IsolatedZonesModule {}
+
 describe('ChatbotRequestsModule wiring', () => {
   it('resolves the controller and the service without database access', async () => {
     const pass = { canActivate: () => true };
@@ -53,6 +76,10 @@ describe('ChatbotRequestsModule wiring', () => {
       .useModule(IsolatedAuthModule)
       .overrideModule(WrappedRequestResolutionModule)
       .useModule(IsolatedResolutionModule)
+      .overrideModule(ChatbotApiModule)
+      .useModule(IsolatedChatbotApiModule)
+      .overrideModule(DeliveryZonesModule)
+      .useModule(IsolatedZonesModule)
       .overrideGuard(JwtAuthGuard)
       .useValue(pass)
       .overrideGuard(TenantContextGuard)
@@ -63,6 +90,8 @@ describe('ChatbotRequestsModule wiring', () => {
 
     expect(module.get(ChatbotRequestCommandsController)).toBeDefined();
     expect(module.get(ChatbotRequestCommandsService)).toBeDefined();
+    expect(module.get(BotRequestsController)).toBeDefined();
+    expect(module.get(BotRequestIntakeService)).toBeDefined();
   });
 
   // The flows take the wrapper as an optional dependency (so their own specs

@@ -18,6 +18,12 @@
  *
  * Wrapper rows use `source = WRAP:<TABLE>` and the wrapped id as
  * `sourceRequestId`; the bot's own intake (unit 5) uses its credential source.
+ *
+ * Envelope mode (unit 5): `POST /chatbot-api/requests` runs a legacy intake
+ * inside `withEnvelope`, so the hook adds what the old body never carried
+ * (customer, dedup key, summary, the bot's hash) and applies the customer lock,
+ * dedup and limits of docs/chatbot-requests-model.md, "Bot intake". A request
+ * that must merge rolls the legacy transaction back with `IntakeMergeSignal`.
  */
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -28,6 +34,14 @@ import { toState } from '../application/chatbot-request-commands.service';
 import { canonicalPhone, phoneLookupVariants } from '../domain/canonical-phone';
 import { actorDisplayName } from '../domain/actor-display-name';
 import { closeWrapped } from '../domain/chatbot-request.commands';
+import {
+  assertIntakeLimits,
+  findOpenDedup,
+  insertRequestOnDedup,
+  IntakeMergeSignal,
+  lockCustomerIntake,
+  type IntakeLimits,
+} from './chatbot-request-intake-writes';
 import {
   allocateFolio,
   applyRequestPatch,
@@ -64,13 +78,29 @@ export const NO_CUSTOMER: CustomerLink = {
   phone: null,
 };
 
+/** What the bot's envelope adds to a wrapped request (see the file doc). */
+export interface BotIntakeEnvelope {
+  credentialId: string;
+  sourceRequestId: string;
+  hash: string;
+  customer: { phoneCountryCode: string; phone: string } | null;
+  summary: string | null;
+  needs: string | null;
+  context: Record<string, string | number | string[]> | null;
+  dedupKey: string | null;
+  conversationRef: string | null;
+  lastCustomerMessageAt: Date | null;
+  triggerWaMessageId: string | null;
+  limits: IntakeLimits;
+}
+
 export interface NewWrappedRequest {
   subtype: 'RESTOCK' | 'EXPIRATION' | 'DELIVERY_ZONE' | 'TRANSFER_RECEIPT';
   source: string;
   wrappedId: string;
   fallbackKey: string;
   summary: string;
-  context: Record<string, string | number | null>;
+  context: Record<string, string | number | string[] | null>;
   link: CustomerLink;
   wrapped: {
     humanDecisionId?: string;
@@ -230,6 +260,13 @@ export async function linkByPhone(
 export interface RequestCreateExtras {
   id?: string;
   createdAt?: Date;
+  /** Envelope mode: the bot's own columns on the wrapper row. */
+  bot?: {
+    needs: string | null;
+    dedupKey: string | null;
+    canonicalRequestHash: string;
+    submittedCredentialId: string;
+  };
   /** A wrapped row resolved before the backfill: the request is born closed. */
   resolved?: {
     resolvedAt: Date;
@@ -277,6 +314,7 @@ export function requestCreateData(
     source: input.source,
     sourceRequestId: input.wrappedId,
     ...input.wrapped,
+    ...(extras.bot ?? {}),
     ...(resolved
       ? {
           status: 'RESOLVED',
@@ -293,12 +331,21 @@ export function requestCreateData(
 @Injectable()
 export class ChatbotRequestWrapper {
   private readonly suppressed = new AsyncLocalStorage<true>();
+  private readonly envelopes = new AsyncLocalStorage<BotIntakeEnvelope>();
 
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
 
   /** Runs `work` (a legacy use case) without its close hook; see file doc. */
   suppressLegacyClose<T>(work: () => Promise<T>): Promise<T> {
     return this.suppressed.run(true, work);
+  }
+
+  /** Runs a legacy intake (outside any transaction) in envelope mode. */
+  withEnvelope<T>(
+    envelope: BotIntakeEnvelope,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.envelopes.run(envelope, work);
   }
 
   private get hooksOff(): boolean {
@@ -352,37 +399,98 @@ export class ChatbotRequestWrapper {
   }
 
   /**
-   * Lock order: the wrapped row was inserted by the caller; the folio comes
+   * Lock order: the wrapped row was inserted by the caller; in envelope mode
+   * the customer lock, the dedup row and the limits come next, then the folio
    * after every read and lock, and the group last.
    */
-  private async insert(input: NewWrappedRequest): Promise<void> {
+  private async insert(plain: NewWrappedRequest): Promise<void> {
     const { tx } = this;
     const tenantId = this.tenantPrisma.getTenantId();
+    const envelope = this.envelopes.getStore();
+    const input = envelope
+      ? await this.withEnvelopeData(plain, envelope)
+      : plain;
     const customerKey = input.link.customerKey ?? input.fallbackKey;
     await assertTenantLinks(tx, tenantId, {
       customerId: input.link.customerId,
       ...input.wrapped,
     });
-    const request = await tx.chatbotRequest.create({
-      data: requestCreateData(
-        tenantId,
-        await allocateFolio(tx, tenantId),
-        input,
-      ),
-      select: { id: true },
-    });
+    if (envelope && input.link.customerKey) {
+      await lockCustomerIntake(tx, tenantId, customerKey);
+      if (
+        envelope.dedupKey &&
+        (await findOpenDedup(tx, tenantId, customerKey, envelope.dedupKey))
+      ) {
+        throw new IntakeMergeSignal();
+      }
+      await assertIntakeLimits(tx, tenantId, customerKey, envelope.limits);
+    }
+    const data = requestCreateData(
+      tenantId,
+      await allocateFolio(tx, tenantId),
+      input,
+      envelope && {
+        bot: {
+          needs: envelope.needs,
+          dedupKey: envelope.dedupKey,
+          canonicalRequestHash: envelope.hash,
+          submittedCredentialId: envelope.credentialId,
+        },
+      },
+    );
+    // A lost dedup race (a creator that skipped the lock) merges too.
+    const requestId = envelope
+      ? await insertRequestOnDedup(tx, data)
+      : (await tx.chatbotRequest.create({ data, select: { id: true } })).id;
+    if (!requestId) throw new IntakeMergeSignal();
     await tx.chatbotRequestEvent.create({
       data: {
         tenantId,
-        requestId: request.id,
+        requestId,
         type: 'CREATED',
-        actorKind: 'SYSTEM',
+        actorKind: envelope ? 'SERVICE' : 'SYSTEM',
+        actorId: envelope?.credentialId,
         toStatus: 'NEW',
         version: 1,
-        data: { subtype: input.subtype, wrapped: true },
+        data: {
+          subtype: input.subtype,
+          wrapped: true,
+          ...(envelope && {
+            sourceRequestId: envelope.sourceRequestId,
+            triggerWaMessageId: envelope.triggerWaMessageId,
+          }),
+        },
       },
     });
     await refreshCustomerGroup(tx, tenantId, customerKey);
+  }
+
+  /** The envelope's customer, summary, context and window go on the request. */
+  private async withEnvelopeData(
+    input: NewWrappedRequest,
+    envelope: BotIntakeEnvelope,
+  ): Promise<NewWrappedRequest> {
+    // A zone requester is already linked by the phone of its own detail.
+    const link =
+      input.link.customerKey || !envelope.customer
+        ? input.link
+        : await linkByPhone(
+            this.tx,
+            this.tenantPrisma.getTenantId(),
+            envelope.customer.phoneCountryCode,
+            envelope.customer.phone,
+          );
+    const lastCustomerMessageAt =
+      input.lastCustomerMessageAt ?? envelope.lastCustomerMessageAt;
+    return {
+      ...input,
+      link,
+      summary: envelope.summary ?? input.summary,
+      context: { ...envelope.context, ...input.context },
+      conversationRef:
+        input.conversationRef ?? envelope.conversationRef ?? undefined,
+      ...(lastCustomerMessageAt ? { lastCustomerMessageAt } : {}),
+    };
   }
 
   // ----------------------------------------------------------- legacy routes

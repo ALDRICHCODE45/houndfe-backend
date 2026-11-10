@@ -245,7 +245,12 @@ export type ChatbotRequestCommandErrorCode =
   | 'USER_NOT_ASSIGNABLE'
   | 'FORBIDDEN'
   | 'INSUFFICIENT_PERMISSIONS'
-  | 'ZONE_SET_CHANGED';
+  | 'ZONE_SET_CHANGED'
+  // Bot intake (unit 5).
+  | 'CUSTOMER_OPEN_LIMIT'
+  | 'CUSTOMER_RATE_LIMITED'
+  | 'SUBTYPE_DISABLED'
+  | 'SCHEDULING_DISABLED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -253,10 +258,16 @@ export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
 };
 
 export class ChatbotRequestCommandError extends Error {
+  /**
+   * `extra` is merged into the error body: small, fixed-shape facts the bot
+   * needs (`{limit, open}`, the `resolution` of an ALREADY_RESOLVED request);
+   * `retryAfterSeconds` becomes the `Retry-After` header instead.
+   */
   constructor(
     readonly code: ChatbotRequestCommandErrorCode,
-    readonly httpStatus: 400 | 401 | 403 | 404 | 409 | 422,
+    readonly httpStatus: 400 | 401 | 403 | 404 | 409 | 422 | 429,
     readonly current?: ChatbotRequestCommandCurrent,
+    readonly extra?: Record<string, unknown>,
   ) {
     super(code);
     this.name = 'ChatbotRequestCommandError';

@@ -23,6 +23,7 @@ const MESSAGES: Record<string, string> = {
   VALIDATION_ERROR: 'Invalid request',
   UNAUTHORIZED: 'Unauthorized',
   FORBIDDEN: 'Forbidden',
+  INSUFFICIENT_SCOPE: 'The credential lacks the scope for this route',
   INSUFFICIENT_PERMISSIONS: 'Insufficient permissions',
   NOT_FOUND: 'Chatbot request not found',
   VERSION_CONFLICT: 'The request changed; reload it',
@@ -34,6 +35,11 @@ const MESSAGES: Record<string, string> = {
   IDEMPOTENCY_CONFLICT: 'Idempotency-Key was already used with another body',
   USER_NOT_ASSIGNABLE: 'The user cannot be assigned to chatbot requests',
   ZONE_SET_CHANGED: 'The customers waiting on this zone changed; review again',
+  ALREADY_RESOLVED: 'The request was already resolved',
+  CUSTOMER_OPEN_LIMIT: 'The customer has too many open requests',
+  CUSTOMER_RATE_LIMITED: 'Too many requests were created for this customer',
+  SUBTYPE_DISABLED: 'This subtype cannot be created through this route',
+  SCHEDULING_DISABLED: 'Scheduled conversations are not available yet',
   RATE_LIMITED: 'Too many requests',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',
@@ -53,16 +59,17 @@ export class ChatbotRequestHttpFilter implements ExceptionFilter {
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const body = this.toBody(exception);
+    const { retryAfterSeconds, ...publicBody } = body;
     const name = exception instanceof Error ? exception.name : 'unknown';
     const line = `[${String(body.code)}] ${name}`;
     if (Number(body.statusCode) >= 500) this.logger.error(line);
     else this.logger.warn(line);
-    host
-      .switchToHttp()
-      .getResponse<Response>()
-      .setHeader('Cache-Control', 'no-store')
-      .status(Number(body.statusCode))
-      .json(body);
+    const response = host.switchToHttp().getResponse<Response>();
+    response.setHeader('Cache-Control', 'no-store');
+    if (typeof retryAfterSeconds === 'number') {
+      response.setHeader('Retry-After', String(retryAfterSeconds));
+    }
+    response.status(Number(body.statusCode)).json(publicBody);
   }
 
   private toBody(exception: unknown): Record<string, unknown> {
@@ -70,6 +77,7 @@ export class ChatbotRequestHttpFilter implements ExceptionFilter {
       return {
         ...this.build(exception.httpStatus, exception.code),
         ...(exception.current ? { current: exception.current } : {}),
+        ...exception.extra,
       };
     }
     if (exception instanceof InsufficientPermissionsError) {
@@ -80,6 +88,13 @@ export class ChatbotRequestHttpFilter implements ExceptionFilter {
     }
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
+      // The bot guard's own message for a missing scope (§3.9).
+      if (
+        Number(status) === Number(HttpStatus.FORBIDDEN) &&
+        exception.message === 'Insufficient service scope'
+      ) {
+        return this.build(status, 'INSUFFICIENT_SCOPE');
+      }
       const code =
         HTTP_CODES[status] ??
         (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR');
