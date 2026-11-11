@@ -8,7 +8,9 @@
  *   - requests and their audit events are never touched;
  *   - bounded batches: a run removes at most `batchSize` × `maxBatchesPerTick`
  *     and the next tick keeps draining;
- *   - two concurrent runs neither double-delete nor fail (`SKIP LOCKED`).
+ *   - two concurrent runs neither double-delete nor fail (`SKIP LOCKED`);
+ *   - concurrent runs over many tenants never deadlock on the per-tenant
+ *     watermark rows (marks are upserted in `tenantId` order).
  */
 import { randomUUID } from 'crypto';
 import { integrationPrisma } from '../../../test/integration/reset-db';
@@ -251,4 +253,50 @@ describeIfDb('chatbot feed purge schedule (PostgreSQL)', () => {
     });
     expect(mark.purgedThroughCursor).toBeLessThan(fresh.cursor);
   });
+
+  it('concurrent runs over many tenants never deadlock on the watermark rows and every mark is exact', async () => {
+    const many = await Promise.all(
+      Array.from({ length: 24 }, () => tenantWithRequest()),
+    );
+    const base = NOW.getTime() - 60 * DAY;
+    // Interleave the tenants in creation order, so every small batch (ordered
+    // by createdAt) touches many tenants and two replicas meet on the same marks.
+    const rows = Array.from({ length: 24 * 40 }, (_, i) => {
+      const t = many[(i * 7) % many.length];
+      return {
+        tenantId: t.tenantId,
+        requestId: t.requestId,
+        type: 'request.cancelled',
+        payload: {},
+        createdAt: new Date(base + i),
+      };
+    });
+    await prisma.chatbotFeedItem.createMany({ data: rows });
+    const highest = new Map<string, number>();
+    for (const r of await prisma.chatbotFeedItem.findMany({
+      where: { tenantId: { in: many.map((t) => t.tenantId) } },
+      orderBy: { cursor: 'asc' },
+    }))
+      highest.set(r.tenantId, r.cursor);
+
+    const runs = await Promise.allSettled(
+      Array.from({ length: 8 }, () => scheduler({ batchSize: 30 }).purge()),
+    );
+
+    expect(
+      runs.filter((r) => r.status === 'rejected').map((r) => String(r.reason)),
+    ).toEqual([]);
+    const removed = runs.reduce(
+      (sum, r) => sum + (r.status === 'fulfilled' ? r.value.removed : 0),
+      0,
+    );
+    expect(removed).toBe(rows.length);
+    for (const t of many) {
+      expect(await remaining(t.tenantId)).toEqual([]);
+      const mark = await prisma.chatbotFeedRetention.findUniqueOrThrow({
+        where: { tenantId: t.tenantId },
+      });
+      expect(mark.purgedThroughCursor).toBe(highest.get(t.tenantId));
+    }
+  }, 60_000);
 });

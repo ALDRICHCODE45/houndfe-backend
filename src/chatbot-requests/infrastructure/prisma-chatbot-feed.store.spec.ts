@@ -48,3 +48,27 @@ describe('PrismaChatbotFeedStore.readAfter query shape', () => {
     ]);
   });
 });
+
+/**
+ * Two replicas purging at once delete different rows (`SKIP LOCKED`) that can
+ * belong to the same tenants, then upsert those tenants' watermark rows. Rows
+ * locked in different orders deadlock (40P01), so the marks are written in
+ * `tenantId` order.
+ */
+describe('PrismaChatbotFeedStore.purgeExpired lock order', () => {
+  it('upserts the per-tenant watermarks in tenantId order', async () => {
+    const queries: Prisma.Sql[] = [];
+    const root = {
+      $queryRaw: (query: Prisma.Sql) => {
+        queries.push(query);
+        return Promise.resolve([{ removed: 0 }]);
+      },
+    };
+    const store = new PrismaChatbotFeedStore({} as never, root as never);
+    await store.purgeExpired(new Date('2026-11-11T12:00:00Z'));
+    const text = queries[0].sql.replace(/\s+/g, ' ');
+    expect(text).toContain(
+      'SELECT "tenantId", max("cursor") FROM gone GROUP BY "tenantId" ORDER BY "tenantId" ON CONFLICT ("tenantId")',
+    );
+  });
+});

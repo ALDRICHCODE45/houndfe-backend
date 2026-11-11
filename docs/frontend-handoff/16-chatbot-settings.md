@@ -99,7 +99,7 @@ Full replacement, plus the version you edited:
 
 You can send back exactly what `GET` returned (without `version`) plus `expectedVersion`. `branchOpeningHours` may be present and is ignored. Any other unknown field is a `400`. `expectedVersion` is the `version` you loaded (`0` the first time).
 
-Success: `200` with the new `GET` body. The version goes up by one **only if something changed**; saving identical content answers `200` with the same version and does nothing else.
+Success: `200` with the new `GET` body plus one extra field, `recompute` (see below). The version goes up by one **only if something changed**; saving identical content answers `200` with the same version, `recompute: "NOT_NEEDED"`, and does nothing else. **`recompute` exists only in the `PUT` response: do not send it back** (an unknown field is a `400`, same as `version`).
 
 Limits, all checked on the server:
 
@@ -112,6 +112,15 @@ Limits, all checked on the server:
 | `scheduling.slotMinutes` | 5 to 240; `slotsOffered` 1 to 10; `maxScheduledPerSlot` 1 to 50 |
 
 ### What a change does to open requests
+
+A write that is saved is **never** answered with a 5xx because of this step. After the commit the server recomputes, and `recompute` in the `PUT` response says how it went:
+
+| `recompute` | Meaning | What the UI does |
+| --- | --- | --- |
+| `DONE` | Every open request is on the new settings | nothing |
+| `PARTIAL` | Some open requests were being changed by a command or created at that moment; they are stamped the next time something touches them | nothing, or a soft notice |
+| `FAILED` | **The settings ARE saved** (new `version`), but the open requests still have the old deadlines (the server logged it) | show "Guardado; los plazos de las solicitudes abiertas se actualizarán más tarde". Do not retry the save with the old `expectedVersion` (that is a `409`); keep the returned `version` |
+| `NOT_NEEDED` | Identical content, nothing was written | nothing |
 
 After a change is saved, the **open** requests (`NEW`, `IN_PROGRESS`) of that sucursal get their `claimDeadlineAt`, `resolveDeadlineAt`, `slaPolicyVersion` and `nextSlaCheckAt` recomputed with the new settings, in the same call, in small batches. **Closed requests are never touched.** The inbox rows show the new deadlines on the next read. The claim deadline of a request that is already `IN_PROGRESS` is history and stays.
 
@@ -150,7 +159,7 @@ Response `200`:
 {
   "dryRun": false,
   "source": { "tenantId": "…", "version": 4 },
-  "tenantsApplied": [{ "tenantId": "…", "name": "Sucursal Norte" }],
+  "tenantsApplied": [{ "tenantId": "…", "name": "Sucursal Norte", "recompute": "DONE" }],
   "tenantsUnchanged": [{ "tenantId": "…", "name": "Sucursal Centro" }],
   "tenantsSkipped": [{ "tenantId": "…", "name": "Sucursal Sur", "reason": "NO_PERMISSION" }],
   "tenantsFailed": []
@@ -159,10 +168,12 @@ Response `200`:
 
 | List | Meaning |
 | --- | --- |
-| `tenantsApplied` | Changed (with `dryRun`: would change). Version +1, one audit event, open requests recomputed |
+| `tenantsApplied` | Changed (with `dryRun`: would change). Version +1, one audit event. Each entry has `recompute` (not on a dry run): `DONE`, `PARTIAL` or `FAILED`, as in §4. **`FAILED` means the settings are saved on that sucursal but its open requests keep the old deadlines**; it is not also in `tenantsFailed` |
 | `tenantsUnchanged` | Already identical, or the source sucursal itself. Nothing written |
 | `tenantsSkipped` | You are a member but cannot apply there. `reason`: `NO_PERMISSION` (your roles there lack the permission) or `TENANT_INACTIVE` (the sucursal is deactivated) |
-| `tenantsFailed` | An unexpected error on that sucursal only; the others were still applied. Retry; the call is idempotent |
+| `tenantsFailed` | The **settings write itself** failed on that sucursal (nothing was saved there); the others were still applied. Retry; the call is idempotent |
+
+Every sucursal appears in **exactly one** of the four lists. Show a warning for the `tenantsApplied` entries with `recompute: "FAILED"`.
 
 **Sucursales where you have no membership at all are not listed and not counted**, so the response never reveals other branches. Each sucursal is its own transaction, so a partial result is possible and is why `tenantsFailed` exists. Permissions merge across your roles in one sucursal (`manage:all` counts).
 

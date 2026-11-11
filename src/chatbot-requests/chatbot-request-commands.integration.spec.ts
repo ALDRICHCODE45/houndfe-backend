@@ -24,6 +24,8 @@ import {
   assertTenantLinks,
   refreshCustomerGroup,
 } from './infrastructure/chatbot-request-writes';
+import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-settings';
+import { computeSla, policyFromSettings } from './domain/chatbot-sla';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 
 const describeIfDb =
@@ -298,8 +300,12 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
   it('keeps the customer group consistent after each command', async () => {
     const customerKey = '525511112222';
     const at = (iso: string) => new Date(iso);
+    // A fixed creation instant (Tuesday 10:00 in Mexico City, UTC-6) so the
+    // default policy's deadlines are plain sums, whatever day the suite runs.
+    const createdAt = at('2026-11-10T16:00:00Z');
     const first = await createRequest(tenantA, {
       customerKey,
+      createdAt,
       claimDeadlineAt: at('2026-11-10T17:00:00Z'),
       resolveDeadlineAt: at('2026-11-10T19:00:00Z'),
     });
@@ -333,9 +339,12 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
     const claimed = await prisma.chatbotRequest.findUniqueOrThrow({
       where: { id: first.id },
     });
-    expect(claimed.resolveDeadlineAt?.toISOString()).not.toBe(
-      '2026-11-10T19:00:00.000Z',
+    // Default policy, UNKNOWN_QUESTION: resolve 120 business minutes from
+    // creation (10:00 -> 12:00 local = 18:00Z); the seeded 19:00Z is replaced.
+    expect(claimed.resolveDeadlineAt?.toISOString()).toBe(
+      '2026-11-10T18:00:00.000Z',
     );
+    expect(claimed.slaPolicyVersion).toBe(0);
     expect(await group(tenantA, customerKey)).toEqual({
       openCount: 1,
       mostUrgentAt: claimed.resolveDeadlineAt,
@@ -355,6 +364,33 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
     const released = await prisma.chatbotRequest.findUniqueOrThrow({
       where: { id: first.id },
     });
+    // The claim clock restarts at the release event: the stored deadline is
+    // the policy's 30 business minutes counted from that instant.
+    const releaseEvent = (await events(first.id)).find(
+      (e) => e.type === 'RELEASED',
+    )!;
+    const expected = computeSla(
+      policyFromSettings(defaultSettings(), 0),
+      {
+        subtype: 'UNKNOWN_QUESTION',
+        status: 'NEW',
+        createdAt,
+        scheduledFor: null,
+        lastReleasedAt: releaseEvent.createdAt,
+        overdueAt: null,
+      },
+      releaseEvent.createdAt,
+    );
+    // The command stamps with the app clock a few ms before the event row.
+    expect(
+      Math.abs(
+        released.claimDeadlineAt!.getTime() -
+          expected.claimDeadlineAt!.getTime(),
+      ),
+    ).toBeLessThan(2_000);
+    expect(released.claimDeadlineAt!.getTime()).toBeGreaterThan(
+      releaseEvent.createdAt.getTime(),
+    );
     expect(released.claimDeadlineAt?.toISOString()).not.toBe(
       '2026-11-10T17:00:00.000Z',
     );

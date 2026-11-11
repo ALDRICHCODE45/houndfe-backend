@@ -17,6 +17,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
+import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { randomUUID } from 'crypto';
@@ -37,7 +38,9 @@ import {
   allocateFolio,
   applyRequestPatch,
 } from '../chatbot-requests/infrastructure/chatbot-request-writes';
+import * as recomputeModule from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
 import { recomputeOpenRequests } from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import { slaColumnsForNew } from '../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
 import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
@@ -1166,6 +1169,295 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       await applyAll(source).expect(200);
       expect(await prisma.rolePermission.count()).toBe(grantsBefore);
       expect(await prisma.tenantMembership.count()).toBe(membershipsBefore);
+    });
+  });
+
+  // -------------------------- a committed write whose recompute fails
+
+  describe('recompute failure after a committed write', () => {
+    const real = recomputeModule.recomputeOpenRequests;
+    let loggerError: jest.SpyInstance;
+
+    beforeEach(() => {
+      loggerError = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    it('PUT answers 200 with the saved settings and recompute FAILED; the write stays and is logged', async () => {
+      const tenant: string = randomUUID();
+      await prisma.tenant.create({
+        data: { id: tenant, name: 'Falla PUT', slug: `cs-${tenant}` },
+      });
+      try {
+        const open = await seedRequest(tenant, { status: 'NEW' });
+        jest
+          .spyOn(recomputeModule, 'recomputeOpenRequests')
+          .mockRejectedValueOnce(new Error('boom: connection reset'));
+
+        const res = await put(tenant, body(ALWAYS_OPEN(), 0)).expect(200);
+        expect(res.body.version).toBe(1);
+        expect(res.body.openingHours.timeZone).toBe('UTC');
+        expect(res.body.recompute).toBe('FAILED');
+        expect(loggerError).toHaveBeenCalledWith(
+          expect.stringContaining(tenant),
+        );
+        expect(JSON.stringify(loggerError.mock.calls)).not.toContain('boom');
+
+        // The write is committed; the request still carries the old deadlines.
+        const saved = await root.chatbotAttentionSettings.findUniqueOrThrow({
+          where: { tenantId: tenant },
+        });
+        expect(saved.version).toBe(1);
+        expect(
+          (
+            await prisma.chatbotRequest.findUniqueOrThrow({
+              where: { id: open.id },
+            })
+          ).slaPolicyVersion,
+        ).toBe(0);
+
+        // A retry with the old version is the normal CAS conflict.
+        await put(tenant, body(ALWAYS_OPEN(), 0)).expect(409);
+        // Re-saving the same content is a no-op and does not recompute.
+        const again = await put(tenant, body(ALWAYS_OPEN(), 1)).expect(200);
+        expect(again.body.version).toBe(1);
+        expect(again.body.recompute).toBe('NOT_NEEDED');
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
+    });
+
+    it('PUT reports recompute DONE when it works', async () => {
+      const tenant: string = randomUUID();
+      await prisma.tenant.create({
+        data: { id: tenant, name: 'Ok PUT', slug: `cs-${tenant}` },
+      });
+      try {
+        const res = await put(tenant, body(ALWAYS_OPEN(), 0)).expect(200);
+        expect(res.body.recompute).toBe('DONE');
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
+    });
+
+    it('apply-to-all lists a tenant whose recompute failed once, in tenantsApplied with recompute FAILED', async () => {
+      const source = tenantA;
+      const current = (await get(source)).body;
+      const changed = {
+        ...ALWAYS_OPEN(),
+        closedDates: current.closedDates,
+        windowWarningMinutes: current.windowWarningMinutes + 7,
+        receiptCloseMarginMinutes: current.receiptCloseMarginMinutes + 7,
+      };
+      await put(source, body(changed, current.version)).expect(200);
+      const stuck = await seedRequest(tenantB, { status: 'NEW' });
+      jest
+        .spyOn(recomputeModule, 'recomputeOpenRequests')
+        .mockImplementation((db, tenantId, options) =>
+          tenantId === tenantB
+            ? Promise.reject(new Error('boom'))
+            : real(db, tenantId, options),
+        );
+
+      const res = await applyAll(source).expect(200);
+      const lists = {
+        applied: res.body.tenantsApplied,
+        unchanged: res.body.tenantsUnchanged,
+        skipped: res.body.tenantsSkipped,
+        failed: res.body.tenantsFailed,
+      };
+      const everyId = Object.values(lists)
+        .flat()
+        .map((t: { tenantId: string }) => t.tenantId);
+      expect(new Set(everyId).size).toBe(everyId.length);
+      const applied = Object.fromEntries(
+        lists.applied.map((t: { tenantId: string; recompute: string }) => [
+          t.tenantId,
+          t.recompute,
+        ]),
+      );
+      expect(applied).toEqual({ [tenantB]: 'FAILED', [tenantD]: 'DONE' });
+      expect(lists.failed).toEqual([]);
+
+      // B's settings are committed; its open request is still stale.
+      const b = await root.chatbotAttentionSettings.findUniqueOrThrow({
+        where: { tenantId: tenantB },
+      });
+      expect(b.windowWarningMinutes).toBe(changed.windowWarningMinutes);
+      expect(
+        (
+          await prisma.chatbotRequest.findUniqueOrThrow({
+            where: { id: stuck.id },
+          })
+        ).slaPolicyVersion,
+      ).toBeLessThan(b.version);
+    });
+  });
+
+  // ---------------------- a create that read the defaults vs the first PUT
+
+  describe('create that read the defaults vs the first PUT of a tenant without a row', () => {
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    const newTenant = async (label: string) => {
+      const id: string = randomUUID();
+      await prisma.tenant.create({
+        data: { id, name: label, slug: `cs-${id}` },
+      });
+      return id;
+    };
+
+    const requestData = (tenantId: string, folio: number) => ({
+      tenantId,
+      folio,
+      kind: 'CLARIFICATION' as const,
+      subtype: 'UNKNOWN_QUESTION' as const,
+      customerKey: `5255300${String(folio).padStart(5, '0')}`,
+      summary: 'Carrera',
+      source: 'chatbot',
+      sourceRequestId: randomUUID(),
+    });
+
+    it('a create that read version 0 and commits after the first PUT is recomputed, never left on the defaults', async () => {
+      const tenant = await newTenant('Carrera 1');
+      try {
+        let readDefaults!: () => void;
+        const defaultsRead = new Promise<void>((r) => (readDefaults = r));
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+
+        // The create (as the wrapper does): reads the policy, then inserts later.
+        const create = root.$transaction(
+          async (tx) => {
+            const client = tx as never;
+            const folio = await allocateFolio(client, tenant);
+            const sla = await slaColumnsForNew(
+              client,
+              tenant,
+              { subtype: 'UNKNOWN_QUESTION' },
+              NOW,
+            );
+            expect(sla.slaPolicyVersion).toBe(0);
+            readDefaults();
+            await gate;
+            return insertRequestOnDedup(client, {
+              ...requestData(tenant, folio),
+              ...sla,
+            } as never);
+          },
+          { timeout: 30_000 },
+        );
+        await defaultsRead;
+
+        // The first PUT starts while the create holds the defaults.
+        let putSettled = false;
+        const putDone = put(tenant, body(ALWAYS_OPEN(), 0)).then((res) => {
+          putSettled = true;
+          return res;
+        });
+        await sleep(500);
+        // It must wait for the create (so its recompute can see the row).
+        expect(putSettled).toBe(false);
+
+        release();
+        const id = await create;
+        const res = await putDone;
+        expect(res.status).toBe(200);
+        expect(res.body.recompute).toBe('DONE');
+
+        const row = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: id! },
+        });
+        expect(row.slaPolicyVersion).toBe(1);
+        // ALWAYS_OPEN UTC: 30 claim / 120 resolve minutes, counted from createdAt.
+        expect(row.claimDeadlineAt!.getTime() - row.createdAt.getTime()).toBe(
+          30 * 60_000,
+        );
+        expect(row.resolveDeadlineAt!.getTime() - row.createdAt.getTime()).toBe(
+          120 * 60_000,
+        );
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
+    }, 60_000);
+
+    it('creates and first PUTs racing in any order always end on version 1', async () => {
+      for (let round = 0; round < 6; round++) {
+        const tenant = await newTenant(`Carrera ${round}`);
+        try {
+          // Both entry orders exist: the direct create takes the folio first
+          // and reads the policy in the insert; the wrapper reads the policy
+          // first. Mixing them must never form a lock cycle with the PUT.
+          const creators = Array.from({ length: 3 }, (_, i) =>
+            root.$transaction(async (tx) => {
+              const client = tx as never;
+              const customerKey = `5255400${randomUUID().slice(0, 8)}`;
+              if (i % 2 === 0) {
+                return insertRequestOnDedup(client, {
+                  ...requestData(tenant, await allocateFolio(client, tenant)),
+                  customerKey,
+                } as never);
+              }
+              const sla = await slaColumnsForNew(client, tenant, {
+                subtype: 'UNKNOWN_QUESTION',
+              });
+              return insertRequestOnDedup(client, {
+                ...requestData(tenant, await allocateFolio(client, tenant)),
+                customerKey,
+                ...sla,
+              } as never);
+            }),
+          );
+          const [res] = await Promise.all([
+            put(tenant, body(ALWAYS_OPEN(), 0)),
+            ...creators,
+          ]);
+          expect(res.status).toBe(200);
+          const rows = await prisma.chatbotRequest.findMany({
+            where: { tenantId: tenant },
+          });
+          expect(rows).toHaveLength(3);
+          for (const row of rows) {
+            expect(row.slaPolicyVersion).toBe(1);
+            // A create after the PUT stamps from the app clock, a recompute from
+            // createdAt: both are the new 30-minute window (a few ms apart).
+            const claimMs =
+              row.claimDeadlineAt!.getTime() - row.createdAt.getTime();
+            expect(Math.abs(claimMs - 30 * 60_000)).toBeLessThan(5_000);
+          }
+        } finally {
+          await prisma.tenant.delete({ where: { id: tenant } });
+        }
+      }
+    }, 60_000);
+
+    it('a tenant that already has a row adds no write to a create', async () => {
+      const tenant = await newTenant('Con fila');
+      try {
+        await put(tenant, body(ALWAYS_OPEN(), 0)).expect(200);
+        const before = await root.chatbotAttentionSettings.findUniqueOrThrow({
+          where: { tenantId: tenant },
+        });
+        await root.$transaction(async (tx) => {
+          const client = tx as never;
+          return insertRequestOnDedup(
+            client,
+            requestData(tenant, await allocateFolio(client, tenant)) as never,
+          );
+        });
+        const after = await root.chatbotAttentionSettings.findUniqueOrThrow({
+          where: { tenantId: tenant },
+        });
+        expect(after.version).toBe(before.version);
+        expect(after.updatedAt.toISOString()).toBe(
+          before.updatedAt.toISOString(),
+        );
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
     });
   });
 });

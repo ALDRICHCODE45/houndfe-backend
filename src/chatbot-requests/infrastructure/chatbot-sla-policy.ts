@@ -10,7 +10,9 @@
  *                            `PUT` waits for the writer that read the old
  *                            version, and the rows it stamps with that version
  *                            are always found stale by the recompute that
- *                            follows the PUT.
+ *                            follows the PUT. With no settings row the lock is
+ *                            taken on the tenant row instead (see
+ *                            `readSettingsRow`).
  *   `slaColumnsForNew`       deadlines of a request being inserted.
  *   `slaColumnsForTransition` claim / release: restarts the clock that moves.
  *
@@ -84,7 +86,20 @@ export function rowToSettings(row: SettingsRow): AttentionSettings {
   };
 }
 
-/** The settings row of a tenant, or null while it uses the defaults. */
+/**
+ * The settings row of a tenant, or null while it uses the defaults.
+ *
+ * With a lock and no row there is nothing to lock, which would let a creator
+ * that read the defaults (version 0) commit after the first `PUT` and its
+ * recompute, unnoticed. So when the row is missing the lock moves to the
+ * tenant row, which always exists: readers of the defaults take `FOR SHARE`,
+ * a writer (`UPDATE`) takes `FOR NO KEY UPDATE` (conflicts with SHARE, not with
+ * the `FOR KEY SHARE` that foreign keys take), and then the settings row is
+ * read again, because a first writer may have committed while we waited. Row
+ * locks do not queue a new SHARE behind a waiting writer (unlike advisory
+ * locks), so a creator holding another lock can never be part of a cycle with
+ * it. A tenant that already has a row pays nothing extra and no create writes.
+ */
 export async function readSettingsRow(
   db: RawDb,
   tenantId: string,
@@ -96,16 +111,24 @@ export async function readSettingsRow(
       : lock === 'UPDATE'
         ? Prisma.sql`FOR UPDATE`
         : Prisma.empty;
-  const rows = await db.$queryRaw<SettingsRow[]>(Prisma.sql`
-    SELECT "version", "timeZone", "days", "closedDates", "slas",
-           "windowWarningMinutes", "templateName", "templateCostText",
-           "enabledSubtypes"::text[] AS "enabledSubtypes",
-           "receiptCloseMarginMinutes", "schedulingEnabled", "slotMinutes",
-           "slotsOffered", "maxScheduledPerSlot"
-    FROM "chatbot_attention_settings"
-    WHERE "tenantId" = ${tenantId}
-    ${mode}`);
-  return rows[0] ?? null;
+  const read = async () => {
+    const rows = await db.$queryRaw<SettingsRow[]>(Prisma.sql`
+      SELECT "version", "timeZone", "days", "closedDates", "slas",
+             "windowWarningMinutes", "templateName", "templateCostText",
+             "enabledSubtypes"::text[] AS "enabledSubtypes",
+             "receiptCloseMarginMinutes", "schedulingEnabled", "slotMinutes",
+             "slotsOffered", "maxScheduledPerSlot"
+      FROM "chatbot_attention_settings"
+      WHERE "tenantId" = ${tenantId}
+      ${mode}`);
+    return rows[0] ?? null;
+  };
+  const row = await read();
+  if (row || !lock) return row;
+  await db.$queryRaw(Prisma.sql`
+    SELECT 1 AS "locked" FROM "tenants" WHERE "id" = ${tenantId}
+    ${lock === 'SHARE' ? Prisma.sql`FOR SHARE` : Prisma.sql`FOR NO KEY UPDATE`}`);
+  return read();
 }
 
 export async function loadSlaPolicy(

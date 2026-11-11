@@ -12,13 +12,20 @@
  *                  concurrent writers wins, the rest get 409 VERSION_CONFLICT
  *                  with the current settings. Identical content is a no-op (no
  *                  version bump, no recompute). The winner then recomputes the
- *                  OPEN requests of the tenant in bounded batches (§5.4).
+ *                  OPEN requests of the tenant in bounded batches (§5.4). The
+ *                  recompute runs after the commit and can never undo or hide
+ *                  it: if it fails the write still answers 200 with
+ *                  `recompute: 'FAILED'` (and an error log), never 500.
  *   applyToAll     S7: copies hours, closed dates, SLA times (and the receipt
  *                  margin, window warning) and scheduling settings to every
  *                  tenant where the caller holds
  *                  `update:ChatbotSettingsAllBranches` through a membership.
  *                  Other tenants are never touched, listed or counted.
- *                  Each tenant has its own transaction and audit event.
+ *                  Each tenant has its own transaction and audit event and
+ *                  appears in exactly ONE result list: `tenantsFailed` only
+ *                  when its settings write failed; a write that committed
+ *                  but whose recompute failed is in `tenantsApplied` with
+ *                  `recompute: 'FAILED'`.
  */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -49,6 +56,23 @@ export interface SettingsResponse extends SettingsView {
   branchOpeningHours: { timeZone: string; days: OpeningDay[] } | null;
 }
 
+/**
+ * What happened to the open requests after a committed write.
+ *   DONE        every open request is on the new version.
+ *   PARTIAL     some rows are still on an older version (a command held them,
+ *               or they were created concurrently); they are stamped by the
+ *               next command that touches them.
+ *   FAILED      the recompute threw; the settings ARE saved, open requests
+ *               keep their old deadlines.
+ *   NOT_NEEDED  nothing was written (identical content).
+ */
+export type RecomputeStatus = 'DONE' | 'PARTIAL' | 'FAILED' | 'NOT_NEEDED';
+
+/** What `PUT` returns: the saved settings plus the recompute outcome. */
+export interface PutResponse extends SettingsResponse {
+  recompute: RecomputeStatus;
+}
+
 export class SettingsVersionConflictError extends Error {
   constructor(readonly current: SettingsResponse) {
     super('chatbot settings version conflict');
@@ -59,7 +83,10 @@ export class SettingsVersionConflictError extends Error {
 export interface ApplyToAllResult {
   dryRun: boolean;
   source: { tenantId: string; version: number };
-  tenantsApplied: TenantRef[];
+  /** `recompute` is absent on a dry run (nothing was written). */
+  tenantsApplied: Array<
+    TenantRef & { recompute?: Exclude<RecomputeStatus, 'NOT_NEEDED'> }
+  >;
   tenantsUnchanged: TenantRef[];
   tenantsSkipped: Array<
     TenantRef & { reason: 'NO_PERMISSION' | 'TENANT_INACTIVE' }
@@ -133,6 +160,25 @@ export class ChatbotSettingsService {
       readSettingsRow(this.prisma, tenantId),
       this.prisma.tenantOpeningHours.findFirst({ where: { tenantId } }),
     ]);
+    return this.toResponse(row, branch);
+  }
+
+  /** Same as `get`, on the connection of a transaction that is already open. */
+  private async getIn(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+  ): Promise<SettingsResponse> {
+    const row = await readSettingsRow(tx, tenantId);
+    const branch = await tx.tenantOpeningHours.findFirst({
+      where: { tenantId },
+    });
+    return this.toResponse(row, branch);
+  }
+
+  private toResponse(
+    row: Awaited<ReturnType<typeof readSettingsRow>>,
+    branch: { timeZone: string; days: Prisma.JsonValue } | null,
+  ): SettingsResponse {
     const view: SettingsView = row
       ? { ...rowToSettings(row), version: row.version }
       : { ...defaultSettings(), version: 0 };
@@ -153,7 +199,7 @@ export class ChatbotSettingsService {
     actorUserId: string,
     expectedVersion: number,
     input: AttentionSettingsInput,
-  ): Promise<SettingsResponse> {
+  ): Promise<PutResponse> {
     const next = normalizeSettingsInput(input);
     const actor = await this.actorName(actorUserId);
     let changed: boolean;
@@ -162,7 +208,9 @@ export class ChatbotSettingsService {
         const row = await readSettingsRow(tx, tenantId, 'UPDATE');
         const current = row?.version ?? 0;
         if (current !== expectedVersion) {
-          throw new SettingsVersionConflictError(await this.get(tenantId));
+          throw new SettingsVersionConflictError(
+            await this.getIn(tx, tenantId),
+          );
         }
         if (row && settingsEqual(rowToSettings(row), next)) return false;
         const before = row ? rowToSettings(row) : defaultSettings();
@@ -205,8 +253,12 @@ export class ChatbotSettingsService {
       }
       throw error;
     }
-    if (changed) await this.recompute(tenantId);
-    return this.get(tenantId);
+    // The write is committed: whatever the recompute does, the client gets
+    // the saved settings (never a 500 for a write that is already durable).
+    const recompute = changed
+      ? await this.recomputeAfterCommit(tenantId)
+      : 'NOT_NEEDED';
+    return { ...(await this.get(tenantId)), recompute };
   }
 
   async applyToAll(
@@ -251,8 +303,18 @@ export class ChatbotSettingsService {
         const outcome = options.dryRun
           ? await this.wouldChange(target.id, source)
           : await this.applyTo(target.id, source, tenantId, actorUserId, actor);
-        (outcome ? result.tenantsApplied : result.tenantsUnchanged).push(ref);
-        if (outcome && !options.dryRun) await this.recompute(target.id);
+        if (!outcome) {
+          result.tenantsUnchanged.push(ref);
+        } else if (options.dryRun) {
+          result.tenantsApplied.push(ref);
+        } else {
+          // The settings are committed: this tenant is `applied` whatever
+          // the recompute does, and is never also `failed`.
+          result.tenantsApplied.push({
+            ...ref,
+            recompute: await this.recomputeAfterCommit(target.id),
+          });
+        }
       } catch (error) {
         this.logger.error(
           `[apply-to-all] tenant ${target.id} failed: ${error instanceof Error ? error.name : 'unknown'}`,
@@ -380,8 +442,21 @@ export class ChatbotSettingsService {
     }
   }
 
-  private async recompute(tenantId: string): Promise<void> {
-    await recomputeOpenRequests(this.prisma, tenantId, { now: this.clock });
+  /** Never throws: the caller has already committed the settings. */
+  private async recomputeAfterCommit(
+    tenantId: string,
+  ): Promise<Exclude<RecomputeStatus, 'NOT_NEEDED'>> {
+    try {
+      const { stale } = await recomputeOpenRequests(this.prisma, tenantId, {
+        now: this.clock,
+      });
+      return stale > 0 ? 'PARTIAL' : 'DONE';
+    } catch (error) {
+      this.logger.error(
+        `[settings] tenant ${tenantId}: settings saved but the recompute of open requests failed: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+      return 'FAILED';
+    }
   }
 
   private async actorName(userId: string): Promise<string> {

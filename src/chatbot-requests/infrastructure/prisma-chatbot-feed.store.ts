@@ -272,7 +272,10 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
    * watermark in the same statement, so a cursor older than what was removed
    * answers 410. `SKIP LOCKED` keeps two replicas from fighting over rows. A
    * system operation across tenants, hence the root client; a scheduler calls
-   * it (unit 7's sweep). Returns the number of items removed.
+   * it (unit 7's sweep). The watermark rows are upserted in `tenantId` order:
+   * two replicas delete different rows of the same tenants, and marks locked
+   * in different orders would deadlock (40P01). Returns the number of items
+   * removed.
    */
   async purgeExpired(now: Date, batch = 1000): Promise<number> {
     const cutoff = new Date(now.getTime() - FEED_LIMITS.retentionDays * DAY_MS);
@@ -289,6 +292,7 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       marks AS (
         INSERT INTO "chatbot_feed_retention" ("tenantId", "purgedThroughCursor")
         SELECT "tenantId", max("cursor") FROM gone GROUP BY "tenantId"
+        ORDER BY "tenantId"
         ON CONFLICT ("tenantId") DO UPDATE SET "purgedThroughCursor" =
           GREATEST("chatbot_feed_retention"."purgedThroughCursor",
                    EXCLUDED."purgedThroughCursor")

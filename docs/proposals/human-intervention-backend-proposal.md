@@ -1167,4 +1167,4 @@ Lo implementado en la unidad 7 (7a ajustes y reloj, 7b retención) se aparta del
 - **`enabledSubtypes`** se guarda pero todavía no se aplica.
 - **Valores por defecto:** `windowWarningMinutes` 120 y `templateName` null.
 - **`slaPaused`** sigue siendo un marcador hasta la unidad 7c.
-- **Comprobante antes de abrir.** Un comprobante que llega antes de la primera apertura de un día hábil vence al cierre de ese mismo día, no al del siguiente (decisión del dueño 2026-11-11: «Al cierre de ese mismo día (Recomendado)»). El resto de §5.4 queda igual.
+- **Comprobante antes de abrir o en el descanso.** Un comprobante que llega antes de la primera apertura de un día hábil, o durante el descanso del mediodía, vence al cierre de ese mismo día si al día le quedan más minutos hábiles que el margen; si no, al cierre del siguiente día hábil (decisiones del dueño 2026-11-11, ambas «Al cierre de ese mismo día (Recomendado)»). El resto de §5.4 queda igual.
