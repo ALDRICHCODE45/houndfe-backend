@@ -42,6 +42,7 @@ import {
   refreshCustomerGroup,
 } from './chatbot-request-writes';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
+import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
 
 /** `source` of the requests the bot creates itself (wrapper rows use `WRAP:`). */
 export const BOT_REQUEST_SOURCE = 'houndfe-chatbot';
@@ -213,6 +214,14 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
         },
       },
     });
+    // Unit 6: one outbox row in this transaction; a rollback leaves no notice.
+    await enqueueNotice(tx, tenantId, {
+      type: 'REQUEST_CREATED',
+      requestId: id,
+      folio,
+      subtype: envelope.subtype,
+      dedupKey: `created:${id}`,
+    });
     await refreshCustomerGroup(tx, tenantId, customerKey);
     return { outcome: 'CREATED', id, folio, status: 'NEW' };
   }
@@ -282,6 +291,16 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     event: ChatbotRequestEventDraft,
   ): Promise<void> {
     await applyRequestPatch(this.tx, this.tenantId, row, patch, event);
+    // Unit 6: the customer cancelled; tell whoever was attending it (nobody
+    // is told about a request nobody had taken).
+    await enqueueNotice(this.tx, this.tenantId, {
+      type: 'REQUEST_CANCELLED',
+      requestId: row.id,
+      folio: row.folio,
+      subtype: row.subtype,
+      dedupKey: `cancelled:${row.id}`,
+      ...(row.assigneeUserId ? { recipientUserId: row.assigneeUserId } : {}),
+    });
     await refreshCustomerGroup(this.tx, this.tenantId, row.customerKey);
   }
 

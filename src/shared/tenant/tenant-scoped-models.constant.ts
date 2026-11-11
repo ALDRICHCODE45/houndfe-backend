@@ -151,4 +151,9 @@ export const TENANT_SCOPED_MODELS = new Set([
   // items or acknowledge its deliveries.
   'ChatbotFeedItem',
   'ChatbotFeedRetention',
+  // Unit 6 — in-app notices. Same fail-open allowlist semantics: without it
+  // a person could list or mark read another sucursal's notices through
+  // TenantPrismaService. `NotificationPreference` is per person, not per
+  // tenant, and is read by `userId` from the JWT.
+  'Notification',
 ]);

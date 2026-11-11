@@ -531,6 +531,8 @@ model Tenant {
   chatbotBotReceipts          ChatbotBotReceipt[]
   chatbotFeedItems            ChatbotFeedItem[]
   chatbotFeedRetention        ChatbotFeedRetention?
+  // human-intervention / unit 6 — in-app notices.
+  notifications               Notification[]
 
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
@@ -1915,6 +1917,9 @@ model User {
   cashHandoversCreated    CashHandover[] @relation("CashHandoverCreator")
   cashHandoversReceivedBy CashHandover[] @relation("CashHandoverReceiver")
   cashClosings          CashClosing[]  @relation("CashClosingActor")
+  // human-intervention / unit 6 — own in-app notices and delivery preferences.
+  notifications           Notification[]
+  notificationPreference  NotificationPreference?
 
   @@map("users")
 }
@@ -3967,4 +3972,49 @@ model ChatbotFeedRetention {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@map("chatbot_feed_retention")
+}
+
+// ============================================================================
+// NOTIFICATIONS (human-intervention / unit 6 — contract §5.1, §5.2, §10.1 R3/R8)
+// ============================================================================
+// In-app notices of the chatbot request inbox, one row per (user, event).
+// Recipients come from permissions, never from `NotificationSettings`, so this
+// module does not depend on its master switch (R8). `payload` is small and
+// never carries customer data: folio and subtype only (§6.3). `dedupKey` makes
+// a producer retry or a sweep re-run idempotent per user. `requestId` is a
+// plain column (no FK): rows are retained 90 days and the request is kept
+// forever, and the FK would add a lock on `chatbot_requests`. The partial
+// "unread" index is migration-authoritative (Prisma cannot express it). See
+// docs/notifications-model.md.
+model Notification {
+  id        String    @id @default(uuid())
+  tenantId  String
+  userId    String
+  type      String
+  requestId String?
+  payload   Json      @default("{}")
+  dedupKey  String?
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, userId, dedupKey])
+  @@index([tenantId, userId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("notifications")
+}
+
+// Per-person delivery preferences; they follow the person across tenants. No
+// row means the defaults (email and sound on). In-app notices cannot be turned
+// off (design §3).
+model NotificationPreference {
+  userId       String   @id
+  emailEnabled Boolean  @default(true)
+  soundEnabled Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("notification_preferences")
 }

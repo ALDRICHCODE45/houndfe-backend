@@ -47,6 +47,7 @@ import {
   lockCustomerIntake,
   type IntakeLimits,
 } from './chatbot-request-intake-writes';
+import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import { enqueueAnswered } from './chatbot-feed-writes';
 import {
   allocateFolio,
@@ -477,6 +478,14 @@ export class ChatbotRequestWrapper {
           }),
         },
       },
+    });
+    // Unit 6: one outbox row in this transaction; a rollback leaves no notice.
+    await enqueueNotice(tx, tenantId, {
+      type: 'REQUEST_CREATED',
+      requestId,
+      folio: data.folio,
+      subtype: input.subtype,
+      dedupKey: `created:${requestId}`,
     });
     await refreshCustomerGroup(tx, tenantId, customerKey);
   }

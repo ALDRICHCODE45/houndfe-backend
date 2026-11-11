@@ -18,6 +18,7 @@ import type {
   ChatbotRequestRow,
   ChatbotRequestView,
 } from '../application/chatbot-request-commands.service';
+import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import { enqueueAnswered, enqueueCancelled } from './chatbot-feed-writes';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
@@ -133,6 +134,19 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     event: ChatbotRequestEventDraft,
   ): Promise<void> {
     await this.applyPatch(row, patch, event);
+    // Unit 6: "reassigned to me" goes to the new assignee, never to the person
+    // who reassigned (the writer drops a notice addressed to its actor).
+    if (event.type === 'REASSIGNED' && patch.assigneeUserId) {
+      await enqueueNotice(this.tx, this.tenantId, {
+        type: 'REQUEST_REASSIGNED',
+        requestId: row.id,
+        folio: row.folio,
+        subtype: row.subtype,
+        dedupKey: `reassigned:${row.id}:${patch.version}`,
+        recipientUserId: patch.assigneeUserId,
+        actorUserId: event.actorId,
+      });
+    }
     await refreshCustomerGroup(this.tx, this.tenantId, row.customerKey);
   }
 
