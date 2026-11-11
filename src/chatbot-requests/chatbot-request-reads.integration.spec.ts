@@ -14,10 +14,12 @@ import {
   type ExecutionContext,
   type INestApplication,
   Injectable,
+  Logger,
   RequestMethod,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import type { Prisma } from '@prisma/client';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { randomUUID } from 'crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
@@ -54,8 +56,10 @@ import {
   ChatbotRequestReadsService,
   CUSTOMER_KEY_SEALER,
   INBOX_CLOCK,
+  SLA_PAUSE_READER,
 } from './application/chatbot-request-reads.service';
 import { PrismaDeliveryZoneValidationRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-validation.repository';
+import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-settings';
 import { CustomerKeySealer } from './domain/customer-key-sealer';
 import {
   allocateFolio,
@@ -63,6 +67,7 @@ import {
 } from './infrastructure/chatbot-request-writes';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-request-read.store';
+import { PrismaSlaPauseReader } from './infrastructure/prisma-sla-pause.reader';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
 import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
@@ -201,6 +206,8 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         },
         { provide: CUSTOMER_KEY_SEALER, useValue: sealer },
         { provide: INBOX_CLOCK, useValue: () => NOW },
+        // The real pause reader, as the module wires it (§5.4).
+        { provide: SLA_PAUSE_READER, useClass: PrismaSlaPauseReader },
         // The wrapped use cases have their own specs; here resolve only closes.
         {
           provide: CHATBOT_REQUEST_RESOLVER,
@@ -693,6 +700,116 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect(
         (await get(`/chatbot-requests/${other.id}/merge-candidates`)).status,
       ).toBe(404);
+    });
+  });
+
+  // ------------------------------------------- slaPaused and corrupt settings
+
+  describe('slaPaused derived from the tenant calendar', () => {
+    const corruptSettings = (tenantId: string) =>
+      prisma.chatbotAttentionSettings.create({
+        data: {
+          tenantId,
+          version: 1,
+          // The policy of this tenant cannot be built (no such IANA zone).
+          timeZone: 'Not/AZone',
+          days: defaultSettings().openingHours
+            .days as unknown as Prisma.InputJsonArray,
+          closedDates: [],
+          slas: defaultSettings().slas as unknown as Prisma.InputJsonArray,
+          windowWarningMinutes: 120,
+          templateCostText: 'x',
+          enabledSubtypes: [],
+          receiptCloseMarginMinutes: 60,
+          schedulingEnabled: false,
+          slotMinutes: 30,
+          slotsOffered: 3,
+          maxScheduledPerSlot: 3,
+        },
+      });
+
+    it('NOW is 06:00 in Mexico City (closed): an open request of a default tenant reads as paused', async () => {
+      const own = await create({ summary: 'paused-default' });
+      const res = await get('/chatbot-requests/groups?limit=50');
+      expect(res.status).toBe(200);
+      const row = res.body.items
+        .flatMap((g: any) => g.requests)
+        .find((r: any) => r.id === own.id);
+      expect(row).toMatchObject({ slaPaused: true });
+      expect(row.slaResumesAt).toBe('2026-11-11T15:00:00.000Z');
+    });
+
+    it('a tenant whose policy cannot be built still gets 200 on every read, with slaPaused false', async () => {
+      const t = randomUUID();
+      await prisma.tenant.create({
+        data: { id: t, name: 'Corrupta', slug: `cr-corrupt-${t}` },
+      });
+      try {
+        const own = await create({ summary: 'corrupt-tenant' }, t);
+        await corruptSettings(t);
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+
+        const groups = await get(
+          '/chatbot-requests/groups?limit=50',
+          'manager',
+          t,
+        );
+        expect(groups.status).toBe(200);
+        expect(groups.body.items[0].requests[0]).toMatchObject({
+          summary: 'corrupt-tenant',
+          slaPaused: false,
+          slaResumesAt: null,
+        });
+        const byCustomer = await get(
+          `/chatbot-requests?customerKey=${token(own.customerKey, t)}`,
+          'manager',
+          t,
+        );
+        expect(byCustomer.status).toBe(200);
+        expect(byCustomer.body.items[0]).toMatchObject({ slaPaused: false });
+        const detail = await get(`/chatbot-requests/${own.id}`, 'manager', t);
+        expect(detail.status).toBe(200);
+        expect(detail.body).toMatchObject({
+          slaPaused: false,
+          slaResumesAt: null,
+        });
+        expect(
+          (
+            await get(
+              `/chatbot-requests/${own.id}/merge-candidates`,
+              'manager',
+              t,
+            )
+          ).status,
+        ).toBe(200);
+
+        // One line per failed lookup, the tenant id and no settings value.
+        expect(warn).toHaveBeenCalled();
+        for (const [line] of warn.mock.calls) {
+          expect(String(line)).toContain(t);
+          expect(String(line)).not.toContain('Not/AZone');
+        }
+      } finally {
+        jest.restoreAllMocks();
+        await prisma.chatbotAttentionSettings.deleteMany({
+          where: { tenantId: t },
+        });
+        await prisma.$executeRaw`ALTER TABLE "chatbot_requests" DISABLE TRIGGER "chatbot_requests_keep_forever"`;
+        await prisma.$executeRaw`ALTER TABLE "chatbot_request_events" DISABLE TRIGGER "chatbot_request_events_append_only"`;
+        try {
+          await prisma.chatbotRequestEvent.deleteMany({
+            where: { tenantId: t },
+          });
+          await prisma.chatbotCustomerGroup.deleteMany({
+            where: { tenantId: t },
+          });
+          await prisma.chatbotRequest.deleteMany({ where: { tenantId: t } });
+        } finally {
+          await prisma.$executeRaw`ALTER TABLE "chatbot_requests" ENABLE TRIGGER "chatbot_requests_keep_forever"`;
+          await prisma.$executeRaw`ALTER TABLE "chatbot_request_events" ENABLE TRIGGER "chatbot_request_events_append_only"`;
+        }
+        await prisma.tenant.delete({ where: { id: t } });
+      }
     });
   });
 

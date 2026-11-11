@@ -11,7 +11,7 @@
  *   - the inbox keeps closed requests for 7 days (D17) and the history lists
  *     the older ones, split at one `now` taken per call.
  */
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   displayStatus,
   type ChatbotRequestKind,
@@ -255,6 +255,8 @@ const customerName = (c: Pick<CustomerRecord, 'firstName' | 'lastName'>) =>
 
 @Injectable()
 export class ChatbotRequestReadsService {
+  private readonly logger = new Logger(ChatbotRequestReadsService.name);
+
   constructor(
     @Inject(CHATBOT_REQUEST_READ_STORE)
     private readonly store: ChatbotRequestReadStore,
@@ -265,11 +267,27 @@ export class ChatbotRequestReadsService {
     private readonly pauseReader?: SlaPauseReader,
   ) {}
 
-  /** An empty page has no row to flag: it skips the settings lookup. */
+  /**
+   * An empty page has no row to flag: it skips the settings lookup.
+   *
+   * Fails soft: `slaPaused` is a derived hint, so a tenant whose policy cannot
+   * be loaded or whose calendar cannot be built (corrupt settings, the case the
+   * SLA sweep isolates per tenant) reads as "not paused" instead of turning the
+   * staff inbox into a 500. One line per failed lookup (not per row), with the
+   * tenant id and the error class only: an error message can carry settings
+   * values or customer data.
+   */
   private async pause(now: Date, empty = false): Promise<SlaPause> {
-    return this.pauseReader && !empty
-      ? this.pauseReader.pauseAt(now)
-      : NOT_PAUSED;
+    if (!this.pauseReader || empty) return NOT_PAUSED;
+    try {
+      return await this.pauseReader.pauseAt(now);
+    } catch (error) {
+      const kind = error instanceof Error ? error.constructor.name : 'unknown';
+      this.logger.warn(
+        `sla pause lookup failed, reading as not paused (tenant ${this.store.tenantId()}, ${kind})`,
+      );
+      return NOT_PAUSED;
+    }
   }
 
   /** `GET /chatbot-requests/groups` (§3.8). */

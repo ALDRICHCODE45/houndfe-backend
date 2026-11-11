@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { CustomerKeySealer } from '../domain/customer-key-sealer';
 import {
@@ -601,5 +602,98 @@ describe('slaPaused is derived on read (§5.4, unit 7c)', () => {
       { tab: 'open', filters: {} },
     );
     expect(openPage.items[0].requests[0]).toMatchObject({ slaPaused: false });
+  });
+});
+
+describe('slaPaused fails soft (resilience: corrupt settings never break the staff reads)', () => {
+  const broken = (): SlaPauseReader => ({
+    pauseAt: jest
+      .fn()
+      .mockRejectedValue(
+        new Error('timeZone is not a valid IANA zone: Not/AZone 5512345678'),
+      ),
+  });
+  const reader = { userId: 'u', ability: MANAGER };
+  let warn: jest.SpyInstance<void, [message: unknown]>;
+
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const NOT_PAUSED = { slaPaused: false, slaResumesAt: null };
+
+  it('groups answers with slaPaused false, and logs once by tenant only', async () => {
+    const service = build(
+      { groups: jest.fn().mockResolvedValue([group()]) },
+      broken(),
+    );
+    const page = await service.groups(reader, { tab: 'open', filters: {} });
+    expect(page.items[0].requests[0]).toMatchObject(NOT_PAUSED);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [[first]] = warn.mock.calls;
+    const line = String(first);
+    expect(line).toContain(TENANT);
+    // No error text (it can carry settings or customer data), only the tenant.
+    expect(line).not.toContain('Not/AZone');
+    expect(line).not.toContain('5512345678');
+  });
+
+  it('by customer, merge candidates and detail degrade the same way', async () => {
+    const service = build(
+      {
+        listByCustomer: jest.fn().mockResolvedValue([record()]),
+        mergeCandidates: jest.fn().mockResolvedValue([record()]),
+        findDetail: jest.fn().mockResolvedValue({
+          request: {
+            ...record(),
+            needs: null,
+            context: null,
+            resolution: null,
+            resolvedAt: null,
+            ambiguousCustomer: false,
+          },
+          candidates: [],
+          hasMergeCandidate: false,
+          customer: null,
+          recentOrders: [],
+          otherOpen: [],
+          decision: null,
+          zoneImpact: null,
+          audit: [],
+          deliveries: [],
+        } satisfies DetailRecord),
+      },
+      broken(),
+    );
+    const byCustomer = await service.listByCustomer(reader, {
+      customerKey: sealer.seal(TENANT, KEY),
+      tab: 'open',
+    });
+    expect(byCustomer.items[0]).toMatchObject(NOT_PAUSED);
+    const merge = await service.mergeCandidates('r-1');
+    expect(merge.items[0]).toMatchObject(NOT_PAUSED);
+    const detail = await service.detail(reader, 'r-1');
+    expect(detail).toMatchObject(NOT_PAUSED);
+    // One line per failed lookup, never one per row.
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  it('a healthy lookup is untouched and logs nothing', async () => {
+    const service = build(
+      { groups: jest.fn().mockResolvedValue([group()]) },
+      {
+        pauseAt: jest.fn().mockResolvedValue({
+          paused: true,
+          resumesAt: new Date('2026-11-12T15:00:00.000Z'),
+        }),
+      },
+    );
+    const page = await service.groups(reader, { tab: 'open', filters: {} });
+    expect(page.items[0].requests[0]).toMatchObject({
+      slaPaused: true,
+      slaResumesAt: '2026-11-12T15:00:00.000Z',
+    });
+    expect(warn).not.toHaveBeenCalled();
   });
 });

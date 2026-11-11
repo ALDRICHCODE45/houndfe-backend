@@ -311,7 +311,7 @@ Contract §5.4, §5.1, §10.1 R11. Code: `domain/chatbot-sla-sweep.ts` (pure pla
 
 **Drain rate and the ship-time burst.** The bound is 10 batches × 100 rows per phase per 30 s tick, per replica (up to 1 000 `due` rows per tick, about 2 000 a minute, per replica), not 100 per 30 s. A backlog of N overdue rows clears in about N / 1 000 ticks per replica. Customer feed items in that burst exist only for deadlines less than 24 h old (the 24 h rule below); staff notices are one per person and request and are held to the next opening.
 
-**`slaPaused` on read.** `PrismaSlaPauseReader` loads the tenant calendar once per read call (skipped when the page is empty): closed now and request open → `slaPaused`, `slaResumesAt` = next opening.
+**`slaPaused` on read.** `PrismaSlaPauseReader` loads the tenant calendar once per read call (skipped when the page is empty): closed now and request open → `slaPaused`, `slaResumesAt` = next opening. **Fails soft:** if the policy load or the calendar build/`isOpenAt` throws (corrupt settings, the case the sweep isolates per tenant), `ChatbotRequestReadsService.pause` catches it, logs one warning per failed lookup with the tenant id and the error class only, and the reads (inbox, by customer, detail, merge candidates) answer 200 with `slaPaused: false`, `slaResumesAt: null` instead of a 500.
 
 **Not in 7c.** Conversation milestones of §4.6 (5/15/30 min, 2 h) need sessions (unit 11); SSE `request.overdue` (unit 8); `enabledSubtypes` is still not enforced. The 50 % of a claimed request records an event but sends no notice (§5.1 only defines «sin tomar»; owner confirmed, L69).
 

@@ -114,6 +114,8 @@ Producer: `ChatbotSlaSweepStore` (`src/chatbot-requests/infrastructure/chatbot-s
 
 A dropped row is **done, not failed**: `status = PUBLISHED`, `retryCount` unchanged, `lastError = 'DROPPED:<REASON>'` (the outbox model has no skipped status and no reason column; `lastError` is the only free text, and a PUBLISHED row never otherwise carries one). No notification, no email job and no realtime event are created. The log line carries ids only (`row id, tenant, request, type, reason`), never customer data. Other types (`REQUEST_CREATED`, `REQUEST_REASSIGNED`, `REQUEST_CANCELLED`) are never judged and behave as before (the existing specs are unchanged). The check also applies to a notice that is not held (consumed within seconds), where it is a no-op. A notice written by an older build without `claimCycle` is judged on status only.
 
+The claim-cycle start is derived twice, on purpose: the sweep in JS (`computeClocks`, with `LAST_RELEASED`) and the consumer in SQL (`dropReason`). `src/notifications/sla-claim-reminder.integration.spec.ts` ties them together by running the real sweep and the real consumer end to end (fresh request, `RELEASED` and `AUTO_RELEASED` restarts, `scheduledFor`, scheduled then released) and asserting the reminder is delivered, never dropped as `CLAIM_CYCLE_CHANGED`. Change either derivation and that spec must stay green.
+
 ## Known limits
 
 - Retention (90 days, §5.2) is scheduled (unit 7b): hourly, batch 1000, at most 20 batches per tick, `FOR UPDATE SKIP LOCKED`, served by the `notifications_createdAt_idx` index. The chatbot feed keeps 30 days; notifications keep 90.
