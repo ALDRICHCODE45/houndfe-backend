@@ -168,7 +168,17 @@ function nextCheck(
   if (!clock) return null;
   const ahead = clock.instants.find(({ at }) => at.getTime() > now.getTime());
   if (ahead) return ahead.at;
-  return anchors.overdueAt ? null : now;
+  // Every instant passed. `overdueAt` is the first overdue of the REQUEST: when
+  // it is at or after this clock's deadline it came from this clock and the
+  // sweep has nothing left to do. When it is earlier it came from the claim
+  // clock (a request claimed after its resolve deadline), so the resolve
+  // clock's milestones were never recorded and the assignee was never told
+  // (owner decision): the sweep must visit it once. Milestone keys make that
+  // visit idempotent, and the sweep, not this value, sets the next check after.
+  return anchors.overdueAt &&
+    anchors.overdueAt.getTime() >= clock.deadline.getTime()
+    ? null
+    : now;
 }
 
 export function computeSla(

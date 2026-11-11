@@ -198,6 +198,34 @@ describe('planSweep: resolve clock (IN_PROGRESS)', () => {
     expect(iso(over.firstOverdueAt)).toBe(iso(at('2026-11-10T12:00:00-06:00')));
   });
 
+  it('claimed after the resolve deadline with overdueAt from the claim clock: all three recorded, the assignee told once (overdue), no second customer item', () => {
+    const lateClaim = row({
+      status: 'IN_PROGRESS',
+      assigneeUserId: 'u-1',
+      overdueAt: at('2026-11-10T10:31:00-06:00'),
+    });
+    const plan = planSweep(
+      policy(),
+      lateClaim,
+      new Set([
+        milestoneKey('CLAIM', 'HALF', at('2026-11-10T10:00:00-06:00')),
+        milestoneKey('CLAIM', 'ESCALATION', at('2026-11-10T10:00:00-06:00')),
+        milestoneKey('CLAIM', 'OVERDUE', at('2026-11-10T10:00:00-06:00')),
+      ]),
+      at('2026-11-10T13:00:00-06:00'),
+    );
+    expect(plan.clock).toBe('RESOLVE');
+    expect(kinds(plan)).toEqual([
+      ['HALF', null, true],
+      ['ESCALATION', null, true],
+      ['OVERDUE', 'REQUEST_OVERDUE', true],
+    ]);
+    // the customer overdue item stays once per request
+    expect(plan.firstOverdueAt).toBeNull();
+    expect(plan.customerNotice).toBeNull();
+    expect(plan.nextSlaCheckAt).toBeNull();
+  });
+
   it('claiming does not reset the resolve cycle (same clock, same keys)', () => {
     const start = at('2026-11-10T10:00:00-06:00');
     const done = new Set([milestoneKey('RESOLVE', 'HALF', start)]);
@@ -505,6 +533,35 @@ describe('slaPauseAt and noticeReleaseAt: staff notices wait for the next openin
     expect(iso(noticeReleaseAt(c, at('2026-11-16T12:00:00-06:00')))).toBe(
       iso(at('2026-11-17T09:00:00-06:00')),
     );
+  });
+
+  it('a calendar with no business time inside its horizon releases immediately (null), never throws', () => {
+    // Documented choice: with no next opening there is nothing to wait for, so
+    // the notice is not held back (a held notice would never be released). A
+    // week with no range at all cannot be built; the reachable case is every
+    // open weekday closed by closedDates for longer than the 800-day horizon.
+    const mondays: string[] = [];
+    for (let week = 0; week < 120; week++) {
+      mondays.push(
+        new Date(Date.UTC(2026, 10, 9 + week * 7)).toISOString().slice(0, 10),
+      );
+    }
+    const closedForever = cal((s) => {
+      s.openingHours = {
+        timeZone: s.openingHours.timeZone,
+        days: s.openingHours.days.map((d) => ({
+          day: d.day,
+          ranges: d.day === 'MONDAY' ? [{ open: '09:00', close: '19:00' }] : [],
+        })),
+      };
+      s.closedDates = mondays;
+    });
+    const now = at('2026-11-10T12:00:00-06:00');
+    expect(slaPauseAt(closedForever, now)).toEqual({
+      paused: true,
+      resumesAt: null,
+    });
+    expect(noticeReleaseAt(closedForever, now)).toBeNull();
   });
 
   it('crosses the DST change: Monday 09:00 EDT is 13:00Z, not 14:00Z', () => {

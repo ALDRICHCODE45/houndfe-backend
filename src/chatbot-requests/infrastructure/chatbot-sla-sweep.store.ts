@@ -33,10 +33,29 @@
  * Settings rows are read `FOR SHARE` after the request rows, the order every
  * command uses.
  *
- * Isolation: each row runs inside a SAVEPOINT. A row that fails is rolled back
- * to its savepoint, logged by id (never customer data) and pushed out by
- * `failureBackoffMs`, so one poison row cannot abort the batch or starve the
- * rows behind it.
+ * Isolation (S2): nothing a single row, tenant or customer group does can
+ * abort the batch or starve the rows behind it. Every failure-prone step has
+ * its own SAVEPOINT:
+ *   - the tenant's policy load: a tenant whose policy cannot be built (corrupt
+ *     settings) has its rows in the batch pushed out and skipped; the other
+ *     tenants go on;
+ *   - each row: rolled back alone and pushed out;
+ *   - each customer group refresh (run last, in sorted order, as before): the
+ *     rows are already written, so a failed group marks the rows of that
+ *     customer stale (`slaPolicyVersion = NULL`) and pushes them out; the next
+ *     visit recomputes them and refreshes the group again (durable repair).
+ *
+ * Durable backoff: a failed row's `nextSlaCheckAt` is pushed `failureBackoffMs`
+ * ahead. The due phase honors it by construction. The stale phase ignores
+ * `nextSlaCheckAt` on purpose (a stale row must be reconciled even when its old
+ * check is far away) EXCEPT for a check that lies inside the backoff window
+ * (`now < nextSlaCheckAt <= now + failureBackoffMs`): that is what a failed row
+ * looks like, and it is left to the due phase at that instant, which reconciles
+ * a stale row too. Cost: a stale row whose genuine check is due within the next
+ * `failureBackoffMs` is reconciled when that check fires, up to 5 minutes later.
+ *
+ * Logging is bounded: at most `MAX_LOGGED_FAILURES` lines per batch, then one
+ * "N more" line; ids only, never customer data.
  */
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -83,8 +102,10 @@ export interface SweepBatchResult {
   feedItems: number;
   /** Stale rows recomputed. */
   recomputed: number;
-  /** Rows rolled back to their savepoint. */
+  /** Rows rolled back to their savepoint (or skipped: their tenant's policy failed). */
   failed: number;
+  /** Customer groups whose refresh failed (their rows are marked for a retry). */
+  groupsFailed: number;
 }
 
 interface SweepRowRecord {
@@ -106,6 +127,7 @@ interface SweepRowRecord {
 }
 
 const DEFAULT_BATCH = 100;
+const MAX_LOGGED_FAILURES = 5;
 const DEFAULT_BACKOFF_MS = 5 * 60_000;
 const OPEN = Prisma.sql`r."status" IN ('NEW', 'IN_PROGRESS')`;
 
@@ -119,6 +141,35 @@ const COLUMNS = Prisma.sql`
   r."customerKey", r."conversationRef", r."assigneeUserId", r."createdAt",
   r."scheduledFor", r."overdueAt", r."slaPolicyVersion",
   ${LAST_RELEASED} AS "lastReleasedAt"`;
+
+const reason = (error: unknown): string =>
+  error instanceof Error ? error.message.slice(0, 200) : 'unknown';
+
+/** At most `MAX_LOGGED_FAILURES` lines per batch, then one "N more" line. */
+class FailureLog {
+  private logged = 0;
+  private suppressed = 0;
+
+  constructor(private readonly logger: Logger) {}
+
+  report(line: string): void {
+    if (this.logged < MAX_LOGGED_FAILURES) {
+      this.logged += 1;
+      this.logger.error(line);
+    } else {
+      this.suppressed += 1;
+    }
+  }
+
+  flush(): void {
+    if (this.suppressed > 0) {
+      this.logger.error(
+        `sla sweep: ${this.suppressed} more failure(s) in this batch not logged`,
+      );
+      this.suppressed = 0;
+    }
+  }
+}
 
 @Injectable()
 export class ChatbotSlaSweepStore {
@@ -170,6 +221,8 @@ export class ChatbotSlaSweepStore {
               AND coalesce(r."slaPolicyVersion", -1) < coalesce(
                 (SELECT s."version" FROM "chatbot_attention_settings" s
                  WHERE s."tenantId" = r."tenantId"), 0)
+              AND NOT coalesce(r."nextSlaCheckAt" > ${at}::timestamp
+                AND r."nextSlaCheckAt" <= ${ts(new Date(now.getTime() + this.failureBackoffMs))}::timestamp, false)
             ORDER BY r."id"
             LIMIT ${this.batchSize}
             FOR UPDATE OF r SKIP LOCKED`);
@@ -217,22 +270,51 @@ export class ChatbotSlaSweepStore {
       feedItems: 0,
       recomputed: 0,
       failed: 0,
+      groupsFailed: 0,
     };
+    const failures = new FailureLog(this.logger);
+    const retryAt = new Date(now.getTime() + this.failureBackoffMs);
     const rows = await this.lockRows(tx, phase, now);
     result.rows = rows.length;
     if (rows.length === 0) return result;
 
+    // Policy per tenant, each inside its own savepoint: a tenant whose policy
+    // cannot be built loses only its own rows of this batch.
     const policies = new Map<string, SlaPolicy>();
     for (const tenantId of [...new Set(rows.map((r) => r.tenantId))]) {
-      policies.set(
-        tenantId,
-        await loadSlaPolicy(tx as RawDb, tenantId, { lock: true }),
-      );
+      await tx.$executeRaw`SAVEPOINT sla_policy`;
+      try {
+        policies.set(
+          tenantId,
+          await loadSlaPolicy(tx as RawDb, tenantId, { lock: true }),
+        );
+        await tx.$executeRaw`RELEASE SAVEPOINT sla_policy`;
+      } catch (error) {
+        await tx.$executeRaw`ROLLBACK TO SAVEPOINT sla_policy`;
+        await tx.$executeRaw`RELEASE SAVEPOINT sla_policy`;
+        const skipped = rows.filter((r) => r.tenantId === tenantId);
+        result.failed += skipped.length;
+        failures.report(
+          `sla sweep policy failed (tenant ${tenantId}, ${skipped.length} row(s) pushed out): ${reason(error)}`,
+        );
+        await this.pushOut(
+          tx,
+          tenantId,
+          skipped.map((r) => r.id),
+          retryAt,
+        );
+      }
     }
-    const recorded = await this.recordedKeys(tx, rows);
-    const groups = new Map<string, Set<string>>();
+    const runnable = rows.filter((r) => policies.has(r.tenantId));
+    if (runnable.length === 0) {
+      failures.flush();
+      return result;
+    }
+    const recorded = await this.recordedKeys(tx, runnable);
+    // tenant → customerKey → the ids of this batch that touched that group
+    const groups = new Map<string, Map<string, string[]>>();
 
-    for (const row of rows) {
+    for (const row of runnable) {
       await tx.$executeRaw`SAVEPOINT sla_row`;
       try {
         const policy = policies.get(row.tenantId) as SlaPolicy;
@@ -252,39 +334,76 @@ export class ChatbotSlaSweepStore {
         );
         await tx.$executeRaw`RELEASE SAVEPOINT sla_row`;
         if (touchedGroup) {
-          const keys = groups.get(row.tenantId) ?? new Set<string>();
-          keys.add(row.customerKey);
+          const keys = groups.get(row.tenantId) ?? new Map<string, string[]>();
+          keys.set(row.customerKey, [
+            ...(keys.get(row.customerKey) ?? []),
+            row.id,
+          ]);
           groups.set(row.tenantId, keys);
         }
       } catch (error) {
         await tx.$executeRaw`ROLLBACK TO SAVEPOINT sla_row`;
         result.failed += 1;
         // Ids only: never customer data in a log.
-        this.logger.error(
-          `sla sweep row failed (${row.id}, tenant ${row.tenantId}): ${
-            error instanceof Error ? error.message.slice(0, 200) : 'unknown'
-          }`,
+        failures.report(
+          `sla sweep row failed (${row.id}, tenant ${row.tenantId}): ${reason(error)}`,
         );
-        const retryAt = new Date(now.getTime() + this.failureBackoffMs);
-        await tx.$executeRaw(Prisma.sql`
-          UPDATE "chatbot_requests"
-          SET "nextSlaCheckAt" = ${ts(retryAt)}::timestamp
-          WHERE "tenantId" = ${row.tenantId} AND "id" = ${row.id}`);
+        await this.pushOut(tx, row.tenantId, [row.id], retryAt);
         await tx.$executeRaw`RELEASE SAVEPOINT sla_row`;
       }
     }
-    // Customer groups last, tenants and keys in sorted order.
+    // Customer groups last, tenants and keys in sorted order (lock order), each
+    // key in its own savepoint.
     for (const tenantId of [...groups.keys()].sort()) {
-      // SAFETY: `refreshCustomerGroups` only runs raw SQL with an explicit
-      // tenantId; the transaction client has the same `$queryRaw` and
-      // `$executeRaw` as the tenant-extended client it is typed against.
-      await refreshCustomerGroups(
-        tx as unknown as TenantClient,
-        tenantId,
-        groups.get(tenantId) ?? [],
-      );
+      const keys = groups.get(tenantId) as Map<string, string[]>;
+      for (const key of [...keys.keys()].sort()) {
+        await tx.$executeRaw`SAVEPOINT sla_group`;
+        try {
+          // SAFETY: `refreshCustomerGroups` only runs raw SQL with an explicit
+          // tenantId; the transaction client has the same `$queryRaw` and
+          // `$executeRaw` as the tenant-extended client it is typed against.
+          await refreshCustomerGroups(tx as unknown as TenantClient, tenantId, [
+            key,
+          ]);
+          await tx.$executeRaw`RELEASE SAVEPOINT sla_group`;
+        } catch (error) {
+          await tx.$executeRaw`ROLLBACK TO SAVEPOINT sla_group`;
+          await tx.$executeRaw`RELEASE SAVEPOINT sla_group`;
+          result.groupsFailed += 1;
+          failures.report(
+            `sla sweep group refresh failed (tenant ${tenantId}, ${(keys.get(key) as string[]).length} row(s) marked for retry): ${reason(error)}`,
+          );
+          // The rows are written; mark them stale so the next visit recomputes
+          // them and refreshes the group again. `NULL` is always stale.
+          await this.pushOut(
+            tx,
+            tenantId,
+            keys.get(key) as string[],
+            retryAt,
+            true,
+          );
+        }
+      }
     }
+    failures.flush();
     return result;
+  }
+
+  /** Durable backoff of rows that failed (optionally also marking them stale). */
+  private async pushOut(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    ids: string[],
+    retryAt: Date,
+    markStale = false,
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "chatbot_requests" r
+      SET "nextSlaCheckAt" = ${ts(retryAt)}::timestamp
+          ${markStale ? Prisma.sql`, "slaPolicyVersion" = NULL` : Prisma.empty}
+      WHERE r."tenantId" = ${tenantId} AND r."id" = ANY(${ids}::text[])
+        AND ${OPEN}`);
   }
 
   /** Writes one row's plan. Returns `true` when its customer group changed. */

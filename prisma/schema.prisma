@@ -3913,6 +3913,11 @@ model ChatbotRequestEvent {
 
   request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
 
+  // Migration-only (20261111070000_chatbot_sla_sweep; Prisma's DSL cannot express
+  // a partial expression index): `chatbot_request_events_sla_milestone_uq`, UNIQUE
+  // ("tenantId", "requestId", data->>'clock', data->>'milestone', data->>'cycle')
+  // WHERE "type" = 'SLA_MILESTONE'. It is the durable "milestone reached once" the
+  // SLA sweep inserts against with ON CONFLICT DO NOTHING.
   @@index([tenantId, requestId, createdAt(sort: Desc), id(sort: Desc)])
   @@map("chatbot_request_events")
 }
@@ -4012,6 +4017,10 @@ model ChatbotFeedItem {
   tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
 
+  // Migration-only (20261111070000_chatbot_sla_sweep; partial index, not
+  // expressible in Prisma's DSL): `chatbot_feed_items_overdue_notice_uq`, UNIQUE
+  // ("tenantId", "requestId") WHERE "type" = 'request.overdue_notice' — at most one
+  // overdue notice per request; the sweep inserts with ON CONFLICT DO NOTHING.
   @@index([tenantId, cursor])
   @@index([tenantId, requestId])
   @@index([createdAt])

@@ -197,6 +197,10 @@ export function slaPauseAt(
  * the notice is released at the next opening. `null` = release now. The
  * instant is stored as the outbox row's `nextAttemptAt`, which the notify
  * consumer already honors (durable, shared by replicas, no timers).
+ *
+ * A calendar with no next opening inside its horizon (every open weekday
+ * closed by `closedDates`) also yields `null`: release immediately. Choice: with
+ * nothing to wait for, holding the notice would mean never sending it.
  */
 export function noticeReleaseAt(
   calendar: BusinessCalendar,

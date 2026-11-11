@@ -1329,6 +1329,11 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
         const defaultsRead = new Promise<void>((r) => (readDefaults = r));
         let release!: () => void;
         const gate = new Promise<void>((r) => (release = r));
+        type Columns = {
+          claimDeadlineAt: Date | null;
+          resolveDeadlineAt: Date | null;
+        };
+        let captured: Columns | null = null;
 
         // The create (as the wrapper does): reads the policy, then inserts later.
         const create = root.$transaction(
@@ -1342,6 +1347,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
               NOW,
             );
             expect(sla.slaPolicyVersion).toBe(0);
+            captured = sla;
             readDefaults();
             await gate;
             return insertRequestOnDedup(client, {
@@ -1388,15 +1394,18 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
         expect(row.resolveDeadlineAt!.getTime()).toBe(
           expected.addBusinessMinutes(row.createdAt, 120).getTime(),
         );
-        // ...and it is NOT what the defaults (Mon-Sat 09-19 Mexico City) give,
-        // except by coincidence of the hour, so the recompute really ran.
-        const onDefaults = policyFromSettings(defaultSettings(), 0).calendar;
-        const defaultsClaim = onDefaults
-          .addBusinessMinutes(row.createdAt, 30)
-          .getTime();
-        if (defaultsClaim !== row.claimDeadlineAt!.getTime()) {
-          expect(row.claimDeadlineAt!.getTime()).not.toBe(defaultsClaim);
-        }
+        // ...and it is NOT what the create wrote with the defaults (computed from
+        // the fixed NOW, a different instant than the row's real createdAt), so
+        // the recompute really ran. Unlike a comparison with the defaults at
+        // the row's own createdAt, this cannot pass by coincidence of the hour.
+        const createdWith = captured as Columns | null;
+        expect(createdWith).not.toBeNull();
+        expect(row.claimDeadlineAt!.getTime()).not.toBe(
+          createdWith!.claimDeadlineAt!.getTime(),
+        );
+        expect(row.resolveDeadlineAt!.getTime()).not.toBe(
+          createdWith!.resolveDeadlineAt!.getTime(),
+        );
       } finally {
         await prisma.tenant.delete({ where: { id: tenant } });
       }

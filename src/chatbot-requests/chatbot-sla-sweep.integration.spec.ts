@@ -8,11 +8,15 @@
  * (the defaults, UTC-6 in November).
  */
 import { randomUUID } from 'crypto';
+import { Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { integrationPrisma } from '../../test/integration/reset-db';
 import type { PrismaService } from '../shared/prisma/prisma.service';
 import * as writer from '../notifications/infrastructure/chatbot-request-notice.writer';
 import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-settings';
+import * as sweepDomain from './domain/chatbot-sla-sweep';
+import * as requestWrites from './infrastructure/chatbot-request-writes';
+import { slaColumnsForTransition } from './infrastructure/chatbot-sla-policy';
 import { ChatbotSlaSweepScheduler } from './infrastructure/chatbot-sla-sweep.scheduler';
 import { ChatbotSlaSweepStore } from './infrastructure/chatbot-sla-sweep.store';
 
@@ -28,6 +32,7 @@ describeIfDb('SLA sweep (PostgreSQL)', () => {
   const prisma = integrationPrisma();
   const tenants: string[] = [];
   let tenantId: string;
+  let otherTenantId: string;
   let folio = 0;
   let now = at('2026-11-10T10:00:00-06:00');
 
@@ -113,25 +118,48 @@ describeIfDb('SLA sweep (PostgreSQL)', () => {
     await prisma.tenant.create({
       data: { id: tenantId, name: 'Sucursal SLA', slug: `sla-${tenantId}` },
     });
+    otherTenantId = randomUUID();
+    tenants.push(otherTenantId);
+    await prisma.tenant.create({
+      data: {
+        id: otherTenantId,
+        name: 'Sucursal SLA 2',
+        slug: `sla-${otherTenantId}`,
+      },
+    });
   });
 
   beforeEach(async () => {
     now = at('2026-11-10T10:00:00-06:00');
     // Test database, own tenant: start each case from no requests.
-    await prisma.outboxEvent.deleteMany({ where: { tenantId } });
-    await prisma.notification.deleteMany({ where: { tenantId } });
-    await prisma.chatbotFeedItem.deleteMany({ where: { tenantId } });
+    await prisma.outboxEvent.deleteMany({
+      where: { tenantId: { in: tenants } },
+    });
+    await prisma.notification.deleteMany({
+      where: { tenantId: { in: tenants } },
+    });
+    await prisma.chatbotFeedItem.deleteMany({
+      where: { tenantId: { in: tenants } },
+    });
     await prisma.chatbotRequest.updateMany({
-      where: { tenantId },
+      where: { tenantId: { in: tenants } },
       data: { nextSlaCheckAt: null },
     });
     await prisma.$executeRaw`ALTER TABLE "chatbot_requests" DISABLE TRIGGER "chatbot_requests_keep_forever"`;
     await prisma.$executeRaw`ALTER TABLE "chatbot_request_events" DISABLE TRIGGER "chatbot_request_events_append_only"`;
     try {
-      await prisma.chatbotRequestEvent.deleteMany({ where: { tenantId } });
-      await prisma.chatbotCustomerGroup.deleteMany({ where: { tenantId } });
-      await prisma.chatbotRequest.deleteMany({ where: { tenantId } });
-      await prisma.chatbotAttentionSettings.deleteMany({ where: { tenantId } });
+      await prisma.chatbotRequestEvent.deleteMany({
+        where: { tenantId: { in: tenants } },
+      });
+      await prisma.chatbotCustomerGroup.deleteMany({
+        where: { tenantId: { in: tenants } },
+      });
+      await prisma.chatbotRequest.deleteMany({
+        where: { tenantId: { in: tenants } },
+      });
+      await prisma.chatbotAttentionSettings.deleteMany({
+        where: { tenantId: { in: tenants } },
+      });
     } finally {
       await prisma.$executeRaw`ALTER TABLE "chatbot_requests" ENABLE TRIGGER "chatbot_requests_keep_forever"`;
       await prisma.$executeRaw`ALTER TABLE "chatbot_request_events" ENABLE TRIGGER "chatbot_request_events_append_only"`;
@@ -403,6 +431,242 @@ describeIfDb('SLA sweep (PostgreSQL)', () => {
     expect((await request(bad)).nextSlaCheckAt?.getTime()).toBeGreaterThan(
       now.getTime(),
     );
+  });
+
+  it('claimed after the resolve deadline with the claim clock already overdue: the resolve milestones are recorded and the assignee is told once; the customer item stays once', async () => {
+    const userId = randomUUID();
+    await prisma.user.create({
+      data: {
+        id: userId,
+        email: `sla-${userId}@t.test`,
+        hashedPassword: 'x',
+        name: 'Ana',
+      },
+    });
+    try {
+      const id = await insertRequest();
+      // The claim clock goes overdue (10:30) while nobody takes the request.
+      now = at('2026-11-10T10:31:00-06:00');
+      await sweeper().tick();
+      expect((await request(id)).overdueAt).not.toBeNull();
+      expect(await feed(id)).toHaveLength(1);
+      expect(await events(id)).toHaveLength(3);
+
+      // Claimed at 13:00, after the resolve deadline (12:00).
+      now = at('2026-11-10T13:00:00-06:00');
+      await prisma.chatbotRequest.update({
+        where: { id },
+        data: {
+          status: 'IN_PROGRESS',
+          assigneeUserId: userId,
+          assigneeDisplayName: 'Ana',
+          claimedAt: now,
+        },
+      });
+      const columns = await slaColumnsForTransition(
+        prisma,
+        tenantId,
+        id,
+        'IN_PROGRESS',
+        now,
+      );
+      await prisma.chatbotRequest.update({
+        where: { id },
+        data: {
+          resolveDeadlineAt: columns?.resolveDeadlineAt,
+          slaPolicyVersion: columns?.slaPolicyVersion,
+          nextSlaCheckAt: columns?.nextSlaCheckAt,
+        },
+      });
+      expect((await request(id)).nextSlaCheckAt).not.toBeNull();
+
+      await sweeper().tick();
+      const resolveEvents = (await events(id)).filter(
+        (e) => (e.data as { clock: string }).clock === 'RESOLVE',
+      );
+      expect(
+        resolveEvents
+          .map((e) => (e.data as { milestone: string }).milestone)
+          .sort(),
+      ).toEqual(['ESCALATION', 'HALF', 'OVERDUE']);
+      const toAssignee = (await notices()).filter(
+        (n) => (n.payload as { recipientUserId?: string }).recipientUserId,
+      );
+      expect(toAssignee).toHaveLength(1);
+      expect(toAssignee[0].payload).toMatchObject({
+        type: 'REQUEST_OVERDUE',
+        recipientUserId: userId,
+      });
+      expect(await feed(id)).toHaveLength(1); // once per request, unchanged
+      expect((await request(id)).nextSlaCheckAt).toBeNull();
+
+      // Idempotent: another pass records and sends nothing more.
+      await sweeper().tick();
+      expect(await events(id)).toHaveLength(6);
+      expect(await notices()).toHaveLength(2);
+    } finally {
+      await prisma.user.delete({ where: { id: userId } });
+    }
+  });
+
+  describe('resilience (S2): one bad row, tenant or group cannot stall the rest', () => {
+    const noLogs = () =>
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+    it('a tenant whose policy load throws does not stop the other tenants, and its rows are pushed out', async () => {
+      noLogs();
+      // A corrupt settings row: the policy of this tenant cannot be built.
+      await prisma.chatbotAttentionSettings.create({
+        data: {
+          tenantId: otherTenantId,
+          version: 1,
+          timeZone: 'Not/AZone',
+          days: defaultSettings().openingHours
+            .days as unknown as Prisma.InputJsonArray,
+          closedDates: [],
+          slas: defaultSettings().slas as unknown as Prisma.InputJsonArray,
+          windowWarningMinutes: 120,
+          templateCostText: 'x',
+          enabledSubtypes: [],
+          receiptCloseMarginMinutes: 60,
+          schedulingEnabled: false,
+          slotMinutes: 30,
+          slotsOffered: 3,
+          maxScheduledPerSlot: 3,
+        },
+      });
+      const good = await insertRequest();
+      const bad = await insertRequest({
+        tenantId: otherTenantId,
+        slaPolicyVersion: 1,
+      });
+      now = at('2026-11-10T10:15:00-06:00');
+
+      const summary = await sweeper().tick();
+      expect(summary.failed).toBe(1);
+      expect(await events(good)).toHaveLength(1);
+      expect(await notices()).toHaveLength(1);
+      const badRow = await prisma.chatbotRequest.findFirstOrThrow({
+        where: { tenantId: otherTenantId, id: bad },
+      });
+      expect(badRow.nextSlaCheckAt?.getTime()).toBeGreaterThan(now.getTime());
+      expect(
+        await prisma.chatbotRequestEvent.count({
+          where: { tenantId: otherTenantId, type: 'SLA_MILESTONE' },
+        }),
+      ).toBe(0);
+
+      // Pushed out: the next tick does not retry it (nor log it again).
+      const again = await sweeper().tick();
+      expect(again.rows).toBe(0);
+      expect(again.failed).toBe(0);
+    });
+
+    it('always-failing rows of the stale phase do not starve the healthy stale rows', async () => {
+      noLogs();
+      await seedSettings(5);
+      const badIds = [1, 2, 3, 4].map(
+        (n) => `00000000-0000-4000-8000-00000000000${n}`,
+      );
+      const healthyIds = [1, 2, 3].map(
+        (n) => `ffffffff-0000-4000-8000-00000000000${n}`,
+      );
+      for (const id of [...badIds, ...healthyIds]) {
+        await insertRequest({
+          id,
+          slaPolicyVersion: 0,
+          nextSlaCheckAt: null, // a FAILED recompute left no check
+        });
+      }
+      const real = sweepDomain.planSweep;
+      jest.spyOn(sweepDomain, 'planSweep').mockImplementation((...args) => {
+        if (badIds.includes((args[1] as unknown as { id: string }).id)) {
+          throw new Error('always failing');
+        }
+        return real(...args);
+      });
+      now = at('2026-11-10T10:05:00-06:00');
+
+      const summary = await sweeper(2).tick();
+      expect(summary.failed).toBe(4);
+      expect(summary.recomputed).toBe(3);
+      for (const id of healthyIds) {
+        expect((await request(id)).slaPolicyVersion).toBe(5);
+      }
+      for (const id of badIds) {
+        const row = await request(id);
+        expect(row.slaPolicyVersion).toBe(0);
+        expect(row.nextSlaCheckAt?.getTime()).toBeGreaterThan(now.getTime());
+      }
+
+      // The backoff is durable and both phases honor it.
+      const next = await sweeper(2).tick();
+      expect(next.rows).toBe(0);
+      expect(next.failed).toBe(0);
+    });
+
+    it('error logging is bounded: a batch of failing rows writes a handful of lines, not one per row', async () => {
+      const logged = noLogs();
+      for (let i = 0; i < 30; i++) await insertRequest();
+      now = at('2026-11-10T10:15:00-06:00');
+      jest.spyOn(writer, 'enqueueNotice').mockRejectedValue(new Error('boom'));
+
+      const summary = await sweeper().tick();
+      expect(summary.failed).toBe(30);
+      expect(logged.mock.calls.length).toBeLessThanOrEqual(6);
+      expect(
+        logged.mock.calls.some(([line]) => String(line).includes('more')),
+      ).toBe(true);
+    });
+
+    it('a customer group that fails to refresh is isolated, repaired on a later visit, and never rolls back the batch', async () => {
+      noLogs();
+      const bad = await insertRequest();
+      const good = await insertRequest();
+      const badKey = (await request(bad)).customerKey;
+      const real = requestWrites.refreshCustomerGroups;
+      jest
+        .spyOn(requestWrites, 'refreshCustomerGroups')
+        .mockImplementation((tx, tenant, keys) =>
+          [...keys].includes(badKey)
+            ? Promise.reject(new Error('group boom'))
+            : real(tx, tenant, keys),
+        );
+      now = at('2026-11-10T12:00:00-06:00'); // every milestone due, overdue
+      const summary = await sweeper().tick();
+
+      expect(summary.groupsFailed).toBe(1);
+      expect(await events(good)).toHaveLength(3);
+      expect(await events(bad)).toHaveLength(3);
+      const goodGroup = await prisma.chatbotCustomerGroup.findFirst({
+        where: { tenantId, customerKey: (await request(good)).customerKey },
+      });
+      expect(goodGroup?.hasOverdue).toBe(true);
+      expect(
+        await prisma.chatbotCustomerGroup.findFirst({
+          where: { tenantId, customerKey: badKey },
+        }),
+      ).toBeNull();
+      // Marked for a retry with a backoff.
+      const marked = await request(bad);
+      expect(marked.slaPolicyVersion).toBeNull();
+      expect(marked.nextSlaCheckAt?.getTime()).toBeGreaterThan(now.getTime());
+
+      // Repaired once the backoff passes (the mock still fails nothing else).
+      jest.restoreAllMocks();
+      noLogs();
+      now = new Date(now.getTime() + 6 * 60_000);
+      await sweeper().tick();
+      expect(
+        (
+          await prisma.chatbotCustomerGroup.findFirst({
+            where: { tenantId, customerKey: badKey },
+          })
+        )?.hasOverdue,
+      ).toBe(true);
+      expect((await request(bad)).slaPolicyVersion).toBe(0);
+      expect(await events(bad)).toHaveLength(3); // never recorded twice
+    });
   });
 
   describe('customer feed item of the first overdue: only if it expired less than 24 h ago (L69)', () => {

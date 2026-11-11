@@ -153,6 +153,33 @@ describe('computeSla: nextSlaCheckAt', () => {
     expect(sla.nextSlaCheckAt).toBeNull();
   });
 
+  it('is "now" for a request claimed after its resolve deadline whose overdueAt came from the claim clock (the assignee is still told)', () => {
+    // claim deadline 10:30 (overdueAt 10:31 set then), resolve deadline 12:00,
+    // claimed at 13:00: the RESOLVE clock's milestones were never recorded.
+    const now = at('2026-11-10T13:00:00-06:00');
+    const sla = computeSla(
+      policy(),
+      anchors({
+        status: 'IN_PROGRESS',
+        overdueAt: at('2026-11-10T10:31:00-06:00'),
+      }),
+      now,
+    );
+    expect(iso(sla.nextSlaCheckAt)).toBe(iso(now));
+  });
+
+  it('stays null when the overdueAt already belongs to the active clock (resolve overdue marked)', () => {
+    const sla = computeSla(
+      policy(),
+      anchors({
+        status: 'IN_PROGRESS',
+        overdueAt: at('2026-11-10T12:00:00-06:00'),
+      }),
+      at('2026-11-10T13:00:00-06:00'),
+    );
+    expect(sla.nextSlaCheckAt).toBeNull();
+  });
+
   it('follows the resolve clock once IN_PROGRESS and keeps the claim deadline out of the patch', () => {
     const now = at('2026-11-10T10:05:00-06:00');
     const sla = computeSla(policy(), anchors({ status: 'IN_PROGRESS' }), now);

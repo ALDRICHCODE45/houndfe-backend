@@ -544,6 +544,28 @@ describe('slaPaused is derived on read (§5.4, unit 7c)', () => {
     });
   });
 
+  it('does not look up the calendar when the page is empty (groups, by customer, merge candidates)', async () => {
+    const reader = { pauseAt: jest.fn() };
+    const service = build(
+      {
+        groups: jest.fn().mockResolvedValue([]),
+        listByCustomer: jest.fn().mockResolvedValue([]),
+        mergeCandidates: jest.fn().mockResolvedValue([]),
+      },
+      reader,
+    );
+    await service.groups(
+      { userId: 'u', ability: MANAGER },
+      { tab: 'open', filters: {} },
+    );
+    await service.listByCustomer(
+      { userId: 'u', ability: MANAGER },
+      { customerKey: sealer.seal(TENANT, KEY), tab: 'open' },
+    );
+    await service.mergeCandidates('r-1');
+    expect(reader.pauseAt).not.toHaveBeenCalled();
+  });
+
   it('is never paused for a closed request, and not when the calendar is open', async () => {
     const resolved = record({
       status: 'RESOLVED',

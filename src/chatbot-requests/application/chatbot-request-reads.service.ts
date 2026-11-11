@@ -265,8 +265,11 @@ export class ChatbotRequestReadsService {
     private readonly pauseReader?: SlaPauseReader,
   ) {}
 
-  private async pause(now: Date): Promise<SlaPause> {
-    return this.pauseReader ? this.pauseReader.pauseAt(now) : NOT_PAUSED;
+  /** An empty page has no row to flag: it skips the settings lookup. */
+  private async pause(now: Date, empty = false): Promise<SlaPause> {
+    return this.pauseReader && !empty
+      ? this.pauseReader.pauseAt(now)
+      : NOT_PAUSED;
   }
 
   /** `GET /chatbot-requests/groups` (§3.8). */
@@ -305,7 +308,7 @@ export class ChatbotRequestReadsService {
         1,
       ),
     });
-    const pause = await this.pause(now);
+    const pause = await this.pause(now, records.length === 0);
     const page = records.slice(0, limit);
     const customers = await this.customerIndex(page.flatMap((g) => g.requests));
     const items = page.map((group) => {
@@ -372,7 +375,7 @@ export class ChatbotRequestReadsService {
         open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
       ),
     });
-    const pause = await this.pause(now);
+    const pause = await this.pause(now, records.length === 0);
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
@@ -584,7 +587,7 @@ export class ChatbotRequestReadsService {
   async mergeCandidates(id: string) {
     const records = await this.store.mergeCandidates(id);
     if (!records) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
-    const pause = await this.pause(this.clock());
+    const pause = await this.pause(this.clock(), records.length === 0);
     return { items: records.map((r) => this.toRow(r, pause)) };
   }
 

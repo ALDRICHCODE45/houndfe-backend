@@ -9,6 +9,7 @@
  *   - several replicas: every replica ticks and `SKIP LOCKED` makes their
  *     batches disjoint, so nothing is processed or notified twice and nobody
  *     waits. No in-memory cursor: the only memory is "is a tick running here";
+ *   - a batch that throws stops only its own phase for this tick;
  *   - never overlaps in one process and never rejects out of the `@Interval`
  *     (that would silently stop the cadence); a failed batch is logged and the
  *     next tick retries.
@@ -31,6 +32,9 @@ export interface SweepTickSummary {
   feedItems: number;
   recomputed: number;
   failed: number;
+  groupsFailed: number;
+  /** Batches that threw (the phase stopped, the other phase still ran). */
+  batchErrors: number;
   /** A phase stopped at the cap with a full last batch. */
   hasMore: boolean;
 }
@@ -51,10 +55,11 @@ export class ChatbotSlaSweepScheduler {
       if (
         summary.milestones > 0 ||
         summary.recomputed > 0 ||
-        summary.failed > 0
+        summary.failed > 0 ||
+        summary.groupsFailed > 0
       ) {
         this.logger.log(
-          `sla sweep: ${summary.rows} row(s), ${summary.milestones} milestone(s), ${summary.notices} notice(s), ${summary.feedItems} feed item(s), ${summary.recomputed} recomputed, ${summary.failed} failed${summary.hasMore ? ' (more remain)' : ''}`,
+          `sla sweep: ${summary.rows} row(s), ${summary.milestones} milestone(s), ${summary.notices} notice(s), ${summary.feedItems} feed item(s), ${summary.recomputed} recomputed, ${summary.failed} failed, ${summary.groupsFailed} group(s) failed${summary.hasMore ? ' (more remain)' : ''}`,
         );
       }
     } catch (error) {
@@ -75,6 +80,8 @@ export class ChatbotSlaSweepScheduler {
       feedItems: 0,
       recomputed: 0,
       failed: 0,
+      groupsFailed: 0,
+      batchErrors: 0,
       hasMore: false,
     };
     for (const phase of ['due', 'stale'] as SweepPhase[]) {
@@ -83,13 +90,25 @@ export class ChatbotSlaSweepScheduler {
           summary.hasMore = true;
           break;
         }
-        const result: SweepBatchResult = await this.store.runBatch(phase);
+        let result: SweepBatchResult;
+        try {
+          result = await this.store.runBatch(phase);
+        } catch (error) {
+          // A batch that cannot run (database trouble) stops its own phase but
+          // never the other one; one line per phase per tick.
+          summary.batchErrors += 1;
+          this.logger.error(`sla sweep ${phase} batch failed`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          break;
+        }
         summary.rows += result.rows;
         summary.milestones += result.milestones;
         summary.notices += result.notices;
         summary.feedItems += result.feedItems;
         summary.recomputed += result.recomputed;
         summary.failed += result.failed;
+        summary.groupsFailed += result.groupsFailed;
         if (result.rows < this.store.batchSize) break;
       }
     }
