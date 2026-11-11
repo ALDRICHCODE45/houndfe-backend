@@ -95,7 +95,6 @@ export function buildReceiptReviewNotificationFunctions(
       const html = renderToStaticMarkup(
         ReceiptReviewRequestedEmail({
           saleFolio: payload.saleFolio,
-          customerName: payload.customerName,
           declaredAmountCents: payload.declaredAmountCents,
           extractedAmountCents: payload.extractedAmountCents,
           debtCents: payload.debtCents,

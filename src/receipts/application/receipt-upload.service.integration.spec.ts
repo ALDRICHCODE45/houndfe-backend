@@ -654,7 +654,6 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
           receiptId: first.receiptId,
           saleId,
           saleFolio: 'V-0042',
-          customerName: 'Ana López',
           declaredAmountCents: 4000,
           extractedAmountCents: 10_000,
           debtCents: 10_000,
@@ -662,8 +661,10 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
           mimeType: 'application/pdf',
         },
       });
-      // Never the storage key or any file reference.
+      // Never the storage key or any file reference, and no customer name
+      // (R10, contract §6.3).
       expect(JSON.stringify(rows[0].payload)).not.toContain('receipts/');
+      expect(rows[0].payload).not.toHaveProperty('customerName');
     });
 
     it('publishes for a legacy mediaUrl attachment too', async () => {

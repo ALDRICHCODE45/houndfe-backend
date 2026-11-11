@@ -4,7 +4,8 @@
  *
  * One email per NEW receipt the chatbot uploads. Same HoundFe brand tokens
  * and Spanish copy as the time-off template. It never attaches or links the
- * file: staff open it in the system, behind the review permission.
+ * file: staff open it in the system, behind the review permission. No customer
+ * name or phone (contract §6.3, R10): the order folio identifies the sale.
  */
 import {
   Body,
@@ -44,7 +45,6 @@ const FONT_STACK =
 
 export interface ReceiptReviewRequestedEmailProps {
   saleFolio: string | null;
-  customerName: string | null;
   declaredAmountCents: number | null;
   extractedAmountCents: number | null;
   debtCents: number;
@@ -86,7 +86,6 @@ const VALUE_STYLE = {
 
 export function ReceiptReviewRequestedEmail({
   saleFolio,
-  customerName,
   declaredAmountCents,
   extractedAmountCents,
   debtCents,
@@ -96,7 +95,6 @@ export function ReceiptReviewRequestedEmail({
   const subject = composeSubject(saleFolio);
   const rows: Array<[string, string]> = [
     ['Pedido', saleFolio ?? 'Sin folio'],
-    ['Cliente', customerName ?? 'Sin cliente registrado'],
     ['Monto declarado', formatCents(declaredAmountCents)],
     ['Monto leído del comprobante', formatCents(extractedAmountCents)],
     ['Saldo pendiente del pedido', formatCents(debtCents)],

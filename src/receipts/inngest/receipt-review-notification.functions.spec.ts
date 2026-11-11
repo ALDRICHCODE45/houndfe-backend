@@ -17,7 +17,6 @@ function payload(
     receiptId: 'receipt-1',
     saleId: 'sale-1',
     saleFolio: 'V-0042',
-    customerName: 'Ana López',
     declaredAmountCents: 4000,
     extractedAmountCents: 10000,
     debtCents: 10000,
@@ -118,12 +117,34 @@ describe('receipt-review-requested-email Inngest function', () => {
     expect(mail.subject).toBe('Comprobante por revisar · pedido V-0042');
     expect(mail.attachments).toBeUndefined();
     expect(mail.html).toContain('V-0042');
-    expect(mail.html).toContain('Ana López');
+    // R10 / §6.3: the email never shows who the customer is.
+    expect(mail.html).not.toContain('Ana López');
+    expect(mail.html).not.toContain('Cliente');
     expect(mail.html).toContain('$40.00');
     expect(mail.html).toContain('$100.00');
     expect(mail.html).toContain('No coincide con el saldo');
     expect(mail.html).toContain('https://app.example.com');
     expect(mail.html).not.toContain('receipts/');
+  });
+
+  it('never renders a customer name, even from a stale outbox row that still carries one (R10)', async () => {
+    const { run, send } = setup();
+
+    // Rows queued before this change have `customerName` in their payload.
+    await run({
+      ...payload(),
+      customerName: 'Ana López',
+      customerPhone: '5512345678',
+    } as ReceiptReviewRequestedPayload);
+
+    const mail = send.mock.calls[0][0];
+    expect(mail.html).not.toContain('Ana López');
+    expect(mail.html).not.toContain('5512345678');
+    expect(mail.subject).not.toContain('Ana');
+    // The rest of the email is unchanged: folio, amounts and the warning.
+    expect(mail.html).toContain('V-0042');
+    expect(mail.html).toContain('$100.00');
+    expect(mail.html).toContain('No coincide con el saldo');
   });
 
   it('renders not-declared amounts and a matching receipt', async () => {
@@ -132,7 +153,6 @@ describe('receipt-review-requested-email Inngest function', () => {
     await run(
       payload({
         saleFolio: null,
-        customerName: null,
         declaredAmountCents: null,
         extractedAmountCents: null,
         mismatchFlagged: false,

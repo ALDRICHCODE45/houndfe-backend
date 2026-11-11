@@ -53,7 +53,6 @@ const EXTENSIONS: Record<ReceiptMimeType, string> = {
 type PayableSale = {
   debtCents: number;
   folio: string | null;
-  customerName: string | null;
 };
 
 type StoredReceipt = {
@@ -250,7 +249,6 @@ export class ReceiptUploadService {
           receiptId: row.id,
           saleId: data.saleId,
           saleFolio: sale.folio,
-          customerName: sale.customerName,
           declaredAmountCents: data.declaredAmountCents ?? null,
           extractedAmountCents: extracted?.amountCents ?? null,
           debtCents: sale.debtCents,
@@ -315,7 +313,6 @@ export class ReceiptUploadService {
         paymentStatus: true,
         debtCents: true,
         folio: true,
-        customer: { select: { firstName: true, lastName: true } },
       },
     });
     if (!sale) {
@@ -333,11 +330,6 @@ export class ReceiptUploadService {
     return {
       debtCents: sale.debtCents,
       folio: sale.folio,
-      customerName: sale.customer
-        ? [sale.customer.firstName, sale.customer.lastName]
-            .filter(Boolean)
-            .join(' ')
-        : null,
     };
   }
 
