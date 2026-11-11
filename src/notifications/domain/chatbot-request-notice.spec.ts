@@ -8,6 +8,7 @@ import {
   formatFolio,
   noticeText,
   requestDeepLink,
+  slaNoticeDropReason,
 } from './chatbot-request-notice';
 
 describe('notice audiences (contract §5.1 table)', () => {
@@ -117,4 +118,85 @@ describe('R3 — outbox event types', () => {
       expect(type.startsWith('chatbot_request.')).toBe(true);
     }
   });
+});
+
+describe('slaNoticeDropReason: a held SLA notice that no longer applies is dropped', () => {
+  const START = new Date('2026-11-10T16:00:00.000Z');
+  const open = (over = {}) => ({
+    status: 'NEW' as const,
+    claimStart: START,
+    ...over,
+  });
+  const notice = (type: string, claimCycle?: number) => ({
+    type,
+    ...(claimCycle === undefined ? {} : { claimCycle }),
+  });
+
+  it.each(['REQUEST_CLAIM_REMINDER', 'REQUEST_ESCALATION', 'REQUEST_OVERDUE'])(
+    '%s is dropped when the request is closed at consume time',
+    (type) => {
+      for (const status of ['RESOLVED', 'CANCELLED'] as const) {
+        expect(
+          slaNoticeDropReason(notice(type, START.getTime()), open({ status })),
+        ).toBe('REQUEST_CLOSED');
+      }
+    },
+  );
+
+  it('REQUEST_ESCALATION and REQUEST_OVERDUE still apply to a request that is claimed (only closing drops them)', () => {
+    for (const type of ['REQUEST_ESCALATION', 'REQUEST_OVERDUE']) {
+      expect(
+        slaNoticeDropReason(notice(type), open({ status: 'IN_PROGRESS' })),
+      ).toBeNull();
+    }
+  });
+
+  it('REQUEST_CLAIM_REMINDER is dropped when the request was claimed since', () => {
+    expect(
+      slaNoticeDropReason(
+        notice('REQUEST_CLAIM_REMINDER', START.getTime()),
+        open({ status: 'IN_PROGRESS' }),
+      ),
+    ).toBe('CLAIMED_SINCE');
+  });
+
+  it('REQUEST_CLAIM_REMINDER is dropped when the claim cycle changed (released and restarted)', () => {
+    expect(
+      slaNoticeDropReason(
+        notice('REQUEST_CLAIM_REMINDER', START.getTime()),
+        open({ claimStart: new Date(START.getTime() + 60_000) }),
+      ),
+    ).toBe('CLAIM_CYCLE_CHANGED');
+  });
+
+  it('REQUEST_CLAIM_REMINDER of a still-NEW request in the same cycle is delivered', () => {
+    expect(
+      slaNoticeDropReason(
+        notice('REQUEST_CLAIM_REMINDER', START.getTime()),
+        open(),
+      ),
+    ).toBeNull();
+  });
+
+  it('a notice without a cycle (written before it existed) is judged on status only', () => {
+    expect(
+      slaNoticeDropReason(notice('REQUEST_CLAIM_REMINDER'), open()),
+    ).toBeNull();
+  });
+
+  it('a missing request drops an SLA notice (nothing to link to)', () => {
+    expect(slaNoticeDropReason(notice('REQUEST_OVERDUE'), null)).toBe(
+      'REQUEST_MISSING',
+    );
+  });
+
+  it.each(['REQUEST_CREATED', 'REQUEST_REASSIGNED', 'REQUEST_CANCELLED'])(
+    '%s is never judged: unchanged behavior',
+    (type) => {
+      expect(
+        slaNoticeDropReason(notice(type), open({ status: 'RESOLVED' })),
+      ).toBeNull();
+      expect(slaNoticeDropReason(notice(type), null)).toBeNull();
+    },
+  );
 });

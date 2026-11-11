@@ -49,13 +49,17 @@ import {
   ChatbotRequestReadsService,
   CUSTOMER_KEY_SEALER,
   INBOX_CLOCK,
+  SLA_PAUSE_READER,
 } from './application/chatbot-request-reads.service';
 import { CustomerKeySealer } from './domain/customer-key-sealer';
+import { PrismaSlaPauseReader } from './infrastructure/prisma-sla-pause.reader';
 import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-request-read.store';
 import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
 import { ChatbotRequestWrapperModule } from './chatbot-request-wrapper.module';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { ChatbotFeedPurgeScheduler } from './infrastructure/chatbot-feed-purge.scheduler';
+import { ChatbotSlaSweepScheduler } from './infrastructure/chatbot-sla-sweep.scheduler';
+import { ChatbotSlaSweepStore } from './infrastructure/chatbot-sla-sweep.store';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
 import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
@@ -110,11 +114,16 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
         new CustomerKeySealer(config.getOrThrow<string>('JWT_SECRET')),
     },
     { provide: INBOX_CLOCK, useValue: () => new Date() },
+    // §5.4: slaPaused derived on read from the tenant's calendar (unit 7c).
+    { provide: SLA_PAUSE_READER, useClass: PrismaSlaPauseReader },
     BotRequestIntakeService,
     ChatbotFeedService,
     ChatbotRecoveryService,
     PgFeedWakeup,
     ChatbotFeedPurgeScheduler,
+    // §5.4 SLA sweep (unit 7c): @Interval 30 s, SKIP LOCKED, multi-replica safe.
+    ChatbotSlaSweepStore,
+    ChatbotSlaSweepScheduler,
     { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
     { provide: CHATBOT_FEED_STORE, useClass: PrismaChatbotFeedStore },
     { provide: CHATBOT_RECOVERY_STORE, useClass: PrismaChatbotRecoveryStore },

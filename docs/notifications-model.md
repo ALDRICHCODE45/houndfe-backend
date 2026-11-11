@@ -44,8 +44,8 @@ The consumer processes **one row per local transaction** (`FOR UPDATE SKIP LOCKE
 | `REQUEST_CREATED` | active members with `read` + `update:ChatbotRequest` | batched, or immediate for `TALK_TO_HUMAN` / `COMPLAINT` | bot intake and the wrapped legacy hooks (unit 6) |
 | `REQUEST_REASSIGNED` | the new assignee (never the actor) | immediate | staff `reassign` (unit 6) |
 | `REQUEST_CANCELLED` | the assignee, if any, when the close was not theirs | none | customer cancel, staff cancel by someone else, zone sibling resolved, legacy-route resolve by someone else (unit 6) |
-| `REQUEST_CLAIM_REMINDER` | as `REQUEST_CREATED` | immediate | unit 7 |
-| `REQUEST_ESCALATION`, `REQUEST_OVERDUE` | active members with `read:ChatbotEscalation` | immediate | unit 7 |
+| `REQUEST_CLAIM_REMINDER` | as `REQUEST_CREATED` | immediate | SLA sweep, 50 % of the claim clock of a `NEW` request (unit 7c) |
+| `REQUEST_ESCALATION`, `REQUEST_OVERDUE` | active members with `read:ChatbotEscalation`; **plus the assignee** when someone holds the request (the sweep names them in `recipientUserId`, added to the permission-resolved set when still an active member of the tenant) | immediate | SLA sweep, 80 % and 100 % of the active clock (unit 7c) |
 
 A grant counts when a role has the action or `manage`, on the subject or `all` (as `CaslAbilityFactory`). Grants are **merged across all of a person's memberships** in the tenant, as CASL flattens every membership's role: someone with `read:ChatbotRequest` from one role and `update:ChatbotRequest` from another qualifies; `read` alone does not. Each grant is its own condition over the user's memberships. Only `User.isActive` members of the notice's tenant qualify.
 
@@ -93,11 +93,33 @@ Recorded in proposal §5.1 and §5.2 as well.
 | `NOTICE_NOTIFY_BATCH_SIZE` / `NOTICE_NOTIFY_MAX_RETRIES` | 25 / 5 | Consumer rows per tick, attempts before `FAILED` |
 | `NOTICE_EMAIL_BATCH_SIZE` / `NOTICE_EMAIL_LOCK_MS` / `NOTICE_EMAIL_MAX_RETRIES` | 100 / 60000 / 5 | Email jobs claimed per tick, lease, attempts |
 
+### SLA sweep producer (unit 7c, §5.4)
+
+Producer: `ChatbotSlaSweepStore` (`src/chatbot-requests/infrastructure/chatbot-sla-sweep.store.ts`), called every 30 s by `ChatbotSlaSweepScheduler`. It writes through the same `enqueueNotice`, on the root transaction client (no request context), so the consumer, recipients, email rules and R3 are unchanged. Per request and milestone:
+
+- **Which notice.** 50 % while `NEW` → `REQUEST_CLAIM_REMINDER`; 80 % → `REQUEST_ESCALATION`; 100 % → `REQUEST_OVERDUE`. The 50 % of a **claimed** request (resolve clock) is recorded but sends nothing: the §5.1 table only has «mitad del tiempo **sin tomar**». After downtime several milestones can be due at once: all are recorded, only the highest sends a notice.
+- **`dedupKey`** is `sla:<requestId>:<clock>:<milestone>:<cycleMs>` (`cycle` = the instant the clock started, so a release, which restarts the claim clock, gets its own reminders). It deduplicates per user in `notifications`, but that table is purged at 90 days, so it is **not** the guard.
+- **Durable dedup: the request's own events.** Each reached milestone is first inserted as a `SLA_MILESTONE` event (`data: {milestone, clock, cycle, dueAt, notice}`, actor `SYSTEM`) with `ON CONFLICT DO NOTHING` on the unique partial index `chatbot_request_events_sla_milestone_uq` `(tenantId, requestId, data->>'clock', data->>'milestone', data->>'cycle')`. Only a milestone that was actually inserted enqueues its notice. Events are append-only and kept forever, so a purge of old notifications can never cause a re-notify (tested).
+- **Hours: staff notices wait for the next opening (owner decision L69, «Guardarlos hasta la próxima apertura»).** Milestone instants are business time, but a milestone can be recorded while the tenant calendar is closed: the one that lands exactly on a close (a receipt due at close), a late sweep, downtime catch-up, a closed date. The `SLA_MILESTONE` event is recorded **at once** (audit, dedup, `overdueAt`), but the in-app notice and the email are released at the **next opening** of the tenant calendar. Mechanism: the sweep writes the `chatbot_request.notify` outbox row with `nextAttemptAt = noticeReleaseAt(calendar, now)` (the next opening, via `addBusinessMinutes(now, 0)`; `null` = now while open). The notify consumer already claims only `status = 'PENDING' AND nextAttemptAt <= NOW()`, so the release is durable, shared by all replicas and needs no in-memory timer; a restart changes nothing. It cannot double-send: the row is claimed once (`FOR UPDATE SKIP LOCKED`, one transaction), and the per-user `dedupKey` plus the durable event still guard it. Email: the email job is created **when the notify row is consumed**, so it is also due at the opening and follows the existing batching (immediate for these types, unchanged). The event's `data.noticeNotBefore` records the release instant. Examples (injected clock, tested): deadline = Saturday 19:00 close → released Monday 09:00; a closed Monday → Tuesday 09:00; across a DST change the opening is the local 09:00 (EDT 13:00Z, not 14:00Z). The customer's `request.overdue_notice` is **not** held (it is created at the deadline; see the bot contract).
+
+**A held notice that no longer applies is dropped at consume time.** A staff notice held over a weekend can describe a request that changed meanwhile, so the notify consumer judges every SLA type (`REQUEST_CLAIM_REMINDER`, `REQUEST_ESCALATION`, `REQUEST_OVERDUE`) against the request **as it is when the row is consumed** (`slaNoticeDropReason`, pure; one primary-key lookup of the request plus the last `RELEASED`/`AUTO_RELEASED` event, inside the consume transaction):
+
+| Request at consume time | Reminder (50 %, "sin tomar") | Escalation (80 %) / overdue |
+| --- | --- | --- |
+| `RESOLVED` or `CANCELLED` | dropped, `REQUEST_CLOSED` | dropped, `REQUEST_CLOSED` |
+| claimed since (`IN_PROGRESS`) | dropped, `CLAIMED_SINCE` | delivered (the assignee and the viewers should know it is late) |
+| released and restarted (claim cycle changed; the reminder carries `claimCycle`, the cycle start in ms, compared with `max(createdAt, scheduledFor, last release)`) | dropped, `CLAIM_CYCLE_CHANGED` | delivered |
+| still `NEW`, same cycle / still open | delivered once | delivered once |
+| request row missing (cannot happen: requests are kept forever) | dropped, `REQUEST_MISSING` | dropped, `REQUEST_MISSING` |
+
+A dropped row is **done, not failed**: `status = PUBLISHED`, `retryCount` unchanged, `lastError = 'DROPPED:<REASON>'` (the outbox model has no skipped status and no reason column; `lastError` is the only free text, and a PUBLISHED row never otherwise carries one). No notification, no email job and no realtime event are created. The log line carries ids only (`row id, tenant, request, type, reason`), never customer data. Other types (`REQUEST_CREATED`, `REQUEST_REASSIGNED`, `REQUEST_CANCELLED`) are never judged and behave as before (the existing specs are unchanged). The check also applies to a notice that is not held (consumed within seconds), where it is a no-op. A notice written by an older build without `claimCycle` is judged on status only.
+
 ## Known limits
 
 - Retention (90 days, §5.2) is scheduled (unit 7b): hourly, batch 1000, at most 20 batches per tick, `FOR UPDATE SKIP LOCKED`, served by the `notifications_createdAt_idx` index. The chatbot feed keeps 30 days; notifications keep 90.
 - `FAILED` rows are only visible in `outbox_events`; the "failed notices" screen is later.
-- The email shows no age or time remaining (needs request deadlines; unit 7).
+- The email shows no age or time remaining (the deadlines now exist, but the template does not render them yet).
+- A burst of overdue notices is possible when unit 7c ships (old open requests past their deadline): one in-app notice and one email per person and request, 100 requests per 30 s at most.
 - Both `@Interval` ticks run on every replica; `FOR UPDATE SKIP LOCKED` keeps them disjoint. If two replicas claim at the same instant, a person's group can still split between them (rare; at most two emails).
 
 ## R10: the receipt-review email

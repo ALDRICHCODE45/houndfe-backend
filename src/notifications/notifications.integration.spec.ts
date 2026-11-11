@@ -17,6 +17,7 @@
  * Resend is never called: the mailer and Inngest are test doubles.
  */
 import { AsyncLocalStorage } from 'async_hooks';
+import { Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ClsService } from 'nestjs-cls';
 import type { Inngest } from 'inngest';
@@ -54,6 +55,7 @@ import {
   groupJobs,
   type NoticeEmailEvent,
 } from './outbox/chatbot-request-email.dispatcher';
+import { ChatbotSlaSweepStore } from '../chatbot-requests/infrastructure/chatbot-sla-sweep.store';
 import { ChatbotRequestNotifyConsumer } from './outbox/chatbot-request-notify.consumer';
 
 const describeIfDb =
@@ -1040,6 +1042,318 @@ describeIfDb('notifications (PostgreSQL)', () => {
         emailEnabled: true,
         soundEnabled: true,
       });
+    });
+  });
+
+  describe('SLA sweep notices are held until the tenant opens again (unit 7c, L69)', () => {
+    it('the consumer does not release a notice before its opening, then sends it once, with its email', async () => {
+      const f = await fixture();
+      const request = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: f.tenantId,
+          folio: 1,
+          kind: 'CLARIFICATION',
+          subtype: 'UNKNOWN_QUESTION',
+          customerKey: '525512340000',
+          summary: 'Pregunta',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          // Saturday 2030-01-05 (UTC-6): claim deadline 19:00 = the close.
+          createdAt: new Date('2030-01-05T18:30:00-06:00'),
+          slaPolicyVersion: 0,
+          nextSlaCheckAt: new Date('2030-01-05T18:45:00-06:00'),
+        },
+      });
+      const sweep = new ChatbotSlaSweepStore(root, {
+        clock: () => new Date('2030-01-05T19:00:05-06:00'),
+      });
+      await sweep.runBatch('due');
+
+      const rows = await prisma.outboxEvent.findMany({
+        where: { tenantId: f.tenantId, eventType: 'chatbot_request.notify' },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].nextAttemptAt.toISOString()).toBe(
+        '2030-01-07T15:00:00.000Z',
+      );
+
+      // Before the opening: nothing is claimable, nothing is sent.
+      while (await consumer.processOne()) {
+        /* drain rows of other specs */
+      }
+      expect(
+        await prisma.notification.count({ where: { tenantId: f.tenantId } }),
+      ).toBe(0);
+      expect(
+        (
+          await prisma.outboxEvent.findUniqueOrThrow({
+            where: { id: rows[0].id },
+          })
+        ).status,
+      ).toBe('PENDING');
+
+      // The opening arrives (the stored instant becomes due): released once.
+      await prisma.outboxEvent.update({
+        where: { id: rows[0].id },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
+      while (await consumer.processOne()) {
+        /* drain */
+      }
+      while (await consumer.processOne()) {
+        /* drain */
+      }
+      const sent = await prisma.notification.findMany({
+        where: { tenantId: f.tenantId, requestId: request.id },
+      });
+      // `escal` holds read:ChatbotEscalation and `boss` manage:all (CASL): one each.
+      expect(sent.map((n) => n.type)).toEqual([
+        'REQUEST_OVERDUE',
+        'REQUEST_OVERDUE',
+      ]);
+      expect(sent.map((n) => n.userId).sort()).toEqual(
+        [f.boss, f.escal].sort(),
+      );
+      const emails = await prisma.outboxEvent.count({
+        where: { tenantId: f.tenantId, eventType: 'chatbot_request.email' },
+      });
+      expect(emails).toBe(2);
+      expect(
+        (
+          await prisma.outboxEvent.findUniqueOrThrow({
+            where: { id: rows[0].id },
+          })
+        ).status,
+      ).toBe('PUBLISHED');
+    });
+  });
+  describe('a held SLA notice that no longer applies is dropped at consume time (unit 7c)', () => {
+    // Saturday 2030-01-05 (UTC-6): claim deadline 19:00 = the close; the sweep
+    // holds the notices until Monday 09:00.
+    async function held(f: Fixture, folio: number) {
+      const request = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: f.tenantId,
+          folio,
+          kind: 'CLARIFICATION',
+          subtype: 'UNKNOWN_QUESTION',
+          customerKey: `5255123400${folio}`,
+          summary: 'Pregunta',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          createdAt: new Date('2030-01-05T18:30:00-06:00'),
+          slaPolicyVersion: 0,
+          nextSlaCheckAt: new Date('2030-01-05T18:45:00-06:00'),
+        },
+      });
+      await new ChatbotSlaSweepStore(root, {
+        clock: () => new Date('2030-01-05T19:00:05-06:00'),
+      }).runBatch('due');
+      const rows = await prisma.outboxEvent.findMany({
+        where: {
+          tenantId: f.tenantId,
+          eventType: 'chatbot_request.notify',
+          aggregateId: request.id,
+        },
+      });
+      expect(rows).toHaveLength(1);
+      return { request, row: rows[0] };
+    }
+    /** The opening arrives: the stored instant is due; drain the consumer. */
+    async function openAndDrain(rowId: string) {
+      await prisma.outboxEvent.update({
+        where: { id: rowId },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
+      while (await consumer.processOne()) {
+        /* drain */
+      }
+    }
+    const nothingDelivered = async (f: Fixture, requestId: string) => {
+      expect(
+        await prisma.notification.count({
+          where: { tenantId: f.tenantId, requestId },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.outboxEvent.count({
+          where: { tenantId: f.tenantId, eventType: 'chatbot_request.email' },
+        }),
+      ).toBe(0);
+    };
+
+    it('held over a weekend and resolved on Sunday: nothing on Monday, row done with a reason', async () => {
+      const f = await fixture();
+      const { request, row } = await held(f, 1);
+      await prisma.chatbotRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'RESOLVED',
+          resolvedAt: new Date(),
+          closedAt: new Date(),
+          assigneeUserId: f.ana,
+          assigneeDisplayName: 'ana',
+          claimedAt: new Date(),
+          resolvedByActorId: f.ana,
+          resolvedByDisplayName: 'ana',
+          nextSlaCheckAt: null,
+        },
+      });
+      const warn = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+      await openAndDrain(row.id);
+      await nothingDelivered(f, request.id);
+      const done = await prisma.outboxEvent.findUniqueOrThrow({
+        where: { id: row.id },
+      });
+      expect(done.status).toBe('PUBLISHED');
+      expect(done.retryCount).toBe(0);
+      expect(done.lastError).toBe('DROPPED:REQUEST_CLOSED');
+      // ids only in the log line
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      const line = lines.find((l) => l.includes(row.id));
+      expect(line).toContain(request.id);
+      expect(line).not.toMatch(/Pregunta|5255/);
+      warn.mockRestore();
+    });
+
+    it('a claim reminder is dropped when the request was claimed before the release', async () => {
+      const f = await fixture();
+      // The reminder the sweep wrote for the claim cycle that started at
+      // creation (Saturday 18:00), held until Monday 09:00.
+      const request = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: f.tenantId,
+          folio: 2,
+          kind: 'CLARIFICATION',
+          subtype: 'UNKNOWN_QUESTION',
+          customerKey: '525512340002',
+          summary: 'Pregunta',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          createdAt: new Date('2030-01-05T18:00:00-06:00'),
+          slaPolicyVersion: 0,
+        },
+      });
+      const claimStart = new Date('2030-01-05T18:00:00-06:00').getTime();
+      const reminder = await prisma.outboxEvent.create({
+        data: {
+          tenantId: f.tenantId,
+          aggregateType: 'ChatbotRequest',
+          aggregateId: request.id,
+          eventType: 'chatbot_request.notify',
+          payload: {
+            type: 'REQUEST_CLAIM_REMINDER',
+            requestId: request.id,
+            folio: 2,
+            subtype: 'UNKNOWN_QUESTION',
+            dedupKey: `sla:${request.id}:CLAIM:HALF:${claimStart}`,
+            claimCycle: claimStart,
+          },
+          nextAttemptAt: new Date('2030-01-07T15:00:00.000Z'),
+        },
+      });
+      // Claimed on Sunday before the release.
+      await prisma.chatbotRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'IN_PROGRESS',
+          assigneeUserId: f.ana,
+          assigneeDisplayName: 'ana',
+          claimedAt: new Date(),
+        },
+      });
+      await openAndDrain(reminder.id);
+      await nothingDelivered(f, request.id);
+      const done = await prisma.outboxEvent.findUniqueOrThrow({
+        where: { id: reminder.id },
+      });
+      expect(done.status).toBe('PUBLISHED');
+      expect(done.lastError).toBe('DROPPED:CLAIMED_SINCE');
+    });
+
+    it('a claim reminder is dropped when the claim cycle changed (released after it was claimed)', async () => {
+      const f = await fixture();
+      const request = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: f.tenantId,
+          folio: 3,
+          kind: 'CLARIFICATION',
+          subtype: 'UNKNOWN_QUESTION',
+          customerKey: '525512340003',
+          summary: 'Pregunta',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          createdAt: new Date('2030-01-05T18:00:00-06:00'),
+          slaPolicyVersion: 0,
+        },
+      });
+      const oldCycle = new Date('2030-01-05T18:00:00-06:00').getTime();
+      const reminder = await prisma.outboxEvent.create({
+        data: {
+          tenantId: f.tenantId,
+          aggregateType: 'ChatbotRequest',
+          aggregateId: request.id,
+          eventType: 'chatbot_request.notify',
+          payload: {
+            type: 'REQUEST_CLAIM_REMINDER',
+            requestId: request.id,
+            folio: 3,
+            subtype: 'UNKNOWN_QUESTION',
+            dedupKey: `sla:${request.id}:CLAIM:HALF:${oldCycle}`,
+            claimCycle: oldCycle,
+          },
+          nextAttemptAt: new Date('2030-01-07T15:00:00.000Z'),
+        },
+      });
+      // Claimed then released: back to NEW with a RELEASED event (new cycle).
+      await prisma.chatbotRequestEvent.create({
+        data: {
+          tenantId: f.tenantId,
+          requestId: request.id,
+          type: 'RELEASED',
+          actorKind: 'USER',
+          actorId: f.ana,
+          actorDisplayName: 'ana',
+          fromStatus: 'IN_PROGRESS',
+          toStatus: 'NEW',
+          version: 3,
+          data: {},
+          // Sunday, after the cycle the reminder was written for began.
+          createdAt: new Date('2030-01-06T12:00:00-06:00'),
+        },
+      });
+      await openAndDrain(reminder.id);
+      await nothingDelivered(f, request.id);
+      expect(
+        (
+          await prisma.outboxEvent.findUniqueOrThrow({
+            where: { id: reminder.id },
+          })
+        ).lastError,
+      ).toBe('DROPPED:CLAIM_CYCLE_CHANGED');
+    });
+
+    it('still open: the held notice is delivered once, with its email', async () => {
+      const f = await fixture();
+      const { request, row } = await held(f, 4);
+      await openAndDrain(row.id);
+      await openAndDrain(row.id);
+      const sent = await prisma.notification.findMany({
+        where: { tenantId: f.tenantId, requestId: request.id },
+      });
+      expect(sent.map((n) => n.type)).toEqual([
+        'REQUEST_OVERDUE',
+        'REQUEST_OVERDUE',
+      ]);
+      expect(
+        (await prisma.outboxEvent.findUniqueOrThrow({ where: { id: row.id } }))
+          .lastError,
+      ).toBeNull();
+      expect(
+        await prisma.outboxEvent.count({
+          where: { tenantId: f.tenantId, eventType: 'chatbot_request.email' },
+        }),
+      ).toBe(2);
     });
   });
 });

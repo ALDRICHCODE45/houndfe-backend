@@ -1168,3 +1168,15 @@ Lo implementado en la unidad 7 (7a ajustes y reloj, 7b retención) se aparta del
 - **Valores por defecto:** `windowWarningMinutes` 120 y `templateName` null.
 - **`slaPaused`** sigue siendo un marcador hasta la unidad 7c.
 - **Comprobante antes de abrir o en el descanso.** Un comprobante que llega antes de la primera apertura de un día hábil, o durante el descanso del mediodía, vence al cierre de ese mismo día si al día le quedan más minutos hábiles que el margen; si no, al cierre del siguiente día hábil (decisiones del dueño 2026-11-11, ambas «Al cierre de ese mismo día (Recomendado)»). El resto de §5.4 queda igual.
+
+## 14. Nota v1.3 (2026-11-11): unidad 7c, barrido de tiempos
+
+Lo implementado en la unidad 7c completa §5.1 y §5.4 con estos detalles, que el texto del contrato no fijaba.
+
+- **Hitos durables.** Cada hito (50 %, 80 %, vencida) de cada reloj (toma o resolución) queda como evento `SLA_MILESTONE` en la auditoría, que nunca se borra: `data` lleva `clock`, `cycle` (el inicio de ese ciclo del reloj; al liberar, el reloj de toma empieza un ciclo nuevo con sus propios avisos), `dueAt`, `notice`, `noticeNotBefore` y, en la vencida, `customerNotice`. Un índice único por solicitud, reloj, hito y ciclo impide avisar dos veces, aunque la notificación se haya purgado a los 90 días.
+- **`slaPaused`** se calcula al leer, con el calendario de la sucursal: está en pausa cuando la sucursal está cerrada y la solicitud abierta.
+- **Política vieja.** El barrido también recalcula las solicitudes abiertas que quedaron con una versión de la política anterior (recálculo parcial o fallido al guardar ajustes).
+- **Mitad del tiempo de una solicitud ya tomada:** se registra, pero no se avisa (decisión del dueño: «No, solo 80 % y vencida (Recomendado)»). Al 80 % y al vencer se avisa a quien la tiene y a quienes tienen `read:ChatbotEscalation`.
+- **Avisos fuera de horario:** el hito se registra en el momento, pero la notificación y el correo al personal salen en la próxima apertura de la sucursal (decisión del dueño: «Guardarlos hasta la próxima apertura (Recomendado)»). Un aviso retenido que ya no aplica al salir (la solicitud se cerró, o un recordatorio de toma de una solicitud ya tomada) se descarta.
+- **`request.overdue_notice` para el bot:** una sola vez por solicitud, en la primera vencida. Payload `{requestId, folio, kind, subtype, clock, overdueAt, assigned}`. ACK admitidos: `PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` y `STALE`; los `DEFERRED_*` responden `422 OUTCOME_NOT_ALLOWED`, como `request.cancelled`. **Solo si venció hace menos de 24 h** (decisión del dueño: «Solo si venció hace menos de 24 h (Recomendado)»): si no, se registra `customerNotice: "SKIPPED_STALE"` y no se le escribe al cliente.
+- **Hitos de conversación** (5, 15, 30 min y 2 h de §4) quedan para la unidad 11, que crea las sesiones.

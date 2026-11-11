@@ -6,6 +6,7 @@ import {
   type DetailRecord,
   type GroupRecord,
   type RequestRecord,
+  type SlaPauseReader,
 } from './chatbot-request-reads.service';
 import { ChatbotRequestCommandError } from './chatbot-request-commands.service';
 
@@ -56,13 +57,16 @@ const group = (over: Partial<GroupRecord> = {}): GroupRecord => ({
   ...over,
 });
 
-function build(store: Partial<ChatbotRequestReadStore>) {
+function build(
+  store: Partial<ChatbotRequestReadStore>,
+  pauseReader?: SlaPauseReader,
+) {
   const full = {
     tenantId: () => TENANT,
     customers: jest.fn().mockResolvedValue([]),
     ...store,
   } as ChatbotRequestReadStore;
-  return new ChatbotRequestReadsService(full, sealer, () => NOW);
+  return new ChatbotRequestReadsService(full, sealer, () => NOW, pauseReader);
 }
 
 describe('ChatbotRequestReadsService', () => {
@@ -514,5 +518,66 @@ describe('ChatbotRequestReadsService', () => {
       }).detail({ userId: 'u', ability: UPDATE as never }, 'r-1');
       expect(out.allowedActions).toEqual(['CLAIM', 'CANCEL']);
     });
+  });
+});
+
+describe('slaPaused is derived on read (§5.4, unit 7c)', () => {
+  const closed: SlaPauseReader = {
+    pauseAt: jest.fn().mockResolvedValue({
+      paused: true,
+      resumesAt: new Date('2026-11-12T15:00:00.000Z'),
+    }),
+  };
+
+  it('is paused with the next opening while the calendar is closed and the request is open', async () => {
+    const service = build(
+      { groups: jest.fn().mockResolvedValue([group()]) },
+      closed,
+    );
+    const page = await service.groups(
+      { userId: 'u', ability: MANAGER },
+      { tab: 'open', filters: {} },
+    );
+    expect(page.items[0].requests[0]).toMatchObject({
+      slaPaused: true,
+      slaResumesAt: '2026-11-12T15:00:00.000Z',
+    });
+  });
+
+  it('is never paused for a closed request, and not when the calendar is open', async () => {
+    const resolved = record({
+      status: 'RESOLVED',
+      closedAt: NOW,
+      assigneeUserId: 'u',
+      assigneeDisplayName: 'Ana',
+    });
+    const service = build(
+      {
+        groups: jest.fn().mockResolvedValue([group({ requests: [resolved] })]),
+      },
+      closed,
+    );
+    const page = await service.groups(
+      { userId: 'u', ability: MANAGER },
+      { tab: 'resolved', filters: {} },
+    );
+    expect(page.items[0].requests[0]).toMatchObject({
+      slaPaused: false,
+      slaResumesAt: null,
+    });
+
+    const open = build(
+      { groups: jest.fn().mockResolvedValue([group()]) },
+      {
+        pauseAt: jest
+          .fn()
+          .mockResolvedValue({ paused: false, resumesAt: null }),
+      },
+    );
+    const openPage = await open.groups(
+      { userId: 'u', ability: MANAGER },
+      { tab: 'open', filters: {} },
+    );
+    expect(openPage.items[0].requests[0]).toMatchObject({ slaPaused: false });
   });
 });

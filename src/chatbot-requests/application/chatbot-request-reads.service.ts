@@ -11,7 +11,7 @@
  *   - the inbox keeps closed requests for 7 days (D17) and the history lists
  *     the older ones, split at one `now` taken per call.
  */
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   displayStatus,
   type ChatbotRequestKind,
@@ -43,6 +43,19 @@ import {
 export const CHATBOT_REQUEST_READ_STORE = Symbol('CHATBOT_REQUEST_READ_STORE');
 export const CUSTOMER_KEY_SEALER = Symbol('CUSTOMER_KEY_SEALER');
 export const INBOX_CLOCK = Symbol('INBOX_CLOCK');
+export const SLA_PAUSE_READER = Symbol('SLA_PAUSE_READER');
+
+/**
+ * §5.4: `slaPaused` is derived on read from the tenant's calendar ("now is
+ * outside hours and the request is open"). One lookup per call, shared by every
+ * row of the response.
+ */
+export interface SlaPauseReader {
+  pauseAt(now: Date): Promise<{ paused: boolean; resumesAt: Date | null }>;
+}
+
+type SlaPause = { paused: boolean; resumesAt: Date | null };
+const NOT_PAUSED: SlaPause = { paused: false, resumesAt: null };
 
 export type InboxTab = 'open' | 'resolved' | 'cancelled' | 'scheduled';
 export type AssigneeFilter =
@@ -247,7 +260,14 @@ export class ChatbotRequestReadsService {
     private readonly store: ChatbotRequestReadStore,
     @Inject(CUSTOMER_KEY_SEALER) private readonly sealer: CustomerKeySealer,
     @Inject(INBOX_CLOCK) private readonly clock: () => Date,
+    @Optional()
+    @Inject(SLA_PAUSE_READER)
+    private readonly pauseReader?: SlaPauseReader,
   ) {}
+
+  private async pause(now: Date): Promise<SlaPause> {
+    return this.pauseReader ? this.pauseReader.pauseAt(now) : NOT_PAUSED;
+  }
 
   /** `GET /chatbot-requests/groups` (§3.8). */
   async groups(
@@ -285,6 +305,7 @@ export class ChatbotRequestReadsService {
         1,
       ),
     });
+    const pause = await this.pause(now);
     const page = records.slice(0, limit);
     const customers = await this.customerIndex(page.flatMap((g) => g.requests));
     const items = page.map((group) => {
@@ -308,7 +329,7 @@ export class ChatbotRequestReadsService {
           ? { lastClosedAt: iso(group.lastClosedAt) }
           : {}),
         openCount: group.openCount,
-        requests: group.requests.map((r) => this.toRow(r)),
+        requests: group.requests.map((r) => this.toRow(r, pause)),
         moreRequests: group.moreRequests,
       };
     });
@@ -351,10 +372,11 @@ export class ChatbotRequestReadsService {
         open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
       ),
     });
+    const pause = await this.pause(now);
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
-      items: page.map((r) => this.toRow(r)),
+      items: page.map((r) => this.toRow(r, pause)),
       nextCursor:
         records.length > limit && last
           ? encodeCursor(
@@ -418,10 +440,11 @@ export class ChatbotRequestReadsService {
         ? this.openKey(input.customerKey)
         : undefined,
     });
+    // Closed requests are never paused: no calendar lookup.
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
-      items: page.map((r) => this.toRow(r)),
+      items: page.map((r) => this.toRow(r, NOT_PAUSED)),
       nextCursor:
         records.length > limit && last
           ? encodeCursor([iso(last.closedAt), last.id])
@@ -431,10 +454,12 @@ export class ChatbotRequestReadsService {
 
   /** `GET /chatbot-requests/:id` (§3.8, §12.6). */
   async detail(reader: StaffReader, id: string) {
-    const record = await this.store.findDetail(id, this.clock());
+    const now = this.clock();
+    const record = await this.store.findDetail(id, now);
     if (!record) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
     const { request, customer } = record;
-    const row = this.toRow(request);
+    const pause = await this.pause(now);
+    const row = this.toRow(request, pause);
     const audit = record.audit.slice(0, AUDIT_IN_DETAIL);
     const lastAudit = audit[audit.length - 1];
     const resolved = request.status === 'RESOLVED' && request.resolvedAt;
@@ -484,7 +509,7 @@ export class ChatbotRequestReadsService {
           paymentStatus: o.paymentStatus,
         })),
       },
-      otherOpenRequests: record.otherOpen.map((r) => this.toRow(r)),
+      otherOpenRequests: record.otherOpen.map((r) => this.toRow(r, pause)),
       decision: record.decision ? { ...record.decision, resolution } : null,
       ...(record.zoneImpact ? { zoneImpact: record.zoneImpact } : {}),
       deliveries: record.deliveries.map((d) => ({
@@ -559,13 +584,16 @@ export class ChatbotRequestReadsService {
   async mergeCandidates(id: string) {
     const records = await this.store.mergeCandidates(id);
     if (!records) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
-    return { items: records.map((r) => this.toRow(r)) };
+    const pause = await this.pause(this.clock());
+    return { items: records.map((r) => this.toRow(r, pause)) };
   }
 
   // ------------------------------------------------------------- shaping
 
-  private toRow(r: RequestRecord) {
+  private toRow(r: RequestRecord, pause: SlaPause) {
     const state = toState(r);
+    const paused =
+      pause.paused && (r.status === 'NEW' || r.status === 'IN_PROGRESS');
     return {
       id: r.id,
       folio: formatFolio(r.folio),
@@ -582,10 +610,11 @@ export class ChatbotRequestReadsService {
       claimDeadlineAt: iso(r.claimDeadlineAt),
       resolveDeadlineAt: iso(r.resolveDeadlineAt),
       overdueAt: iso(r.overdueAt),
-      // Working-hours calendar (unit 7), messages (unit 9) and live sessions
-      // (unit 11) do not exist yet: the fields keep their final shape.
-      slaPaused: false,
-      slaResumesAt: null,
+      // §5.4 derived on read: outside the calendar's hours and still open.
+      // Messages (unit 9) and live sessions (unit 11) do not exist yet: their
+      // fields keep their final shape.
+      slaPaused: paused,
+      slaResumesAt: paused ? iso(pause.resumesAt) : null,
       whatsappWindowClosesAt: iso(r.whatsappWindowClosesAt),
       unreadCustomerMessages: 0,
       scheduledFor: iso(r.scheduledFor),

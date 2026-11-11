@@ -69,9 +69,26 @@ export async function resolveRecipientIds(
     },
     select: { id: true },
   });
-  return users
+  const ids = users
     .map((user) => user.id)
     .filter((userId) => userId !== notice.actorUserId);
+  // §5.1: 80 % and overdue of a CLAIMED request also go to its assignee (the
+  // sweep names them in `recipientUserId`), when they are still an active
+  // member of the tenant.
+  if (notice.recipientUserId && !ids.includes(notice.recipientUserId)) {
+    const assignee = await tx.tenantMembership.findFirst({
+      where: {
+        tenantId,
+        userId: notice.recipientUserId,
+        user: { isActive: true },
+      },
+      select: { userId: true },
+    });
+    if (assignee && assignee.userId !== notice.actorUserId) {
+      ids.unshift(assignee.userId);
+    }
+  }
+  return ids;
 }
 
 /** Users that turned email off. No row means the default: email on. */

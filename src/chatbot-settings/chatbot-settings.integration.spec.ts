@@ -51,6 +51,7 @@ import {
   SETTINGS_CLOCK,
 } from './application/chatbot-settings.service';
 import { defaultSettings } from './domain/chatbot-attention-settings';
+import { policyFromSettings } from '../chatbot-requests/domain/chatbot-sla';
 import { ChatbotSettingsController } from './presentation/chatbot-settings.controller';
 import { ChatbotSettingsHttpFilter } from './presentation/chatbot-settings.filter';
 
@@ -1372,13 +1373,30 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
           where: { id: id! },
         });
         expect(row.slaPolicyVersion).toBe(1);
-        // ALWAYS_OPEN UTC: 30 claim / 120 resolve minutes, counted from createdAt.
-        expect(row.claimDeadlineAt!.getTime() - row.createdAt.getTime()).toBe(
-          30 * 60_000,
+        // ALWAYS_OPEN UTC: 30 claim / 120 resolve BUSINESS minutes counted from
+        // createdAt (real `now()`), so the expectation is computed with the same
+        // calendar instead of assuming plain minute sums: the calendar has a
+        // 23:59-00:00 gap, so a window that crosses midnight UTC is a minute
+        // longer (this test failed after ~21:59 UTC with fixed 30/120).
+        const expected = policyFromSettings(
+          { ...defaultSettings(), ...ALWAYS_OPEN() },
+          1,
+        ).calendar;
+        expect(row.claimDeadlineAt!.getTime()).toBe(
+          expected.addBusinessMinutes(row.createdAt, 30).getTime(),
         );
-        expect(row.resolveDeadlineAt!.getTime() - row.createdAt.getTime()).toBe(
-          120 * 60_000,
+        expect(row.resolveDeadlineAt!.getTime()).toBe(
+          expected.addBusinessMinutes(row.createdAt, 120).getTime(),
         );
+        // ...and it is NOT what the defaults (Mon-Sat 09-19 Mexico City) give,
+        // except by coincidence of the hour, so the recompute really ran.
+        const onDefaults = policyFromSettings(defaultSettings(), 0).calendar;
+        const defaultsClaim = onDefaults
+          .addBusinessMinutes(row.createdAt, 30)
+          .getTime();
+        if (defaultsClaim !== row.claimDeadlineAt!.getTime()) {
+          expect(row.claimDeadlineAt!.getTime()).not.toBe(defaultsClaim);
+        }
       } finally {
         await prisma.tenant.delete({ where: { id: tenant } });
       }

@@ -37,6 +37,24 @@ import type {
 /** Fractions of the active window at which the sweep looks (before 100 %). */
 export const SLA_MILESTONE_FRACTIONS = [0.5, 0.8] as const;
 
+/** The three milestones of a clock, in the order they are reached (§5.4). */
+export type SlaMilestone = 'HALF' | 'ESCALATION' | 'OVERDUE';
+export const SLA_MILESTONES: readonly SlaMilestone[] = [
+  'HALF',
+  'ESCALATION',
+  'OVERDUE',
+];
+export type SlaClockName = 'CLAIM' | 'RESOLVE';
+
+/** The clock the sweep watches and the instants of its three milestones. */
+export interface ActiveClock {
+  clock: SlaClockName;
+  /** Where the clock started: the identity of one cycle of the claim clock. */
+  from: Date;
+  deadline: Date;
+  instants: ReadonlyArray<{ milestone: SlaMilestone; at: Date }>;
+}
+
 export interface SlaPolicy {
   /** `ChatbotAttentionSettings.version`, 0 for a tenant on the defaults. */
   version: number;
@@ -111,25 +129,45 @@ function computeClocks(policy: SlaPolicy, anchors: SlaAnchors) {
   return { start, claimStart, claimDeadline, resolveDeadline };
 }
 
-function nextCheck(
+/**
+ * The active clock of a request and its milestone instants (§5.4): claim while
+ * NEW (when the subtype has claim minutes), else resolve. `null` when that
+ * clock has no deadline. May throw `BusinessCalendarError`.
+ */
+export function activeClock(
   policy: SlaPolicy,
   anchors: SlaAnchors,
-  clocks: ReturnType<typeof computeClocks>,
-  now: Date,
-): Date | null {
+): ActiveClock | null {
+  const clocks = computeClocks(policy, anchors);
   const claimActive = anchors.status === 'NEW' && clocks.claimDeadline !== null;
   const deadline = claimActive ? clocks.claimDeadline : clocks.resolveDeadline;
   const from = claimActive ? clocks.claimStart : clocks.start;
   if (!deadline) return null;
   const total = policy.calendar.businessMinutesBetween(from, deadline);
-  const instants = [
-    ...SLA_MILESTONE_FRACTIONS.map((fraction) =>
-      policy.calendar.addBusinessMinutes(from, Math.floor(total * fraction)),
-    ),
+  const [half, escalation] = SLA_MILESTONE_FRACTIONS.map((fraction) =>
+    policy.calendar.addBusinessMinutes(from, Math.floor(total * fraction)),
+  );
+  return {
+    clock: claimActive ? 'CLAIM' : 'RESOLVE',
+    from,
     deadline,
-  ];
-  const ahead = instants.find((instant) => instant.getTime() > now.getTime());
-  if (ahead) return ahead;
+    instants: [
+      { milestone: 'HALF', at: half },
+      { milestone: 'ESCALATION', at: escalation },
+      { milestone: 'OVERDUE', at: deadline },
+    ],
+  };
+}
+
+function nextCheck(
+  policy: SlaPolicy,
+  anchors: SlaAnchors,
+  now: Date,
+): Date | null {
+  const clock = activeClock(policy, anchors);
+  if (!clock) return null;
+  const ahead = clock.instants.find(({ at }) => at.getTime() > now.getTime());
+  if (ahead) return ahead.at;
   return anchors.overdueAt ? null : now;
 }
 
@@ -146,7 +184,7 @@ export function computeSla(
         : {}),
       resolveDeadlineAt: clocks.resolveDeadline,
       slaPolicyVersion: policy.version,
-      nextSlaCheckAt: nextCheck(policy, anchors, clocks, now),
+      nextSlaCheckAt: nextCheck(policy, anchors, now),
     };
   } catch (error) {
     if (!(error instanceof BusinessCalendarError)) throw error;

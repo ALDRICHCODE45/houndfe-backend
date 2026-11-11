@@ -15,7 +15,7 @@ import {
 } from '../domain/chatbot-request-notice';
 
 /** The tenant-extended transaction client every inbox producer holds. */
-type OutboxClient = ReturnType<TenantPrismaService['getClient']>;
+export type OutboxClient = ReturnType<TenantPrismaService['getClient']>;
 
 /**
  * Writes the notify row. A `USER` notice without a recipient, or addressed to
@@ -26,6 +26,12 @@ export async function enqueueNotice(
   tx: OutboxClient,
   tenantId: string,
   notice: ChatbotRequestNotice,
+  /**
+   * Hold the notice until then: it becomes the row's `nextAttemptAt`, which the
+   * notify consumer already honors (`nextAttemptAt <= NOW()`), so the release
+   * is durable, shared by replicas and needs no timer. `null`/absent = now.
+   */
+  releaseAt?: Date | null,
 ): Promise<boolean> {
   if (audienceOf(notice.type) === 'USER') {
     if (
@@ -42,6 +48,7 @@ export async function enqueueNotice(
       aggregateId: notice.requestId,
       eventType: NOTICE_NOTIFY_EVENT_TYPE,
       payload: { ...notice } as Prisma.InputJsonObject,
+      ...(releaseAt ? { nextAttemptAt: releaseAt } : {}),
     },
   });
   return true;

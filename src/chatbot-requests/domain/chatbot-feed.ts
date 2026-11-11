@@ -6,12 +6,15 @@
  */
 import { createHash } from 'node:crypto';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
+import { formatFolio } from '../../notifications/domain/chatbot-request-notice';
 
 export const FEED_TYPE = {
   answered: 'request.answered',
   cancelled: 'request.cancelled',
   /** Informational: a staff merge closed this request into another (§3.5). */
   merged: 'request.merged',
+  /** Once per request, when the sweep first marks it overdue (§5.4). */
+  overdueNotice: 'request.overdue_notice',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -251,7 +254,8 @@ export function classifyOutcome(
   if (current.ackedAt) return 'OUTCOME_ALREADY_RECORDED';
   if (
     isDeferredOutcome(input.outcome) &&
-    current.type === FEED_TYPE.cancelled
+    (current.type === FEED_TYPE.cancelled ||
+      current.type === FEED_TYPE.overdueNotice)
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
@@ -456,5 +460,32 @@ export function buildMergedPayload(input: {
     requestId: input.requestId,
     intoRequestId: input.intoRequestId,
     conversationRef: input.conversationRef,
+  };
+}
+
+/**
+ * `request.overdue_notice` (§5.4, unit 7c): the request went past the deadline
+ * of its active clock. The bot tells the customer ONCE that the team is taking
+ * longer than expected; it composes the text itself (tú/usted) from these
+ * fields. No names, no staff text: `assigned` says only whether someone holds
+ * it. `overdueAt` is the deadline that expired (not the sweep's instant).
+ */
+export function buildOverdueNoticePayload(input: {
+  requestId: string;
+  folio: number;
+  kind: string;
+  subtype: string;
+  clock: 'CLAIM' | 'RESOLVE';
+  deadlineAt: Date;
+  assigned: boolean;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    folio: formatFolio(input.folio),
+    kind: input.kind,
+    subtype: input.subtype,
+    clock: input.clock,
+    overdueAt: input.deadlineAt.toISOString(),
+    assigned: input.assigned,
   };
 }

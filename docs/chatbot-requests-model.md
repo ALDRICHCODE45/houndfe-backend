@@ -274,6 +274,34 @@ Contract §5.4, §5.5, §4.9. Code: `domain/business-hours-calendar.ts`, `domain
 
 **Migration** `20261111050000_chatbot_attention_settings`: two new tables only, no ALTER of an existing table (no rewrite, no scan). Locks: the two FKs to `tenants` take a brief SHARE ROW EXCLUSIVE lock on `tenants` (tables are empty); `SET LOCAL lock_timeout = '5s'`. Deploy at low traffic.
 
+## SLA sweep, milestones and `request.overdue_notice` (unit 7c)
+
+Contract §5.4, §5.1, §10.1 R11. Code: `domain/chatbot-sla-sweep.ts` (pure plan), `infrastructure/chatbot-sla-sweep.store.ts` (batch), `infrastructure/chatbot-sla-sweep.scheduler.ts` (`@Interval` 30 s), `infrastructure/prisma-sla-pause.reader.ts` (`slaPaused`), `enqueueOverdueNotice` in `chatbot-feed-writes.ts`. Migration `20261111070000_chatbot_sla_sweep`. Bot side: `docs/chatbot-handoff/chatbot-requests-bot-contract.md`. Notices: `docs/notifications-model.md`.
+
+**Tick.** Per tick, phase `due` then phase `stale`, each at most 10 batches of 100 rows. A batch is one short transaction on the root client; the rows are selected `FOR UPDATE OF r SKIP LOCKED LIMIT 100`: replicas are disjoint, never wait for each other or for a staff command, and there is no in-memory cursor (the clock is injected). `due` = open and `nextSlaCheckAt <= now` (partial index `chatbot_requests_sla_sweep_idx`). `stale` = open and `slaPolicyVersion` below the tenant's current settings version (or null): rows a settings recompute left behind (PARTIAL/FAILED, a crash between the PUT and the recompute, a row a command held; carry-over of 7a). They are recomputed with the current policy (`computeSla`: claim/resolve deadlines and version) and watched from there.
+
+**Per row (`planSweep`).** The active clock is claim while `NEW` (when the subtype has claim minutes), else resolve; its milestones are 50 % (`HALF`), 80 % (`ESCALATION`) and the deadline (`OVERDUE`) in business minutes. Reached ones are those with an instant at or before `now`. All reached are recorded; only the highest sends a notice. `nextSlaCheckAt` becomes the first milestone instant still ahead and not yet recorded, NULL when nothing is left. The sweep owns the column after its first visit; claim/release/recompute still write it at their transitions.
+
+**Durable dedup.** One `SLA_MILESTONE` event per `(request, clock, milestone, cycle)`, `cycle` = the ms instant the clock started (a release restarts the claim clock; the resolve clock never restarts), inserted `ON CONFLICT DO NOTHING` on the unique partial index `chatbot_request_events_sla_milestone_uq`; only an inserted event enqueues its notice. The event row is the request's own audit (kept forever), so the 90-day purge of `notifications` cannot cause a re-notify. A recorded key is never repeated even if a policy change moves its instant. `data` is `{milestone, clock, cycle, dueAt, notice}` (no customer text); the audit shows it as `{milestone: HALF|ESCALATION|OVERDUE, …}`.
+
+**Overdue.** The first OVERDUE of a request (when `overdueAt` is NULL) sets `overdueAt` to the deadline that expired (never the sweep's instant, never overwritten), inserts the feed item and refreshes the customer group (`hasOverdue`). A later overdue of the other clock records its event and notice but does not feed the bot again. `request.overdue_notice` is unique per request: partial unique index `chatbot_feed_items_overdue_notice_uq` + `ON CONFLICT DO NOTHING`, and the sweep only emits while `overdueAt` was NULL (durable beyond the 30-day feed purge).
+
+**Staff notices outside hours (L69).** The milestone event is recorded at once; the notice's outbox row gets `nextAttemptAt = next opening of the tenant calendar` while the calendar is closed (`noticeReleaseAt`), which the notify consumer honors. Durable, multi-replica safe, no timers. See `docs/notifications-model.md`.
+
+**Held notices are re-checked at release.** The notify consumer drops an SLA notice whose request closed meanwhile, and a claim reminder whose request was claimed or whose claim cycle changed (`claimCycle` in the notice); see `docs/notifications-model.md`. The customer feed item is not held, so it is not re-checked.
+
+**Customer overdue item: 24 h rule (L69).** On the first overdue, if `now - overdueAt >= 24 h` the feed item is NOT created (`SKIPPED_STALE` in the milestone event's `customerNotice`; `SENT` otherwise); `overdueAt`, the event and the staff notice still happen. Decided once, from the clock of the sweep (`CUSTOMER_NOTICE_MAX_AGE_MS`).
+
+**50 % of a claimed request (L69).** Recorded as an event, no notice (owner: only 80 % and overdue).
+
+**What the sweep does not touch.** `version` (a staff CAS must not fail because of a sweep) and `updatedAt` (the bot recovery route must not see it as a change).
+
+**Lock order.** Request rows (one statement) → settings rows `FOR SHARE` (the order every command uses) → per-tenant feed advisory lock, only for a first overdue, tenants in ascending order so two sweeps never cross → customer groups last, sorted. Each row runs in a SAVEPOINT: a failing row is rolled back alone, logged by id, and its `nextSlaCheckAt` pushed out 5 minutes, so a poison row cannot abort the batch or starve the rows behind it.
+
+**`slaPaused` on read.** `PrismaSlaPauseReader` loads the tenant calendar once per read call: closed now and request open → `slaPaused`, `slaResumesAt` = next opening.
+
+**Not in 7c.** Conversation milestones of §4.6 (5/15/30 min, 2 h) need sessions (unit 11); SSE `request.overdue` (unit 8); `enabledSubtypes` is still not enforced. The 50 % of a claimed request records an event but sends no notice (§5.1 only defines «sin tomar»; owner confirmed, L69).
+
 ## Invariants (CHECK constraints)
 
 | Constraint | Rule |
@@ -387,7 +415,7 @@ The migration is additive: it creates four tables, their indexes and their CHECK
 
 - `q` on `history` (the contract lists it, §3.8): slice 4b built it for `groups` only. History is unbounded in time, so the name search needs a decision on the index first (see "Relations").
 - The `200 {request}` of the commands is still the small view; the full inbox row (section above) goes with the SSE payload in unit 8.
-- `slaPaused`/`slaResumesAt` (unit 7), `unreadCustomerMessages` (unit 9), `liveSession` and `templateCostText` (unit 11) are sent with their final shape and an empty value.
+- `slaPaused`/`slaResumesAt` (derived on read since 7c), `unreadCustomerMessages` (unit 9), `liveSession` and `templateCostText` (unit 11) are sent with their final shape and an empty value.
 
 ### Open questions (after slice 4b)
 
@@ -407,6 +435,6 @@ The migration is additive: it creates four tables, their indexes and their CHECK
 
 - **`TENANT_SCOPED_MODELS`** (`src/shared/tenant/tenant-scoped-models.constant.ts`, outside the 7a surfaces) needs `ChatbotAttentionSettings` and `ChatbotAttentionSettingsEvent`. Unit 7a does not depend on it (explicit `tenantId` everywhere, root client), but the allowlist fails open, so register both as defense in depth.
 - **`enabledSubtypes`** is stored, not enforced (the intake does not read it). Default: all eight subtypes (DISCOUNT is out of v1 per §7.1 but exists in the enum).
-- **`slaPaused` / `slaResumesAt`** on request rows still `false` / `null`; the calendar's `isOpenAt` makes them cheap to derive.
+- **`slaPaused` / `slaResumesAt`** are derived on read since 7c (see "SLA sweep").
 - **Apply-to-all response shape** (`tenantsApplied/Unchanged/Skipped/Failed`, lists with `{tenantId, name}`) and not listing no-membership tenants are my reading of S7; the contract's `tenantsSkipped` could also be a count.
 - **Receipt arriving before the opening or during a midday break** is due at that day's close when more business minutes than the margin are left that day (owner decisions 2026-11-11, «Al cierre de ese mismo día (Recomendado)»), not the literal §5.4 "outside hours" reading.

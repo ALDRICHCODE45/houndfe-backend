@@ -21,10 +21,14 @@ import {
   NOTICE_EMAIL_EVENT_TYPE,
   NOTICE_NOTIFY_EVENT_TYPE,
   NOTICE_TYPES,
+  SLA_NOTICE_TYPES,
   batchWindowEnd,
   emailModeOf,
+  slaNoticeDropReason,
   type ChatbotRequestNotice,
   type NoticePayload,
+  type SlaDropReason,
+  type SlaNoticeRequestFacts,
 } from '../domain/chatbot-request-notice';
 import {
   NOTIFICATION_EVENTS,
@@ -120,6 +124,24 @@ export class ChatbotRequestNotifyConsumer {
 
   private async apply(tx: Prisma.TransactionClient, row: NotifyRow) {
     const notice = parseNotice(row.payload);
+    // An SLA notice can be held until an opening: judge it against the request
+    // as it is NOW. A drop is done, not failed (no retry), and delivers nothing.
+    const dropped = await this.dropReason(tx, row.tenantId, notice);
+    if (dropped) {
+      await tx.outboxEvent.update({
+        where: { id: row.id },
+        data: {
+          status: OutboxEventStatus.PUBLISHED,
+          publishedAt: new Date(),
+          lastError: `DROPPED:${dropped}`,
+        },
+      });
+      // Ids only: a notice never carries customer data, and neither does a log.
+      this.logger.log(
+        `notify row dropped (${row.id}, tenant ${row.tenantId}, request ${notice.requestId}, ${notice.type}): ${dropped}`,
+      );
+      return;
+    }
     const recipients = await resolveRecipientIds(tx, row.tenantId, notice);
     if (recipients.length > 0) {
       const payload: NoticePayload = {
@@ -161,6 +183,29 @@ export class ChatbotRequestNotifyConsumer {
         lastError: null,
       },
     });
+  }
+
+  /** Why a held SLA notice no longer applies; `null` for the rest and live ones. */
+  private async dropReason(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    notice: ChatbotRequestNotice,
+  ): Promise<SlaDropReason | null> {
+    if (!SLA_NOTICE_TYPES.has(notice.type)) return null;
+    const [facts] = await tx.$queryRaw<
+      { status: SlaNoticeRequestFacts['status']; claimStart: Date }[]
+    >`
+      SELECT r."status"::text AS "status",
+             GREATEST(
+               r."createdAt", coalesce(r."scheduledFor", r."createdAt"),
+               coalesce((
+                 SELECT max(e."createdAt") FROM "chatbot_request_events" e
+                 WHERE e."tenantId" = r."tenantId" AND e."requestId" = r."id"
+                   AND e."type" IN ('RELEASED', 'AUTO_RELEASED')), r."createdAt")
+             ) AS "claimStart"
+      FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${tenantId} AND r."id" = ${notice.requestId}`;
+    return slaNoticeDropReason(notice, facts ?? null);
   }
 
   /** One job per notification of a person who did not turn email off. */

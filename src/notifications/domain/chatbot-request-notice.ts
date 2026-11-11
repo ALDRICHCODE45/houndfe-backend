@@ -88,12 +88,21 @@ export interface ChatbotRequestNotice {
   subtype: string;
   /** Idempotency per recipient, e.g. `created:<requestId>`. */
   dedupKey: string;
-  /** Required for `USER` audiences. */
+  /**
+   * Required for `USER` audiences. For `ESCALATION_VIEWERS` it is an extra
+   * recipient (the assignee, §5.1), added to whoever the permission resolves.
+   */
   recipientUserId?: string;
   /** The person who caused the event; they are never notified of it. */
   actorUserId?: string;
   /** `REQUEST_CANCELLED` only: why it closed. */
   cause?: ClosedCause;
+  /**
+   * `REQUEST_CLAIM_REMINDER` only (SLA sweep): the start of the claim cycle it
+   * was written for, in ms. A release restarts the cycle, so a reminder held
+   * across it is dropped at consume time.
+   */
+  claimCycle?: number;
 }
 
 /** `payload` of an in-app notification: just enough to render and link. */
@@ -206,4 +215,59 @@ export function noticeText(
 /** `${APP_WEB_URL}/chatbot/solicitudes/:id` (§5.1); no data, no token. */
 export function requestDeepLink(appBaseUrl: string, requestId: string): string {
   return `${appBaseUrl.replace(/\/+$/, '')}/chatbot/solicitudes/${requestId}`;
+}
+
+// ------------------------------------------------- SLA notices held in time
+
+/** Types written by the SLA sweep; they may be held until an opening. */
+export const SLA_NOTICE_TYPES: ReadonlySet<string> = new Set([
+  'REQUEST_CLAIM_REMINDER',
+  'REQUEST_ESCALATION',
+  'REQUEST_OVERDUE',
+]);
+
+export type SlaDropReason =
+  | 'REQUEST_CLOSED'
+  | 'REQUEST_MISSING'
+  | 'CLAIMED_SINCE'
+  | 'CLAIM_CYCLE_CHANGED';
+
+/** The request as it is when the held notice is consumed. */
+export interface SlaNoticeRequestFacts {
+  status: 'NEW' | 'IN_PROGRESS' | 'RESOLVED' | 'CANCELLED';
+  /** Start of its current claim cycle (creation, `scheduledFor`, last release). */
+  claimStart: Date;
+}
+
+/**
+ * Whether a held SLA notice still applies when it is released (the sweep holds
+ * staff notices until the tenant's next opening, so the request can have
+ * changed in between). A reason means: drop it, never deliver. Other types are
+ * never judged (`null`).
+ *
+ *   - closed (RESOLVED/CANCELLED): every SLA notice is dropped;
+ *   - REQUEST_CLAIM_REMINDER ("sin tomar"): dropped when the request is no
+ *     longer NEW, or its claim cycle is not the one it was written for;
+ *   - 80 % and overdue of a request that was claimed since still apply: the
+ *     assignee and the escalation viewers should know it is late.
+ */
+export function slaNoticeDropReason(
+  notice: { type: string; claimCycle?: number },
+  request: SlaNoticeRequestFacts | null,
+): SlaDropReason | null {
+  if (!SLA_NOTICE_TYPES.has(notice.type)) return null;
+  if (!request) return 'REQUEST_MISSING';
+  if (request.status === 'RESOLVED' || request.status === 'CANCELLED') {
+    return 'REQUEST_CLOSED';
+  }
+  if (notice.type === 'REQUEST_CLAIM_REMINDER') {
+    if (request.status !== 'NEW') return 'CLAIMED_SINCE';
+    if (
+      notice.claimCycle !== undefined &&
+      request.claimStart.getTime() !== notice.claimCycle
+    ) {
+      return 'CLAIM_CYCLE_CHANGED';
+    }
+  }
+  return null;
 }

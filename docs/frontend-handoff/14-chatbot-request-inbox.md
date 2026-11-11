@@ -10,8 +10,8 @@ Shapes in this document come from the controller, the DTOs, the service and the 
 | --- | --- |
 | `liveSession` | always `null` (live conversations are unit 11) |
 | `unreadCustomerMessages` | always `0` (conversation mirror is unit 9) |
-| `slaPaused`, `slaResumesAt` | `false`, `null` (working-hours calendar is unit 7) |
-| `claimDeadlineAt`, `resolveDeadlineAt`, `overdueAt` | filled only when a deadline exists; the sweep that sets them is unit 7, so most rows have `null` today |
+| `slaPaused`, `slaResumesAt` | derived on every read (unit 7c): `slaPaused` is `true` when the tenant's calendar is closed **now** (outside the opening hours or a closed date) **and** the request is open; `slaResumesAt` is then the next opening (ISO), else `null`. Closed requests are never paused. It is computed per response, so it changes without the row changing: do not use it to order or to detect updates |
+| `claimDeadlineAt`, `resolveDeadlineAt`, `overdueAt` | `claimDeadlineAt`/`resolveDeadlineAt` filled when the subtype has a deadline; `overdueAt` is set by the SLA sweep (every 30 s) at the **deadline instant** of the first overdue and never cleared (`displayStatus` `EXPIRED`). The sweep does not change `version` (it is not a command), so a row can gain `overdueAt` without a new `version` until the realtime event of unit 8 |
 | `scheduledFor`, `requiresTemplateAtStart`, `needsReschedule` | `null`/`false` (scheduling is unit 14) |
 | `templateCostText` in the detail | not sent (it only comes with `SEND_TEMPLATE`, unit 11) |
 | `GET /chatbot-requests/:id/conversation`, media | unit 9 |

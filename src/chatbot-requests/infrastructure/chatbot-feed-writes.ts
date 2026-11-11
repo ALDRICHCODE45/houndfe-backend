@@ -21,6 +21,7 @@ import {
   buildAnswerPayload,
   buildCancelPayload,
   buildMergedPayload,
+  buildOverdueNoticePayload,
   FEED_CHANNEL,
   FEED_TYPE,
   type AnswerSource,
@@ -287,4 +288,44 @@ export async function enqueueMerged(
       }),
     },
   ]);
+}
+
+/**
+ * `request.overdue_notice` (§5.4, unit 7c): exactly one per request, ever. The
+ * partial unique index `chatbot_feed_items_overdue_notice_uq` (migration
+ * 20261111070000) is the last line of defense: `ON CONFLICT DO NOTHING` makes
+ * a second attempt a no-op (returns `false`), so two sweeps, a retry after a
+ * crash or a re-mark can never feed the bot twice. The sweep also only calls
+ * it when `overdueAt` was NULL, which is durable in the request itself and
+ * survives the 30-day feed purge.
+ *
+ * Same lock discipline as `insertFeedItems` (per-tenant advisory lock from the
+ * insert to the commit, so cursor order is commit order; `NOTIFY` at commit).
+ * The caller holds the request row lock and takes tenants in ascending order.
+ */
+export async function enqueueOverdueNotice(
+  tx: TenantClient,
+  tenantId: string,
+  input: Parameters<typeof buildOverdueNoticePayload>[0] & {
+    conversationRef: string | null;
+  },
+): Promise<boolean> {
+  const key = `chatbot-feed:${tenantId}`;
+  await tx.$queryRaw(
+    Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`,
+  );
+  const payload = JSON.stringify(buildOverdueNoticePayload(input));
+  const inserted = await tx.$queryRaw<{ cursor: bigint }[]>(Prisma.sql`
+    INSERT INTO "chatbot_feed_items"
+      ("tenantId", "requestId", "type", "conversationRef", "payload")
+    VALUES (${tenantId}, ${input.requestId}, ${FEED_TYPE.overdueNotice},
+            ${input.conversationRef}, ${payload}::jsonb)
+    ON CONFLICT ("tenantId", "requestId") WHERE "type" = 'request.overdue_notice'
+    DO NOTHING
+    RETURNING "cursor"`);
+  if (inserted.length === 0) return false;
+  await tx.$queryRaw(
+    Prisma.sql`SELECT pg_notify(${FEED_CHANNEL}, ${tenantId})::text`,
+  );
+  return true;
 }

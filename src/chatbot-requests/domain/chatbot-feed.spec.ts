@@ -4,6 +4,7 @@ import {
   buildAnswerPayload,
   buildCancelPayload,
   buildMergedPayload,
+  buildOverdueNoticePayload,
   classifyOutcome,
   deferredReasonOf,
   FEED_LIMITS,
@@ -717,5 +718,72 @@ describe('request.merged (informational feed item)', () => {
         ),
       ).toBe('APPLY');
     });
+  });
+});
+
+describe('request.overdue_notice (unit 7c: once per request, informational)', () => {
+  it('has its own type', () => {
+    expect(FEED_TYPE.overdueNotice).toBe('request.overdue_notice');
+  });
+
+  it('carries ids, subtype, clock and the instants, and no customer or staff text', () => {
+    expect(
+      buildOverdueNoticePayload({
+        requestId: 'r1',
+        folio: 123,
+        kind: 'DECISION',
+        subtype: 'RESTOCK',
+        clock: 'RESOLVE',
+        deadlineAt: new Date('2026-11-10T18:00:00.000Z'),
+        assigned: true,
+      }),
+    ).toEqual({
+      requestId: 'r1',
+      folio: 'S-000123',
+      kind: 'DECISION',
+      subtype: 'RESTOCK',
+      clock: 'RESOLVE',
+      overdueAt: '2026-11-10T18:00:00.000Z',
+      assigned: true,
+    });
+  });
+
+  describe('outcomes: accepted or sent-unknown or stale, never deferred', () => {
+    const notice = {
+      type: FEED_TYPE.overdueNotice,
+      attemptId: null,
+      evidenceHash: null,
+      ackedAt: null,
+    };
+    const body = (outcome: string) =>
+      parseFeedOutcome({
+        attemptId: ATTEMPT,
+        outcome,
+        ...(outcome === 'PROVIDER_ACCEPTED'
+          ? { providerMessageId: 'w1', attemptedAt: AT }
+          : outcome === 'STALE'
+            ? {}
+            : { attemptedAt: AT }),
+      });
+
+    it.each(['PROVIDER_ACCEPTED', 'DELIVERY_UNKNOWN', 'STALE'])(
+      'accepts %s',
+      (outcome) => {
+        const input = body(outcome);
+        expect(classifyOutcome(notice, input, hashFeedOutcome(input))).toBe(
+          'APPLY',
+        );
+      },
+    );
+
+    it.each(['DEFERRED_WINDOW_CLOSED', 'DEFERRED_HUMAN_SESSION'])(
+      'refuses %s with OUTCOME_NOT_ALLOWED (a late "seguimos revisando" only annoys)',
+      (outcome) => {
+        const input = body(outcome);
+        expect(classifyOutcome(notice, input, hashFeedOutcome(input))).toBe(
+          'OUTCOME_NOT_ALLOWED',
+        );
+      },
+    );
   });
 });

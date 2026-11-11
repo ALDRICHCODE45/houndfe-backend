@@ -1,6 +1,6 @@
 # Chatbot ↔ backend: human requests (slices 5a, 5b and 5c)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.overdue_notice`, `request.cancel_ack`, `conversation.*`, `template.requested`).
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.cancel_ack`, `conversation.*`, `template.requested`).
 
 ## Common rules
 
@@ -167,6 +167,7 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 | `request.answered` | Staff resolved a wrapped decision (stock, expiration, delivery zone, transfer receipt), from the new `resolve` command or from the old staff routes | `{kind: "DECISION", subtype, action, legacyId, text, prefix, …fields}` below |
 | `request.cancelled` | Staff cancelled a request (§12.14); no message of its own | `{requestId, reason, cancelledBy: "STAFF", customerNote?}` |
 | `request.merged` | Staff merged this request into another open one of the same customer, subtype **and conversation** (§3.5, §12.11). Informational | `{requestId, intoRequestId, conversationRef}` |
+| `request.overdue_notice` | The request went past the deadline of its active clock (§5.4, unit 7c). **Once per request, ever** | `{requestId, folio, kind, subtype, clock, overdueAt, assigned}`, see "`request.overdue_notice`" below |
 
 `conversationRef` is the request's (`null` when the request has none, e.g. a stock request created without one). `legacyId` is the id the bot already tracks from the create answer (`legacy.id`: the human decision, the zone requester or the receipt).
 
@@ -227,7 +228,7 @@ Exactly those keys; an unknown key, a missing required key, a key an outcome for
 | `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` replayed after the delivery was accepted): it changes nothing |
 | `409 IDEMPOTENCY_CONFLICT` | An `attemptId` this delivery already applied, sent with other evidence |
 | `409 OUTCOME_ALREADY_RECORDED` | A **new** `attemptId` after a terminal outcome (`PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` or `STALE`; a deferral is not terminal) |
-| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery; **any outcome except `STALE` for a `request.merged` delivery** |
+| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` or `request.overdue_notice` delivery; **any outcome except `STALE` for a `request.merged` delivery** |
 | `404 NOT_FOUND` (`message: "Delivery not found"`) | Unknown delivery, or one of another branch |
 | `400 VALIDATION_ERROR` | Body or `deliveryId` malformed |
 | `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget |
@@ -336,6 +337,41 @@ On a deploy or restart the backend wakes its waiting long-polls, which answer `{
 - The credential needs `feed:read` and `feed:ack` (`ServiceCredential.scopes`).
 - The backend needs a direct PostgreSQL connection for `LISTEN` (no transaction-pooling proxy in front of `DATABASE_URL`); each replica opens one extra connection.
 - Migration `20261110050000_chatbot_feed` (additive; see `docs/chatbot-requests-model.md`, "Deploy safety").
+
+### `request.overdue_notice` (unit 7c, contract §5.4)
+
+**What it is.** The backend's SLA sweep (every 30 s, on every replica, `FOR UPDATE SKIP LOCKED`) found an open request past the deadline of its active clock: the **claim** clock while it is `NEW` (nobody took it in time) or the **resolve** clock once someone holds it or when the subtype has no claim time. The bot tells the customer **once** that the team is taking longer than expected. Staff are notified separately; this item is only for the customer.
+
+**When.** In the same transaction that marks the request overdue (`overdueAt`), at the first overdue of the request. The clocks count business minutes (they pause outside the opening hours and on closed dates), so the item appears at the real deadline, which for a transfer receipt is the close of the business day. A request that is later released, re-claimed or overdue again on its other clock produces **no second item**. Exactly one `request.overdue_notice` exists per request: a unique index `(tenantId, requestId)` for this type rejects a second one, and the sweep also only emits it while `overdueAt` was empty, which lives on the request (it survives the 30-day feed purge). A request closed before the sweep reaches its deadline never gets one. **Only if it expired less than 24 h ago (owner decision, 2026-11-11).** When the sweep first marks the request overdue and the deadline is **24 hours or more** behind (wall-clock, a late sweep, downtime or the backlog below), the backend does **not** create this item: telling the customer a day later is noise. `overdueAt` is still set and staff are still notified; the request's `SLA_MILESTONE` audit event records `customerNotice: "SKIPPED_STALE"` (`"SENT"` when the item was created). The boundary is exact: 23 h 59 m 59 s sends, 24 h 00 m 00 s skips. So an old open request that is already overdue when this ships produces **no** customer item, only the ones that expire from then on. This is decided once, at the first overdue; it is never re-evaluated later. A backlog (the sweep was down) is caught up in batches of 100 per 30 s.
+
+**Customer vs staff timing.** The customer item is created at the real deadline instant (the sweep's next tick), even outside business hours: the bot decides whether to send. Staff notices are different: they are held until the tenant's next opening (see `docs/notifications-model.md`).
+
+**Payload.**
+
+```json
+{
+  "requestId": "…",
+  "folio": "S-000123",
+  "kind": "DECISION | CLARIFICATION | CONVERSATION",
+  "subtype": "RESTOCK | EXPIRATION | DELIVERY_ZONE | TRANSFER_RECEIPT | TALK_TO_HUMAN | COMPLAINT | UNKNOWN_QUESTION | DISCOUNT",
+  "clock": "CLAIM | RESOLVE",
+  "overdueAt": "2026-11-10T16:30:00.000Z",
+  "assigned": false
+}
+```
+
+The item's own `conversationRef` is the request's (`null` when it has none: then you can only tell the customer through the `legacyId` you track for a wrapped request, or skip). `overdueAt` is the deadline that expired, not the instant of the sweep. `assigned` says only whether someone holds the request (no names, no staff text). You compose the message yourself (tú/usted); suggested meaning: "seguimos revisando su solicitud, está tardando más de lo esperado". It does not promise a time.
+
+**ACK** (`POST /chatbot-api/deliveries/:deliveryId/outcome`, same body as the others). Allowed: `PROVIDER_ACCEPTED` (you sent it), `DELIVERY_UNKNOWN` (you tried and cannot tell), `STALE` (you did not send it: the request is already answered or cancelled on your side, the 24 h window is closed, or the customer is in a human session). **`DEFERRED_WINDOW_CLOSED` and `DEFERRED_HUMAN_SESSION` are refused with `422 OUTCOME_NOT_ALLOWED`**, like `request.cancelled`: a late "seguimos revisando" only annoys, so report `STALE` instead of deferring. Idempotency is the common rule: the same `attemptId` with the same evidence replays `200`; another attempt after a terminal outcome is `409 OUTCOME_ALREADY_RECORDED`.
+
+**Idempotency on your side.** The item has a stable `deliveryId`; process it by `deliveryId`/`requestId`. Seeing it twice (at-least-once) must not send twice: after your ACK it is not served again, and before it you may re-read it.
+
+**Not covered yet.** The conversation clocks of §4.6 (5, 15, 30 min and 2 h) arrive with unit 11. Until then a conversation request (`TALK_TO_HUMAN`, `COMPLAINT`) follows the same claim/resolve clocks as any other, and a request with a live human session does not exist yet: when unit 11 lands the bot stays silent in a session, so report `STALE` for an overdue notice that reaches you while `HUMAN`.
+
+### Deploy checklist for 7c
+
+- Migration `20261111070000_chatbot_sla_sweep`: two partial UNIQUE indexes (`chatbot_feed_items_overdue_notice_uq`, `chatbot_request_events_sla_milestone_uq`), no column change. Nothing writes rows of those kinds before this unit, so they build over zero matching rows and cannot fail on duplicates; deploy at low traffic (SHARE lock for the build, `lock_timeout` 5 s).
+- **Burst when it ships.** Open requests that were already past their deadline (RESTOCK/EXPIRATION/ZONE rows wrapped by the backfill, for example) are marked overdue by the first sweeps. Those whose deadline is 24 h or more old get **no** customer item (rule above); only recently expired ones do. Staff do get one notice per request (held to the next opening). The sweep drains 100 rows per 30 s (about 200 a minute). Check `oldestOpenAt` of the backfill dry run first.
 
 ### Deploy checklist for 5c
 
