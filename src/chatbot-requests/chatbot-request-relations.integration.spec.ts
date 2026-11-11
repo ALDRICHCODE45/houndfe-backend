@@ -1551,6 +1551,58 @@ describeIfDb(
         expect(detail.body.allowedActions).not.toContain('LINK_CUSTOMER');
       });
 
+      it('refuses an unknown: zone request with 422, not a race 409', async () => {
+        const { c1 } = await ambiguous();
+        const zipCode = String(80_000 + ++seq);
+        const validation = await prisma.deliveryZoneValidation.create({
+          data: {
+            tenantId: tenantA,
+            zipCode,
+            state: 'CDMX',
+            municipality: 'Cuauhtémoc',
+            neighborhood: 'Centro',
+            branchName: 'Centro',
+          },
+        });
+        const wrapped = await prisma.deliveryZoneRequest.create({
+          data: {
+            tenantId: tenantA,
+            source: 'chatbot',
+            sourceRequestId: randomUUID(),
+            canonicalRequestHash: 'h',
+            submittedCredentialId: 'cred',
+            validationId: validation.id,
+            branchName: 'Centro',
+            zipCode,
+            state: 'CDMX',
+            municipality: 'Cuauhtémoc',
+            neighborhood: 'Centro',
+            // an unparseable phone is what gives a zone request an unknown: key
+            customerPhoneCountryCode: '52',
+            customerPhone: 'no-phone',
+            conversationRef: `wa:unknown-${randomUUID()}`,
+            lastCustomerMessageAt: NOW,
+          },
+        });
+        const zone = await create({
+          customerKey: `unknown:${wrapped.id}`,
+          kind: 'DECISION',
+          subtype: 'DELIVERY_ZONE',
+          deliveryZoneRequestId: wrapped.id,
+        });
+        const before = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: zone.id },
+        });
+        const res = await link(zone.id, c1.id);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('ACTION_NOT_ALLOWED');
+        const after = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: zone.id },
+        });
+        expect(after.version).toBe(before.version);
+        expect(after.customerId).toBeNull();
+      });
+
       it('requires read + update:ChatbotRequest and 404s another sucursal', async () => {
         const { c1, anchor } = await ambiguous();
         await link(anchor.id, c1.id, {}, 'readOnly').expect(403);

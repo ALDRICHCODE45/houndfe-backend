@@ -308,8 +308,11 @@ export class ChatbotRequestRelationsService {
         const anchor = rows.find((row) => row.id === input.requestId);
         if (!anchor) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
         // A zone request created after the zip locks was locked without its
-        // zip: roll back and let `linkCustomer` retry from the start.
+        // zip: roll back and let `linkCustomer` retry from the start. An
+        // `unknown:` key locks no zips and is never linkable, so the domain
+        // check below refuses it instead (422, or 409 REQUEST_CLOSED).
         if (
+          !isUnknownKey(peek.customerKey) &&
           rows.some((r) => r.zipCode !== null && !zipsLocked.has(r.zipCode))
         ) {
           throw new LinkZoneRaceSignal(currentOf(anchor));

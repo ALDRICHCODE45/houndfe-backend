@@ -490,7 +490,8 @@ export type MergeResult =
  * Same conversation: both requests need the SAME non-null `conversationRef`,
  * because the `request.merged` feed item names one conversation. A different
  * or missing one is 409 MERGE_NOT_ALLOWED (`on` the target, or the source when
- * it is the one with none).
+ * it is the one with none). The service checks the same rule before taking any
+ * lock and always reports the target, so this re-check is defensive only.
  */
 export function merge(
   source: MergeSide,
