@@ -24,15 +24,19 @@ export class PrismaNotificationRetentionStore {
     if (!Number.isInteger(batch) || batch <= 0) {
       throw new Error('batch must be a positive integer');
     }
+    // A CTE with a locking clause is never inlined, so the batch is picked ONCE.
+    // As a `USING (subquery)` the planner may re-run the subquery per row, and
+    // with SKIP LOCKED each run picks different rows: a batch of 10 deleted 16.
     return this.prisma.$executeRaw(Prisma.sql`
-      DELETE FROM "notifications" n
-      USING (
+      WITH doomed AS (
         SELECT "id" FROM "notifications"
         WHERE "createdAt" < ${cutoff}
         ORDER BY "createdAt"
         LIMIT ${batch}
         FOR UPDATE SKIP LOCKED
-      ) doomed
+      )
+      DELETE FROM "notifications" n
+      USING doomed
       WHERE n."id" = doomed."id"`);
   }
 }
