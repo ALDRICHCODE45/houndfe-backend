@@ -27,6 +27,7 @@ describe('PublicCatalogModule wiring', () => {
               JWT_REFRESH_SECRET: 'y'.repeat(32),
               PUBLIC_BOT_WHATSAPP: '+5215500000000',
               PUBLIC_STORE_URL: 'https://sistem.houndfe.com/catalogo/',
+              PUBLIC_SHARE_BASE_URL: 'https://api.houndfe.com/',
             }),
           ],
         }),
@@ -45,6 +46,7 @@ describe('PublicCatalogModule wiring', () => {
     const config = moduleRef.get(PublicCatalogConfig);
     expect(config.botWhatsappNumber()).toBe('+5215500000000');
     expect(config.storeUrl()).toBe('https://sistem.houndfe.com/catalogo');
+    expect(config.shareBaseUrl()).toBe('https://api.houndfe.com');
     await moduleRef.close();
   });
 });

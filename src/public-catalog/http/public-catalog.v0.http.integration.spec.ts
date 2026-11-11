@@ -569,6 +569,7 @@ describeIfDb('public catalog v0 over HTTP (PostgreSQL)', () => {
     });
     afterEach(() => {
       delete env.PUBLIC_STORE_URL;
+      delete env.PUBLIC_SHARE_BASE_URL;
     });
 
     it('serves og tags and a redirect to the storefront product, with a 300s public cache', async () => {
@@ -629,10 +630,6 @@ describeIfDb('public catalog v0 over HTTP (PostgreSQL)', () => {
       ['malformed product id', () => `/share/${slug}/p/not-a-uuid`],
       ['unknown tenant', () => `/share/no-such-slug/p/${randomUUID()}`],
       ['product of another tenant', () => `/share/${emptySlug}/p/${ids.Media}`],
-      [
-        'price list the tenant does not publish',
-        () => `/share/${slug}/p/${ids.Media}?priceListId=${randomUUID()}`,
-      ],
     ])(
       '%s: 404 page that redirects to the store home, no og tags',
       async (_l, path) => {
@@ -642,6 +639,63 @@ describeIfDb('public catalog v0 over HTTP (PostgreSQL)', () => {
         expect(res.text).not.toContain('og:title');
       },
     );
+
+    it('a stale ?priceListId (valid UUID the tenant does not publish) previews and redirects to the product without the param', async () => {
+      const stale = randomUUID();
+      env.PUBLIC_SHARE_BASE_URL = 'https://api.houndfe.com';
+      const res = await get(
+        `/share/${slug}/p/${ids.Media}?priceListId=${stale}`,
+      ).expect(200);
+      const target = `${STORE}/${slug}/p/${ids.Media}`;
+      expect(res.headers['cache-control']).toBe('public, max-age=300');
+      // og tags come from the default context.
+      expect(res.text).toContain('og:title" content="Media"');
+      expect(res.text).toContain(`content="0;url=${target}"`);
+      expect(res.text).toContain(`location.replace("${target}")`);
+      expect(res.text).toContain(
+        `og:url" content="https://api.houndfe.com/share/${slug}/p/${ids.Media}"`,
+      );
+      // The stale id is never echoed anywhere.
+      expect(res.text).not.toContain(stale);
+      expect(res.text).not.toContain('priceListId');
+    });
+
+    it('a stale ?priceListId on an unknown product still goes to the store home', async () => {
+      const res = await get(
+        `/share/${slug}/p/${randomUUID()}?priceListId=${randomUUID()}`,
+      ).expect(404);
+      expect(res.text).toContain(`location.replace("${STORE}")`);
+      expect(res.text).not.toContain('og:title');
+    });
+
+    it('og:url is the /share URL when PUBLIC_SHARE_BASE_URL is set, with the valid priceListId', async () => {
+      env.PUBLIC_SHARE_BASE_URL = 'https://api.houndfe.com/';
+      const plain = await get(`/share/${slug}/p/${ids.Media}`).expect(200);
+      expect(plain.text).toContain(
+        `og:url" content="https://api.houndfe.com/share/${slug}/p/${ids.Media}"`,
+      );
+      // The redirect target stays the storefront.
+      expect(plain.text).toContain(
+        `content="0;url=${STORE}/${slug}/p/${ids.Media}"`,
+      );
+      const withList = await get(
+        `/share/${slug}/p/${ids.Media}?priceListId=${listB}`,
+      ).expect(200);
+      expect(withList.text).toContain(
+        `og:url" content="https://api.houndfe.com/share/${slug}/p/${ids.Media}?priceListId=${listB}"`,
+      );
+      expect(withList.text).toContain(
+        `content="0;url=${STORE}/${slug}/p/${ids.Media}?priceListId=${listB}"`,
+      );
+    });
+
+    it('og:url falls back to the storefront URL when PUBLIC_SHARE_BASE_URL is unset (previous behavior)', async () => {
+      const res = await get(`/share/${slug}/p/${ids.Media}`).expect(200);
+      expect(res.text).toContain(
+        `og:url" content="${STORE}/${slug}/p/${ids.Media}"`,
+      );
+      expect(res.text).not.toContain('/share/');
+    });
 
     it('answers 503 with no redirect when PUBLIC_STORE_URL is unset', async () => {
       delete env.PUBLIC_STORE_URL;

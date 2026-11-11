@@ -81,3 +81,30 @@ describe('PUBLIC_STORE_URL', () => {
     expect(error?.message).toContain('PUBLIC_STORE_URL');
   });
 });
+
+describe('PUBLIC_SHARE_BASE_URL', () => {
+  it('is optional: absent and empty both validate', () => {
+    expect(validate({}).error).toBeUndefined();
+    expect(validate({ PUBLIC_SHARE_BASE_URL: '' }).error).toBeUndefined();
+  });
+
+  it.each([
+    'https://api.houndfe.com',
+    'https://api.houndfe.com/',
+    'http://localhost:3000',
+  ])('accepts %s', (value) => {
+    expect(validate({ PUBLIC_SHARE_BASE_URL: value }).error).toBeUndefined();
+  });
+
+  it.each([
+    'api.houndfe.com',
+    'javascript:alert(1)',
+    'ftp://api.houndfe.com',
+    'not a url',
+    'https://api.houndfe.com?x=1',
+    'https://api.houndfe.com#frag',
+  ])('rejects %s at boot', (value) => {
+    const { error } = validate({ PUBLIC_SHARE_BASE_URL: value });
+    expect(error?.message).toContain('PUBLIC_SHARE_BASE_URL');
+  });
+});

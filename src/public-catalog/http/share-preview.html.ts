@@ -10,8 +10,10 @@ export interface SharePreviewInput {
   title: string;
   description: string | null;
   image: string | null;
-  /** The storefront URL the page redirects to (also `og:url`). */
+  /** The storefront URL the page redirects to (and links to). */
   url: string;
+  /** `og:url`: the canonical URL scrapers re-read (the share URL when known). */
+  ogUrl: string;
 }
 
 const DESCRIPTION_MAX = 200;
@@ -37,12 +39,28 @@ function scriptString(value: string): string {
   );
 }
 
+/** Counts and cuts by code points, so an emoji is never split. */
 function summarize(description: string | null, fallback: string): string {
   const text = (description ?? '').replace(/\s+/g, ' ').trim();
   if (text === '') return fallback;
-  return text.length <= DESCRIPTION_MAX
+  const points = Array.from(text);
+  return points.length <= DESCRIPTION_MAX
     ? text
-    : `${text.slice(0, DESCRIPTION_MAX - 1).trimEnd()}…`;
+    : `${points
+        .slice(0, DESCRIPTION_MAX - 1)
+        .join('')
+        .trimEnd()}…`;
+}
+
+/** Only an absolute http(s) URL is a usable og:image; anything else is dropped. */
+function publicImageUrl(image: string | null): string | null {
+  if (image === null) return null;
+  try {
+    const { protocol } = new URL(image);
+    return protocol === 'http:' || protocol === 'https:' ? image : null;
+  } catch {
+    return null;
+  }
 }
 
 function redirectBlock(url: string): string {
@@ -56,14 +74,16 @@ export function renderSharePreviewHtml(input: SharePreviewInput): string {
   const title = escapeHtml(input.title);
   const description = escapeHtml(summarize(input.description, input.siteName));
   const url = escapeHtml(input.url);
-  const image = input.image === null ? null : escapeHtml(input.image);
+  const ogUrl = escapeHtml(input.ogUrl);
+  const rawImage = publicImageUrl(input.image);
+  const image = rawImage === null ? null : escapeHtml(rawImage);
   const meta = [
     `<meta property="og:type" content="product">`,
     `<meta property="og:site_name" content="${escapeHtml(input.siteName)}">`,
     `<meta property="og:title" content="${title}">`,
     `<meta property="og:description" content="${description}">`,
     ...(image ? [`<meta property="og:image" content="${image}">`] : []),
-    `<meta property="og:url" content="${url}">`,
+    `<meta property="og:url" content="${ogUrl}">`,
     `<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">`,
     `<meta name="twitter:title" content="${title}">`,
     `<meta name="twitter:description" content="${description}">`,

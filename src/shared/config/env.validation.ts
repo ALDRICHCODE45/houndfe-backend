@@ -261,6 +261,16 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
       .allow('')
       .optional(),
 
+    // Public catalog v0 (S6) — public base URL of THIS API (e.g.
+    // https://api.houndfe.com), used for `og:url` of the share preview so
+    // scrapers re-read the /share page. Optional: unset keeps `og:url` on the
+    // storefront URL. http(s) only, no query or fragment.
+    PUBLIC_SHARE_BASE_URL: Joi.string()
+      .uri({ scheme: ['http', 'https'] })
+      .pattern(/^[^?#]*$/)
+      .allow('')
+      .optional(),
+
     // CORS — comma-separated list of allowed origins (production).
     // Absent → open CORS with a boot warning (dev fallback).
     CORS_ORIGINS: Joi.string().optional().default(''),

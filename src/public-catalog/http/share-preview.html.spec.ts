@@ -13,6 +13,7 @@ const base = {
   description: 'Croquetas horneadas para interiores.',
   image: 'https://cdn.example.com/p.jpg',
   url: 'https://sistem.houndfe.com/catalogo/centro/p/abc',
+  ogUrl: 'https://api.houndfe.com/share/centro/p/abc',
 };
 
 describe('renderSharePreviewHtml', () => {
@@ -28,7 +29,7 @@ describe('renderSharePreviewHtml', () => {
       '<meta property="og:image" content="https://cdn.example.com/p.jpg">',
     );
     expect(html).toContain(
-      '<meta property="og:url" content="https://sistem.houndfe.com/catalogo/centro/p/abc">',
+      '<meta property="og:url" content="https://api.houndfe.com/share/centro/p/abc">',
     );
     expect(html).toContain('<meta property="og:type" content="product">');
     expect(html).toContain(
@@ -43,6 +44,24 @@ describe('renderSharePreviewHtml', () => {
     expect(html).toContain(
       '<a href="https://sistem.houndfe.com/catalogo/centro/p/abc">',
     );
+  });
+
+  it('og:url is the share URL while the redirect and the anchor keep the storefront URL', () => {
+    const html = renderSharePreviewHtml(base);
+    expect(html.match(/og:url" content="([^"]*)"/)?.[1]).toBe(base.ogUrl);
+    expect(html).not.toContain(`og:url" content="${base.url}"`);
+    expect(html).toContain(`content="0;url=${base.url}"`);
+    expect(html).toContain(`location.replace("${base.url}")`);
+    expect(html).toContain(`<a href="${base.url}">`);
+  });
+
+  it('escapes the og:url', () => {
+    const html = renderSharePreviewHtml({
+      ...base,
+      ogUrl: 'https://s.test/share/c/p/1?priceListId=a"><script>x</script>',
+    });
+    expect(html).not.toContain('<script>x');
+    expect(html.match(/<script>/g)).toHaveLength(1);
   });
 
   it('falls back to a summary card and omits og:image when there is no image', () => {
@@ -102,6 +121,56 @@ describe('renderSharePreviewHtml', () => {
     expect(text).not.toContain('\n');
     expect(text.endsWith('…')).toBe(true);
   });
+
+  it('cuts the description by code points and never splits an emoji', () => {
+    const html = renderSharePreviewHtml({
+      ...base,
+      description: `${'a'.repeat(198)}😀😀😀`,
+    });
+    const [, text] = /og:description" content="([^"]*)"/.exec(html) ?? [];
+    expect(Array.from(text)).toHaveLength(200);
+    expect(text).toBe(`${'a'.repeat(198)}😀…`);
+    // No lone surrogate anywhere in the page.
+    expect(html).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  });
+
+  it('keeps a description of exactly 200 code points whole, even when it is all emoji', () => {
+    const description = '😀'.repeat(200);
+    const html = renderSharePreviewHtml({ ...base, description });
+    expect(html).toContain(`og:description" content="${description}"`);
+    const longer = renderSharePreviewHtml({
+      ...base,
+      description: '😀'.repeat(201),
+    });
+    expect(longer).toContain(`content="${'😀'.repeat(199)}…"`);
+  });
+
+  it.each([
+    'javascript:alert(1)',
+    'data:image/png;base64,AAAA',
+    '//cdn.example.com/p.jpg',
+    '/relative/p.jpg',
+    'ftp://cdn.example.com/p.jpg',
+    'not a url',
+    '',
+  ])(
+    'omits og:image and twitter:image for the non-http(s) image %p',
+    (image) => {
+      const html = renderSharePreviewHtml({ ...base, image });
+      expect(html).not.toContain('og:image');
+      expect(html).not.toContain('twitter:image');
+      expect(html).toContain('<meta name="twitter:card" content="summary">');
+    },
+  );
+
+  it.each(['http://cdn.example.com/p.jpg', 'HTTPS://cdn.example.com/p.jpg'])(
+    'keeps an http(s) image: %s',
+    (image) => {
+      expect(renderSharePreviewHtml({ ...base, image })).toContain('og:image"');
+    },
+  );
 
   it('uses the site name when the description is empty', () => {
     const html = renderSharePreviewHtml({ ...base, description: null });
