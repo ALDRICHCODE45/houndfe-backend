@@ -6,6 +6,7 @@ import {
   computeAllowedActions,
   decodeCursor,
   encodeCursor,
+  isSaneDate,
 } from './staff-inbox';
 
 type Grant = `${string}:${string}`;
@@ -124,6 +125,18 @@ describe('computeAllowedActions', () => {
     expect(computeAllowedActions(state(), READ_ONLY, ME)).toEqual([]);
   });
 
+  it('does not offer RESOLVE on a zone request that has no validation (the route answers 404)', () => {
+    const zone = state({ subtype: 'DELIVERY_ZONE' });
+    const ability = abilityOf('update:ChatbotRequest', 'validate:DeliveryZone');
+    expect(computeAllowedActions(zone, ability, ME)).toEqual([
+      'CLAIM',
+      'RESOLVE',
+    ]);
+    expect(
+      computeAllowedActions(zone, ability, ME, { resolveTargetMissing: true }),
+    ).toEqual(['CLAIM']);
+  });
+
   it('never offers reschedule (scheduling arrives with unit 14)', () => {
     const conversation = state({
       kind: 'CONVERSATION',
@@ -136,22 +149,74 @@ describe('computeAllowedActions', () => {
 });
 
 describe('cursors', () => {
-  it('round-trips parts, including null', () => {
-    const raw = encodeCursor(['2026-11-10T00:00:00.000Z', null, 'abc']);
-    expect(decodeCursor(raw, 3)).toEqual([
-      '2026-11-10T00:00:00.000Z',
+  const DATE = '2026-11-10T00:00:00.000Z';
+  const UUID = '2b7c1a90-6f3e-4d2a-8b1c-0d9e8f7a6b5c';
+
+  it('round-trips parts of every kind, including a null date', () => {
+    const raw = encodeCursor([DATE, null, UUID, 'k1.token']);
+    expect(decodeCursor(raw, ['date', 'date?', 'uuid', 'text'])).toEqual([
+      DATE,
       null,
-      'abc',
+      UUID,
+      'k1.token',
     ]);
   });
 
   it.each([
-    ['not base64 json', '%%%'],
-    ['wrong arity', encodeCursor(['a'])],
-    ['not an array', Buffer.from('{"a":1}').toString('base64url')],
-    ['a number part', Buffer.from('[1,"b"]').toString('base64url')],
-  ])('rejects %s with a validation error', (_name, raw) => {
-    expect(() => decodeCursor(raw, 2)).toThrow(InvalidArgumentError);
+    ['not base64 json', '%%%', ['text', 'text']],
+    ['wrong arity', encodeCursor(['a']), ['text', 'text']],
+    [
+      'not an array',
+      Buffer.from('{"a":1}').toString('base64url'),
+      ['text', 'text'],
+    ],
+    [
+      'a number part',
+      Buffer.from('[1,"b"]').toString('base64url'),
+      ['text', 'text'],
+    ],
+    [
+      'a date that does not parse',
+      encodeCursor(['not-a-date', 'x']),
+      ['date', 'text'],
+    ],
+    [
+      'a date that is not a real day',
+      encodeCursor(['2026-13-45T00:00:00.000Z', 'x']),
+      ['date', 'text'],
+    ],
+    [
+      'a date PostgreSQL cannot store (year 0)',
+      encodeCursor(['0000-01-01T00:00:00.000Z', 'x']),
+      ['date', 'text'],
+    ],
+    [
+      'a date without the ISO form',
+      encodeCursor(['2026-11-10', 'x']),
+      ['date', 'text'],
+    ],
+    [
+      'a null where a date is required',
+      encodeCursor([null, 'x']),
+      ['date', 'text'],
+    ],
+    [
+      'an id that is not a UUID',
+      encodeCursor([DATE, 'nope']),
+      ['date', 'uuid'],
+    ],
+    ['an empty text part', encodeCursor([DATE, '']), ['date', 'text']],
+  ] as const)('rejects %s with a validation error', (_name, raw, kinds) => {
+    expect(() => decodeCursor(raw, [...kinds])).toThrow(InvalidArgumentError);
+  });
+});
+
+describe('isSaneDate', () => {
+  it('accepts dates PostgreSQL can store and rejects the rest', () => {
+    expect(isSaneDate(new Date('2026-11-10T00:00:00.000Z'))).toBe(true);
+    expect(isSaneDate(new Date('not-a-date'))).toBe(false);
+    expect(isSaneDate(new Date('0001-01-01T00:00:00.000Z'))).toBe(false);
+    expect(isSaneDate(new Date('+275000-01-01T00:00:00.000Z'))).toBe(false);
   });
 });
 

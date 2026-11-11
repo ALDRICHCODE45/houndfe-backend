@@ -255,6 +255,7 @@ export async function refreshCustomerGroups(
 }
 
 export interface ZoneImpact {
+  validationId: string;
   requests: number;
   customers: number;
   setVersion: number;
@@ -272,7 +273,9 @@ export async function readZoneImpact(
   tenantId: string,
   validationId: string,
 ): Promise<ZoneImpact> {
-  const [row] = await tx.$queryRaw<ZoneImpact[]>(Prisma.sql`
+  const [row] = await tx.$queryRaw<
+    Omit<ZoneImpact, 'validationId'>[]
+  >(Prisma.sql`
     SELECT
       (count(*) FILTER (WHERE cr."status" IN ('NEW', 'IN_PROGRESS')))::int AS "requests",
       (count(DISTINCT cr."customerKey")
@@ -282,7 +285,7 @@ export async function readZoneImpact(
     JOIN "delivery_zone_requests" dzr ON dzr."id" = cr."deliveryZoneRequestId"
     WHERE cr."tenantId" = ${tenantId} AND dzr."tenantId" = ${tenantId}
       AND dzr."validationId" = ${validationId}`);
-  return row;
+  return { validationId, ...row };
 }
 
 /** Zone validation and postal code behind a DELIVERY_ZONE request, if any. */

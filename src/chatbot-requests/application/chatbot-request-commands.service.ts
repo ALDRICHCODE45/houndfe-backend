@@ -103,6 +103,7 @@ function toResolution(action: ResolveAction): Record<string, unknown> {
 }
 
 export interface ZoneImpactView {
+  validationId: string;
   requests: number;
   customers: number;
   setVersion: number;

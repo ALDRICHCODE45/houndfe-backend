@@ -26,6 +26,8 @@ import {
   decodeCursor,
   encodeCursor,
   HISTORY_MAX_RANGE_DAYS,
+  isSaneDate,
+  type CursorKind,
 } from '../domain/staff-inbox';
 import { toStaffPhone } from '../domain/staff-phone';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
@@ -248,7 +250,13 @@ export class ChatbotRequestReadsService {
       limit,
       tab: input.tab,
       filters: input.filters,
-      cursor: this.openCursor(input.cursor, 2, 1),
+      cursor: this.openCursor(
+        input.cursor,
+        input.tab === 'resolved' || input.tab === 'cancelled'
+          ? ['date', 'text']
+          : ['date?', 'text'],
+        1,
+      ),
     });
     const page = records.slice(0, limit);
     const customers = await this.customerIndex(page.flatMap((g) => g.requests));
@@ -311,7 +319,10 @@ export class ChatbotRequestReadsService {
       limit,
       customerKey: this.openKey(input.customerKey),
       tab: input.tab,
-      cursor: this.openCursor(input.cursor, open ? 3 : 2),
+      cursor: this.openCursor(
+        input.cursor,
+        open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
+      ),
     });
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
@@ -353,6 +364,9 @@ export class ChatbotRequestReadsService {
         'VALIDATION_ERROR',
       );
     }
+    if ((from && !isSaneDate(from)) || (to && !isSaneDate(to))) {
+      throw new InvalidArgumentError('Invalid date range', 'VALIDATION_ERROR');
+    }
     if (from && to) {
       if (to <= from) {
         throw new InvalidArgumentError(
@@ -368,7 +382,7 @@ export class ChatbotRequestReadsService {
     const records = await this.store.history({
       cutoff: closedWindowCutoff(this.clock()),
       limit,
-      cursor: this.openCursor(input.cursor, 2),
+      cursor: this.openCursor(input.cursor, ['date', 'uuid']),
       subtype: input.subtype,
       resolvedBy: input.resolvedBy,
       from,
@@ -451,6 +465,12 @@ export class ChatbotRequestReadsService {
         toState(request),
         reader.ability,
         reader.userId,
+        {
+          // The resolve route answers 404 for a zone request that has no
+          // validation to settle, so it is not offered.
+          resolveTargetMissing:
+            request.subtype === 'DELIVERY_ZONE' && !record.zoneImpact,
+        },
       ),
     };
   }
@@ -460,7 +480,7 @@ export class ChatbotRequestReadsService {
     const limit = input.limit ?? MAX_PAGE;
     const records = await this.store.audit(
       id,
-      this.openCursor(input.cursor, 2),
+      this.openCursor(input.cursor, ['date', 'uuid']),
       limit,
     );
     if (!records) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
@@ -575,11 +595,11 @@ export class ChatbotRequestReadsService {
    */
   private openCursor(
     raw: string | undefined,
-    arity: number,
+    kinds: CursorKind[],
     keyAt?: number,
   ): Array<string | null> | null {
     if (raw === undefined) return null;
-    const parts = decodeCursor(raw, arity);
+    const parts = decodeCursor(raw, kinds);
     if (keyAt !== undefined) {
       const token = parts[keyAt];
       parts[keyAt] = token === null ? null : this.openKey(token);

@@ -42,8 +42,9 @@ A request of another sucursal answers `404`, the same as a missing one.
 
 - `customer.phone` (groups and detail) is `"55 **** 5678"` (area code and last four digits) unless the caller has `read:CustomerPhone`, in which case it is the full E.164 number with a plus: `"+525512345678"`. It is `null` when the request has no phone (old rows). A very short national number shows only its last two digits (`"**** 56"`).
 - **`customerKey` is opaque.** The contract example (§12.4) shows `"525512345678"`, but that is the phone, so it would leak the full number to a Cashier. The API returns a token (`"k1.…"`) instead, **for every caller** (also those with `read:CustomerPhone`), so the frontend groups and caches by it whatever the role. It is deterministic (the same customer always has the same token in a sucursal), bound to the sucursal, and only valid for the sucursal that issued it. Send it back unchanged in `?customerKey=`. Never parse it, and never build one.
-- Cursors do not contain the phone either.
-- A `customerKey` or cursor that is not a token of the current sucursal (altered, from another sucursal, or issued before a server secret rotation) answers `400 VALIDATION_ERROR`. After a `400` on a stored key, reload the list.
+- **Contract deviation (v1.2, recorded in proposal §3.8 and §12.4).** The contract examples show the raw key; the API never sends it, because of D11/R12. Tell your SSE and cache code too: every row and every `previousCustomerKey` (unit 8) uses the same token, so a row from `groups`, from `?customerKey=` and from an event with the same customer share one `customerKey`.
+- Cursors do not contain the phone or the raw key either (they carry the same token).
+- A `customerKey` or cursor that is not a token of the current sucursal (altered, from another sucursal, or issued before a server secret rotation) answers `400 VALIDATION_ERROR`. After a `400` on a stored key, **reload the list** and use the new tokens; do not retry with the same value. **Rotating the server secret (`JWT_SECRET`) invalidates every token**, which shows up as that `400` (a reload fixes it; nothing leaks).
 - Where the full number appears with the permission: `customer.phone` of the group and of the detail. Nowhere else.
 
 ## 3. The row
@@ -164,7 +165,7 @@ The row (section 3) plus:
   },
   "otherOpenRequests": [ /* up to 20 rows of the same customer, open, not this one */ ],
   "decision": { "subtype": "RESTOCK", "snapshot": { "…": "…" }, "resolution": null },
-  "zoneImpact": { "requests": 4, "customers": 3, "setVersion": 7 },
+  "zoneImpact": { "validationId": "…", "requests": 4, "customers": 3, "setVersion": 7 },
   "deliveries": [
     { "deliveryId": "…", "type": "request.answered", "createdAt": "…", "outcome": "PENDING",
       "attemptedAt": null, "providerStatus": null, "needsReconciliation": false }
@@ -187,11 +188,11 @@ The row (section 3) plus:
   | --- | --- |
   | `RESTOCK` | `{subtype, snapshot {branchName, productId, productName, variantId, sku, requestedQuantity, observedStockAtRequest, stockObservedAt}, resolution}` |
   | `EXPIRATION` | `{subtype, snapshot {branchId, branchName, productId, productName, unit, variantId, variantName, variantOption, variantValue}, resolution}` |
-  | `DELIVERY_ZONE` | `{subtype, validationId, zipCode, state, municipality, neighborhood, requesterCount, lastCustomerMessageAt, resolution}`; `lastCustomerMessageAt` is this request's own |
+  | `DELIVERY_ZONE` | `{subtype, validationId, zipCode, state, municipality, neighborhood, requesterCount, lastCustomerMessageAt, resolution}`; `requesterCount` counts every requester of the validation (also resolved and cancelled ones; `validationId` is `null` and the count 1 when the request has no validation); `lastCustomerMessageAt` is this request's own |
   | `TRANSFER_RECEIPT` | `{subtype, receiptId, saleId, saleFolio, declaredAmountCents, declaredAmountProvided, declaredDate, declaredReference, saleTotalCents, salePaidCents, saleDebtCents, file {mimeType, sizeBytes, previewStatus, originalUrl, previewUrl} \| null, extracted, mismatch, resolution}`; the file URLs are the existing `/sales/:id/receipts/:rid/file` and `/preview` routes (`null` once purged) |
 
   `resolution` is `null` while open; after a resolve it is the chosen option with its parameters, plus `resolvedBy {id, displayName}` and `resolvedAt` (for example `{action: "PROVIDE_RESTOCK_ESTIMATE", restockDays: 7, resolvedBy, resolvedAt}`). It is also `null` on a request closed by a customer or staff cancel. The customer's phone and conversation reference of the wrapped tables are never in it.
-- **`zoneImpact`** exists only on `DELIVERY_ZONE` (same value as `GET …/zone-impact`; send its `setVersion` as `expectedZoneSetVersion` when resolving).
+- **`zoneImpact`** exists only on `DELIVERY_ZONE` that has a validation (same value as `GET …/zone-impact`, including `validationId`; send its `setVersion` as `expectedZoneSetVersion` when resolving). `requests` and `customers` count only the **open** requesters (what resolving would settle), while `decision.requesterCount` counts **every** requester of the validation, whatever its state, like the old zone screen.
 - **`deliveries[]`** are the answers queued for the bot, newest first (at most 50): `outcome` is `PENDING` until the bot reports, then `PROVIDER_ACCEPTED | DELIVERY_UNKNOWN | DEFERRED_WINDOW_CLOSED | DEFERRED_HUMAN_SESSION | STALE`. `needsReconciliation` is true for `DELIVERY_UNKNOWN` (the "entrega dudosa"). `providerStatus` is `null` until the statuses unit.
 - **`audit[]`** is the 20 most recent events, newest first. `actor.kind` is `USER | SERVICE | SYSTEM` (for `SYSTEM`, `id` and `displayName` are `null`). `data` is small and never customer text (except the `customerNote` that staff wrote on a cancel). More: `GET …/audit?cursor=` with `auditNextCursor`.
 - **`allowedActions`** is computed by the server from the state machine, the caller's permissions and whether the caller is the assignee. Offer a button only if its action is in the list; the command can still answer `409` if the request changed meanwhile. Today it can contain `CLAIM`, `RELEASE`, `REASSIGN`, `RESOLVE`, `CANCEL`:
@@ -201,7 +202,7 @@ The row (section 3) plus:
   | `CLAIM` | `update:ChatbotRequest`, request `NEW` |
   | `RELEASE` | `update:ChatbotRequest`, request `IN_PROGRESS`, and it is yours or you also have `update:ChatbotRequestAssignment`; not for a live conversation |
   | `REASSIGN` | `update:ChatbotRequestAssignment`, request `IN_PROGRESS` |
-  | `RESOLVE` | `update:ChatbotRequest` **and** the legacy permission of the subtype (`update:HumanDecision` for stock and expiry, `validate:DeliveryZone`, `update:ReceiptEvidence`), `kind = DECISION`, open and not held by someone else |
+  | `RESOLVE` | `update:ChatbotRequest` **and** the legacy permission of the subtype (`update:HumanDecision` for stock and expiry, `validate:DeliveryZone`, `update:ReceiptEvidence`), `kind = DECISION`, open and not held by someone else; for `DELIVERY_ZONE` also only when it has a validation (without one the resolve route answers `404`) |
   | `CANCEL` | `update:ChatbotRequest`, open, not a `DECISION`, and (if held by someone else) you have `update:ChatbotRequestAssignment` |
 
   `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH`, `FINISH_IDLE`, `MERGE` and `LINK_CUSTOMER` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request gets `["CLAIM","RESOLVE"]`; a Cashier gets `["CLAIM"]`; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","CANCEL"]`.
@@ -220,7 +221,7 @@ Same envelope as handoff 11: `{statusCode, code, message}`.
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400` | `VALIDATION_ERROR` | Unknown or malformed parameter, missing `customerKey` in the customer list, a `limit` outside 1–50, a malformed or foreign `cursor`/`customerKey`, `from`/`to` not together or reversed, `:id` that is not a UUID |
+| `400` | `VALIDATION_ERROR` | Unknown or malformed parameter, missing `customerKey` in the customer list, a `limit` outside 1–50, a malformed or foreign `cursor`/`customerKey` (also a cursor with a date that is not a real instant or an id that is not a UUID), `from`/`to` outside the years 1900–9999, `from`/`to` not together or reversed, `:id` that is not a UUID |
 | `400` | `RANGE_TOO_LARGE` | `from`/`to` span more than 92 days |
 | `401` | `UNAUTHORIZED` | No JWT, or the user is inactive |
 | `403` | `FORBIDDEN` | No membership in the sucursal |

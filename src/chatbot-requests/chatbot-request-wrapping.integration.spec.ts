@@ -1010,7 +1010,12 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
       }
 
       const impact = await impactOf(tenantId, b.id);
-      expect(impact).toEqual({ requests: 3, customers: 3, setVersion: 3 });
+      expect(impact).toEqual({
+        validationId: expect.any(String) as string,
+        requests: 3,
+        customers: 3,
+        setVersion: 3,
+      });
       const view = await resolveNew(tenantId, b.id, approve(impact.setVersion));
       expect(view).toMatchObject({ status: 'RESOLVED' });
 

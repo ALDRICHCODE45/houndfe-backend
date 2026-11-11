@@ -75,9 +75,18 @@ export async function readDecision(
       },
     });
     if (!zone) return NONE;
-    const zoneImpact = zone.validationId
-      ? await readZoneImpact(db, tenantId, zone.validationId)
+    const { validationId } = zone;
+    const zoneImpact = validationId
+      ? await readZoneImpact(db, tenantId, validationId)
       : null;
+    // Same projection as the legacy zone screen: every requester of the
+    // validation counts, whatever its state (`zoneImpact.requests` is only the
+    // open ones, what resolving would settle).
+    const requesterCount = validationId
+      ? await db.deliveryZoneRequest.count({
+          where: { tenantId, validationId },
+        })
+      : 1;
     return {
       decision: {
         subtype,
@@ -86,7 +95,7 @@ export async function readDecision(
         state: zone.state,
         municipality: zone.municipality,
         neighborhood: zone.neighborhood,
-        requesterCount: zoneImpact?.requests ?? 1,
+        requesterCount,
         lastCustomerMessageAt: iso(zone.lastCustomerMessageAt),
       },
       zoneImpact,

@@ -49,6 +49,7 @@ import {
   CUSTOMER_KEY_SEALER,
   INBOX_CLOCK,
 } from './application/chatbot-request-reads.service';
+import { PrismaDeliveryZoneValidationRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-validation.repository';
 import { CustomerKeySealer } from './domain/customer-key-sealer';
 import {
   allocateFolio,
@@ -334,6 +335,142 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       ...over,
     });
   }
+
+  /**
+   * A zone validation with `n` requesters, each with its own customer and its
+   * own `ChatbotRequest` (R9). The first one is the walk's customer (KEY).
+   */
+  async function zoneRequests(n: number, tenantId: string = tenantA) {
+    // `(tenantId, zipCode)` is unique, so every fixture gets its own code.
+    const zipCode = String(10_000 + ++seq);
+    const validation = await prisma.deliveryZoneValidation.create({
+      data: {
+        tenantId,
+        zipCode,
+        state: 'CDMX',
+        municipality: 'Cuauhtémoc',
+        neighborhood: 'Centro',
+        branchName: 'Centro',
+      },
+    });
+    const requests: Array<{
+      id: string;
+      customerKey: string;
+      lastMessageAt: Date;
+    }> = [];
+    for (let i = 0; i < n; i++) {
+      const lastMessageAt = new Date(NOW.getTime() - (i + 1) * HOUR);
+      const customerKey =
+        i === 0 ? KEY : `52551100${String(++seq).padStart(4, '0')}`;
+      const phone =
+        i === 0
+          ? PHONE
+          : { phoneCountryCode: '52', phone: customerKey.slice(2) };
+      const wrapped = await prisma.deliveryZoneRequest.create({
+        data: {
+          tenantId,
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          canonicalRequestHash: 'h',
+          submittedCredentialId: 'cred',
+          validationId: validation.id,
+          branchName: 'Centro',
+          zipCode,
+          state: 'CDMX',
+          municipality: 'Cuauhtémoc',
+          neighborhood: 'Centro',
+          customerPhoneCountryCode: phone.phoneCountryCode,
+          customerPhone: phone.phone,
+          conversationRef: `wa:${customerKey}`,
+          lastCustomerMessageAt: lastMessageAt,
+        },
+      });
+      const created = await create(
+        {
+          kind: 'DECISION',
+          subtype: 'DELIVERY_ZONE',
+          deliveryZoneRequestId: wrapped.id,
+          customerKey,
+          ...phone,
+        },
+        tenantId,
+      );
+      requests.push({ id: created.id, customerKey, lastMessageAt });
+    }
+    return { validationId: validation.id, zipCode, requests };
+  }
+
+  async function receiptRequest(
+    receipt: Record<string, unknown> = {},
+    over: Record<string, unknown> = {},
+  ) {
+    const sale = await prisma.sale.create({
+      data: {
+        tenantId: tenantA,
+        userId: users.ana,
+        status: 'CONFIRMED',
+        totalCents: 20_000,
+        paidCents: 5_000,
+        debtCents: 15_000,
+        folio: 'V-77',
+      },
+    });
+    const evidence = await prisma.receiptEvidence.create({
+      data: {
+        tenantId: tenantA,
+        saleId: sale.id,
+        declaredAmountCents: 5_000,
+        declaredDate: new Date('2026-11-09T00:00:00.000Z'),
+        declaredReference: 'ABC123',
+        mimeType: 'image/jpeg',
+        sizeBytes: 1234,
+        previewStatus: 'READY',
+        storageKey: 'receipts/k',
+        extracted: { amountCents: 5_000 },
+        mismatch: { kind: 'AMOUNT' },
+        ...receipt,
+      },
+    });
+    const request = await create({
+      kind: 'DECISION',
+      subtype: 'TRANSFER_RECEIPT',
+      receiptEvidenceId: evidence.id,
+      ...over,
+    });
+    return { ...request, saleId: sale.id, receiptId: evidence.id };
+  }
+
+  async function expirationRequest(
+    decision: Record<string, unknown> = {},
+    over: Record<string, unknown> = {},
+  ) {
+    const created = await prisma.humanDecision.create({
+      data: {
+        tenantId: tenantA,
+        source: 'chatbot',
+        sourceRequestId: randomUUID(),
+        type: 'EXPIRATION',
+        canonicalRequestHash: 'h',
+        submittedCredentialId: 'cred',
+        branchId: tenantA,
+        branchName: 'Centro',
+        productId: randomUUID(),
+        productName: 'Alimento húmedo',
+        productUnit: 'lata',
+        ...decision,
+      },
+    });
+    const request = await create({
+      kind: 'DECISION',
+      subtype: 'EXPIRATION',
+      humanDecisionId: created.id,
+      ...over,
+    });
+    return { ...request, decision: created };
+  }
+
+  const cursorOf = (...parts: Array<string | null>) =>
+    Buffer.from(JSON.stringify(parts)).toString('base64url');
 
   // ---------------------------------------------------------------- groups
 
@@ -816,15 +953,338 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
     });
   });
 
+  // ----------------------------------------- decision projection (§12.6)
+
+  describe('GET /chatbot-requests/:id: decision per subtype and zoneImpact', () => {
+    const legacyValidations = () =>
+      new PrismaDeliveryZoneValidationRepository(tenantPrisma);
+    const legacyCount = (validationId: string) =>
+      cls.runWith(
+        { tenantId: tenantA, userId: 'test', isSuperAdmin: false },
+        () => legacyValidations().findById(validationId),
+      );
+    const closeRequests = (ids: string[], data: Record<string, unknown>) =>
+      prisma.chatbotRequest.updateMany({
+        where: { id: { in: ids } },
+        data: { nextSlaCheckAt: null, ...data },
+      });
+
+    it('DELIVERY_ZONE: zone fields, zoneImpact with validationId and the route answering the same', async () => {
+      const zone = await zoneRequests(3);
+      const [first] = zone.requests;
+      const detail = await get(`/chatbot-requests/${first.id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.decision).toEqual({
+        subtype: 'DELIVERY_ZONE',
+        validationId: zone.validationId,
+        zipCode: zone.zipCode,
+        state: 'CDMX',
+        municipality: 'Cuauhtémoc',
+        neighborhood: 'Centro',
+        requesterCount: 3,
+        lastCustomerMessageAt: first.lastMessageAt.toISOString(),
+        resolution: null,
+      });
+      expect(detail.body.zoneImpact).toEqual({
+        validationId: zone.validationId,
+        requests: 3,
+        customers: 3,
+        setVersion: 3,
+      });
+      const route = await get(`/chatbot-requests/${first.id}/zone-impact`);
+      expect(route.body).toEqual(detail.body.zoneImpact);
+      // the wrapped row's customer phone and conversation never come out
+      expect(JSON.stringify(detail.body)).not.toContain('wa:');
+      expect(detail.body.allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+    });
+
+    it('DELIVERY_ZONE: requesterCount counts every requester like the legacy projection, also after resolution', async () => {
+      const zone = await zoneRequests(3);
+      const [first, second, third] = zone.requests;
+      const at = new Date(NOW.getTime() - HOUR);
+      await closeRequests([third.id], {
+        status: 'CANCELLED',
+        cancelledAt: at,
+        closedAt: at,
+        cancelReason: 'CUSTOMER_WITHDREW',
+      });
+      const open = await get(`/chatbot-requests/${first.id}`);
+      const legacy = await legacyCount(zone.validationId);
+      expect(legacy?.requesterCount).toBe(3);
+      expect(open.body.decision.requesterCount).toBe(legacy?.requesterCount);
+      expect(open.body.zoneImpact.requests).toBe(2); // only the open ones
+
+      await closeRequests([first.id, second.id], {
+        status: 'RESOLVED',
+        resolvedAt: at,
+        closedAt: at,
+        resolvedByActorId: users.luis,
+        resolvedByDisplayName: 'Luis',
+        assigneeUserId: users.luis,
+        assigneeDisplayName: 'Luis',
+        claimedAt: at,
+        resolution: {
+          action: 'APPROVE_DELIVERY_ZONE',
+          zoneType: 'FREE',
+          surchargeCents: null,
+          etaDays: null,
+        },
+      });
+      const closed = await get(`/chatbot-requests/${first.id}`);
+      expect(closed.body.decision.requesterCount).toBe(legacy?.requesterCount);
+      expect(closed.body.zoneImpact).toMatchObject({
+        requests: 0,
+        customers: 0,
+      });
+      expect(closed.body.decision.resolution).toEqual({
+        action: 'APPROVE_DELIVERY_ZONE',
+        zoneType: 'FREE',
+        surchargeCents: null,
+        etaDays: null,
+        resolvedBy: { id: users.luis, displayName: 'Luis' },
+        resolvedAt: at.toISOString(),
+      });
+      expect(closed.body.allowedActions).toEqual([]);
+    });
+
+    it('DELIVERY_ZONE without a validation: no zoneImpact, no RESOLVE, and the routes answer 422 / 404', async () => {
+      const wrapped = await prisma.deliveryZoneRequest.create({
+        data: {
+          tenantId: tenantA,
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          canonicalRequestHash: 'h',
+          submittedCredentialId: 'cred',
+          zipCode: '02000',
+          state: 'CDMX',
+          municipality: 'Azcapotzalco',
+          neighborhood: 'Centro',
+          customerPhoneCountryCode: '52',
+          customerPhone: '5598765432',
+          conversationRef: 'wa:orphan',
+          lastCustomerMessageAt: NOW,
+          // The CHECKs allow no validation only for a requester resolved at
+          // intake by an existing zone.
+          status: 'RESOLVED',
+          version: 2,
+          resolutionSource: 'EXISTING_ZONE',
+          zoneType: 'FREE',
+          etaDays: 1,
+          resolvedAt: NOW,
+        },
+      });
+      const { id } = await create({
+        kind: 'DECISION',
+        subtype: 'DELIVERY_ZONE',
+        deliveryZoneRequestId: wrapped.id,
+      });
+      const detail = await get(`/chatbot-requests/${id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.zoneImpact).toBeUndefined();
+      expect(detail.body.decision).toMatchObject({
+        subtype: 'DELIVERY_ZONE',
+        validationId: null,
+        requesterCount: 1,
+      });
+      expect(detail.body.allowedActions).toEqual(['CLAIM']);
+      expect((await get(`/chatbot-requests/${id}/zone-impact`)).status).toBe(
+        422,
+      );
+      const resolve = await post(`/chatbot-requests/${id}/resolve`, {
+        expectedVersion: 1,
+        action: 'REJECT_DELIVERY_ZONE',
+        expectedZoneSetVersion: 1,
+      });
+      expect(resolve.status).toBe(404);
+    });
+
+    it('TRANSFER_RECEIPT: sale totals, file links, extraction and mismatch; purged and undeclared variants', async () => {
+      const receipt = await receiptRequest();
+      const base = `/sales/${receipt.saleId}/receipts/${receipt.receiptId}`;
+      const detail = await get(`/chatbot-requests/${receipt.id}`);
+      expect(detail.body.decision).toEqual({
+        subtype: 'TRANSFER_RECEIPT',
+        receiptId: receipt.receiptId,
+        saleId: receipt.saleId,
+        saleFolio: 'V-77',
+        declaredAmountCents: 5_000,
+        declaredAmountProvided: true,
+        declaredDate: '2026-11-09T00:00:00.000Z',
+        declaredReference: 'ABC123',
+        saleTotalCents: 20_000,
+        salePaidCents: 5_000,
+        saleDebtCents: 15_000,
+        file: {
+          mimeType: 'image/jpeg',
+          sizeBytes: 1234,
+          previewStatus: 'READY',
+          originalUrl: `${base}/file`,
+          previewUrl: `${base}/preview`,
+        },
+        extracted: { amountCents: 5_000 },
+        mismatch: { kind: 'AMOUNT' },
+        resolution: null,
+      });
+      expect(detail.body.zoneImpact).toBeUndefined();
+
+      await prisma.receiptEvidence.update({
+        where: { id: receipt.receiptId },
+        data: { purgedAt: NOW },
+      });
+      const purged = await get(`/chatbot-requests/${receipt.id}`);
+      expect(purged.body.decision.file).toMatchObject({
+        originalUrl: null,
+        previewUrl: null,
+      });
+
+      const bare = await receiptRequest({
+        declaredAmountCents: null,
+        declaredDate: null,
+        declaredReference: null,
+        mimeType: null,
+        sizeBytes: null,
+        previewStatus: null,
+        storageKey: null,
+        extracted: undefined,
+        mismatch: undefined,
+        mediaUrl: 'https://legacy.example/receipt.jpg',
+      });
+      const legacy = await get(`/chatbot-requests/${bare.id}`);
+      expect(legacy.body.decision).toMatchObject({
+        declaredAmountCents: 0,
+        declaredAmountProvided: false,
+        declaredDate: null,
+        file: null,
+        extracted: null,
+        mismatch: null,
+      });
+    });
+
+    it('TRANSFER_RECEIPT: a receipt whose preview is not ready has no previewUrl', async () => {
+      const receipt = await receiptRequest({ previewStatus: 'UNAVAILABLE' });
+      const detail = await get(`/chatbot-requests/${receipt.id}`);
+      expect(detail.body.decision.file).toMatchObject({
+        previewStatus: 'UNAVAILABLE',
+        previewUrl: null,
+        originalUrl: expect.stringContaining('/file'),
+      });
+    });
+
+    it('EXPIRATION: snapshot with unit and variant fields, with and without a variant', async () => {
+      const plain = await expirationRequest();
+      const detail = await get(`/chatbot-requests/${plain.id}`);
+      expect(detail.body.decision).toEqual({
+        subtype: 'EXPIRATION',
+        snapshot: {
+          branchId: tenantA,
+          branchName: 'Centro',
+          productId: plain.decision.productId,
+          productName: 'Alimento húmedo',
+          unit: 'lata',
+          variantId: null,
+          variantName: null,
+          variantOption: null,
+          variantValue: null,
+        },
+        resolution: null,
+      });
+      expect(detail.body.allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+
+      const variantId = randomUUID();
+      const variant = await expirationRequest({
+        variantId,
+        variantName: 'Grande',
+        variantOption: 'Tamaño',
+        variantValue: 'L',
+      });
+      const withVariant = await get(`/chatbot-requests/${variant.id}`);
+      expect(withVariant.body.decision.snapshot).toMatchObject({
+        variantId,
+        variantName: 'Grande',
+        variantOption: 'Tamaño',
+        variantValue: 'L',
+      });
+    });
+  });
+
+  // ------------------------------------------- cursors and dates are validated
+
+  describe('a well-formed cursor or date range with a bad part is a 400', () => {
+    const DATE = '2026-11-10T00:00:00.000Z';
+    it.each([
+      [
+        'groups: bad date',
+        () => `/chatbot-requests/groups?cursor=${cursorOf('nope', token(KEY))}`,
+      ],
+      [
+        'groups: closed tab with a null date',
+        () =>
+          `/chatbot-requests/groups?status=resolved&cursor=${cursorOf(null, token(KEY))}`,
+      ],
+      [
+        'groups: key that is not a token',
+        () => `/chatbot-requests/groups?cursor=${cursorOf(DATE, KEY)}`,
+      ],
+      [
+        'customer list: bad date',
+        () =>
+          `/chatbot-requests?customerKey=${token(KEY)}&cursor=${cursorOf('2026-02-30T00:00:00.000Z', DATE, randomUUID())}`,
+      ],
+      [
+        'customer list: bad id',
+        () =>
+          `/chatbot-requests?customerKey=${token(KEY)}&cursor=${cursorOf(null, DATE, 'not-a-uuid')}`,
+      ],
+      [
+        'customer list closed: bad id',
+        () =>
+          `/chatbot-requests?customerKey=${token(KEY)}&status=resolved&cursor=${cursorOf(DATE, 'x')}`,
+      ],
+      [
+        'history: year 0',
+        () =>
+          `/chatbot-requests/history?cursor=${cursorOf('0000-01-01T00:00:00.000Z', randomUUID())}`,
+      ],
+      [
+        'history: bad id',
+        () => `/chatbot-requests/history?cursor=${cursorOf(DATE, 'x')}`,
+      ],
+      [
+        'history: year 1 range',
+        () =>
+          `/chatbot-requests/history?from=0001-01-01T00:00:00.000Z&to=0001-02-01T00:00:00.000Z`,
+      ],
+    ])('%s', async (_name, path) => {
+      const res = await get(path());
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('audit: bad date and bad id', async () => {
+      const { id } = await create({});
+      for (const cursor of [
+        cursorOf('2026-02-30T00:00:00.000Z', randomUUID()),
+        cursorOf(DATE, 'nope'),
+      ]) {
+        const res = await get(`/chatbot-requests/${id}/audit?cursor=${cursor}`);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+      }
+    });
+  });
+
   // -------------------------------------------------------------------- R12
 
   describe('R12: no full phone without read:CustomerPhone, on every staff route', () => {
-    const walk = new Map<string, () => Promise<request.Response>>();
+    type Run = () => Promise<request.Response | request.Response[]>;
+    const walk = new Map<string, Run>();
     let walkRole = 'managerNoPhone';
     let ids: {
       question: string;
       restock: string;
       zone: string;
+      /** The detail of every subtype and of a zone, a receipt and an expiry. */
+      details: string[];
       customerKey: string;
     };
     const call = (method: 'get' | 'post', path: string, body?: object) => {
@@ -840,45 +1300,72 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       const customer = await prisma.customer.create({
         data: { tenantId: tenantA, firstName: 'Rosa', ...PHONE },
       });
-      const question = await create({
-        customerKey: KEY,
-        customerId: customer.id,
-        ...PHONE,
-      });
-      const restock = await restockRequest({
-        customerKey: KEY,
-        customerId: customer.id,
-        ...PHONE,
-      });
-      const zone = await create({
-        customerKey: KEY,
-        kind: 'DECISION',
-        subtype: 'DELIVERY_ZONE' as never,
-      }).catch(() => question);
+      const mine = { customerKey: KEY, customerId: customer.id, ...PHONE };
+      const question = await create(mine);
+      const restock = await restockRequest(mine);
+      // A REAL zone request (the first requester is the walk's customer), a
+      // receipt and an expiry, all with the phone in their own tables.
+      const zone = await zoneRequests(2);
+      const receipt = await receiptRequest({}, mine);
+      const expiry = await expirationRequest({}, mine);
+      // Events for the audit cursor and old closed requests for the history one.
+      for (let i = 0; i < 3; i++) {
+        await prisma.chatbotRequestEvent.create({
+          data: {
+            tenantId: tenantA,
+            requestId: question.id,
+            type: 'SLA_MILESTONE',
+            actorKind: 'SYSTEM',
+            version: 1,
+            data: { milestone: 'HALF' },
+            createdAt: new Date(NOW.getTime() + i * 1000),
+          },
+        });
+      }
+      for (let i = 1; i <= 3; i++) {
+        await create({
+          ...mine,
+          summary: `old-${i}`,
+          ...closed('RESOLVED', new Date(NOW.getTime() - (10 + i) * DAY)),
+        });
+      }
       ids = {
         question: question.id,
         restock: restock.id,
-        zone: zone.id,
+        zone: zone.requests[0].id,
+        details: [
+          question.id,
+          restock.id,
+          zone.requests[0].id,
+          receipt.id,
+          expiry.id,
+        ],
         customerKey: token(KEY),
       };
     });
 
-    const R = (
-      method: 'GET' | 'POST',
-      path: string,
-      run: () => Promise<request.Response>,
-    ) => walk.set(`${method} ${path}`, run);
+    const R = (method: 'GET' | 'POST', path: string, run: Run) =>
+      walk.set(`${method} ${path}`, run);
     const id = () => ids.question;
     beforeAll(() => {
-      R('GET', 'groups', () => call('get', '/chatbot-requests/groups'));
+      // `limit=1` makes every list hand out a cursor, which the walk decodes.
+      R('GET', 'groups', () => call('get', '/chatbot-requests/groups?limit=1'));
       R('GET', 'counts', () => call('get', '/chatbot-requests/counts'));
-      R('GET', 'history', () => call('get', '/chatbot-requests/history'));
-      R('GET', '', () =>
-        call('get', `/chatbot-requests?customerKey=${ids.customerKey}`),
+      R('GET', 'history', () =>
+        call('get', '/chatbot-requests/history?limit=1'),
       );
-      R('GET', ':id', () => call('get', `/chatbot-requests/${id()}`));
+      R('GET', '', () =>
+        call('get', `/chatbot-requests?customerKey=${ids.customerKey}&limit=1`),
+      );
+      R('GET', ':id', () =>
+        Promise.all(
+          ids.details.map((detailId) =>
+            call('get', `/chatbot-requests/${detailId}`),
+          ),
+        ),
+      );
       R('GET', ':id/audit', () =>
-        call('get', `/chatbot-requests/${id()}/audit`),
+        call('get', `/chatbot-requests/${id()}/audit?limit=1`),
       );
       R('GET', ':id/merge-candidates', () =>
         call('get', `/chatbot-requests/${id()}/merge-candidates`),
@@ -938,23 +1425,75 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect([...walk.keys()].sort()).toEqual(discovered);
     });
 
+    /** Every `nextCursor` / `auditNextCursor` in a body, decoded. */
+    const cursorsIn = (text: string) =>
+      [...text.matchAll(/"(?:audit)?[nN]extCursor":"([^"]+)"/g)].map((match) =>
+        Buffer.from(match[1], 'base64url').toString('utf8'),
+      );
+
     it.each(['managerNoPhone', 'cashier', 'updateOnly', 'readOnly'])(
-      'leaks no phone to %s on any route (success and error bodies)',
+      'leaks no phone to %s on any route, in a body or inside a cursor',
       async (role) => {
         walkRole = role;
+        const decoded: string[] = [];
+        let zoneDetails = 0;
         for (const [route, run] of walk) {
-          const res = await run();
-          const text = JSON.stringify(res.body);
-          expect({ route, role, leak: LEAK.exec(text)?.[0] }).toEqual({
-            route,
+          const out = await run();
+          for (const res of Array.isArray(out) ? out : [out]) {
+            const text = JSON.stringify(res.body);
+            expect({ route, role, leak: LEAK.exec(text)?.[0] }).toEqual({
+              route,
+              role,
+              leak: undefined,
+            });
+            expect(text).not.toContain('5512345678');
+            expect(res.headers['cache-control']).toBe('no-store');
+            decoded.push(...cursorsIn(text));
+            if (res.body?.decision?.subtype === 'DELIVERY_ZONE') zoneDetails++;
+          }
+        }
+        // groups, customer list, history and audit each handed out a cursor
+        expect(decoded.length).toBeGreaterThanOrEqual(4);
+        for (const cursor of decoded) {
+          expect({ role, cursor, leak: LEAK.exec(cursor)?.[0] }).toEqual({
             role,
+            cursor,
             leak: undefined,
           });
-          expect(text).not.toContain('5512345678');
-          expect(res.headers['cache-control']).toBe('no-store');
+          expect(cursor).not.toContain('5512345678');
+          expect(cursor).not.toContain(KEY);
         }
+        // the walk really reached the zone, receipt and expiry projections
+        expect(zoneDetails).toBe(1);
       },
     );
+
+    it('the walk reads a real zone request, not a stand-in', async () => {
+      walkRole = 'manager';
+      const zone = await call(
+        'get',
+        `/chatbot-requests/${ids.zone}/zone-impact`,
+      );
+      expect(zone.status).toBe(200);
+      expect(zone.body).toMatchObject({ requests: 2, customers: 2 });
+      const details = await Promise.all(
+        ids.details.map((detailId) =>
+          call('get', `/chatbot-requests/${detailId}`),
+        ),
+      );
+      expect(
+        details.map(
+          (res) =>
+            (res.body.decision as { subtype?: string } | null)?.subtype ?? null,
+        ),
+      ).toEqual([
+        null,
+        'RESTOCK',
+        'DELIVERY_ZONE',
+        'TRANSFER_RECEIPT',
+        'EXPIRATION',
+      ]);
+    });
 
     it('shows the full number only with read:CustomerPhone, where the contract puts it', async () => {
       walkRole = 'manager';

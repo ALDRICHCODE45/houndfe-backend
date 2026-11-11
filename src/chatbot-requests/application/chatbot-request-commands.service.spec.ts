@@ -42,7 +42,12 @@ function fakeStore(
   initial: ChatbotRequestRow | null,
   zone: {
     siblings: ChatbotRequestRow[];
-    impact: { requests: number; customers: number; setVersion: number };
+    impact: {
+      validationId: string;
+      requests: number;
+      customers: number;
+      setVersion: number;
+    };
   } | null = null,
 ) {
   const calls: string[] = [];
@@ -674,7 +679,12 @@ describe('ChatbotRequestCommandsService', () => {
           deliveryZoneRequestId: `dzr-${id}`,
           ...over,
         });
-      const impact = { requests: 3, customers: 3, setVersion: 7 };
+      const impact = {
+        validationId: 'v-1',
+        requests: 3,
+        customers: 3,
+        setVersion: 7,
+      };
       const approve = (expectedZoneSetVersion: number) =>
         input({
           actorCanResolveSubtype: () => true,
@@ -743,7 +753,12 @@ describe('ChatbotRequestCommandsService', () => {
   });
 
   it('reads the zone impact and maps missing and non-zone requests', async () => {
-    const impact = { requests: 2, customers: 2, setVersion: 3 };
+    const impact = {
+      validationId: 'v-1',
+      requests: 2,
+      customers: 2,
+      setVersion: 3,
+    };
     const zone = fakeStore(row(), { siblings: [], impact });
     await expect(
       new ChatbotRequestCommandsService(zone.store, noResolver).zoneImpact('x'),

@@ -326,6 +326,7 @@ Autenticación: JWT + tenant + `ActiveUserGuard` + CASL. Los errores usan el sob
 ```
 
 - **Orden de los grupos:** primero la solicitud más urgente del grupo (`mostUrgentAt` = el plazo vigente más cercano; las vencidas van primero) y después el id. El cursor es opaco y lleva `(mostUrgentAt, customerKey)`. Cada grupo trae hasta 10 solicitudes y avisa cuántas más hay en `moreRequests`; el resto se pide con `GET /chatbot-requests?customerKey=` (§12.3).
+- **[v1.2, 2026-11-11] `customerKey` en las respuestas del personal es un token opaco, no la clave E.164.** El ejemplo de arriba muestra `"525512345678"`, pero esa clave **es** el teléfono, y la regla D11/R12 prohíbe que salga completo sin `read:CustomerPhone`. Por eso toda respuesta del personal (filas, grupos, cursores, `?customerKey=`) lleva un token `k1.…` para **todos** los que llaman, también para quien tiene el permiso, así el frontend agrupa y guarda en caché por la misma clave sea cual sea el rol. Ver §12.4. El teléfono completo, con el permiso, va solo en `customer.phone`.
 - **`liveSession`** es `null` fuera de una conversación, o `{state, handoffEpoch, lastStaffActivityAt, lastCustomerMessageAt}` (§12.4, §12.10). El nombre de quien atiende es `assignee.displayName`. Esta misma fila es el payload de los eventos SSE de solicitud (§5.3).
 - `slaPaused` y `slaResumesAt` sirven para mostrar "En pausa hasta las 9:00" (hueco 7 del frontend).
 - **Las resueltas no salen en la vista abierta.** Por decisión del dueño, `status=resolved` muestra solo los últimos 7 días (también las canceladas con `status=cancelled`). `status=scheduled` es la pestaña "Agendadas" (§4.9).
@@ -367,7 +368,7 @@ La conversación **no viene en el detalle**. Se pide aparte (§3.6) con `read:Ch
   "current": { "version": 5, "status": "IN_PROGRESS", "claimedBy": { "id": "…", "displayName": "Juan" } } }
 ```
 
-**Vista previa de la aprobación de zona.** Aprobar una zona resuelve todas las solicitudes de ese código postal. Antes de confirmar, el frontend lee `zoneImpact` del detalle (o `GET /chatbot-requests/:id/zone-impact`): `{"requests": 4, "customers": 3, "setVersion": 7}`. `setVersion` es la versión de la `DeliveryZoneValidation`, y sube cada vez que una solicitud se une a ese código postal o sale de él. El comando `resolve` manda `expectedVersion` (de la solicitud) y `expectedZoneSetVersion`. Si el conjunto cambió, responde `409 ZONE_SET_CHANGED` con el `zoneImpact` nuevo. Si no cambió, resuelve **exactamente** ese conjunto en una transacción.
+**Vista previa de la aprobación de zona.** Aprobar una zona resuelve todas las solicitudes de ese código postal. Antes de confirmar, el frontend lee `zoneImpact` del detalle (o `GET /chatbot-requests/:id/zone-impact`): `{"validationId": "…", "requests": 4, "customers": 3, "setVersion": 7}`. `setVersion` es la versión de la `DeliveryZoneValidation`, y sube cada vez que una solicitud se une a ese código postal o sale de él. El comando `resolve` manda `expectedVersion` (de la solicitud) y `expectedZoneSetVersion`. Si el conjunto cambió, responde `409 ZONE_SET_CHANGED` con el `zoneImpact` nuevo. Si no cambió, resuelve **exactamente** ese conjunto en una transacción.
 
 Códigos: `ZONE_SET_CHANGED` (`current.zoneImpact`), `SLOT_UNAVAILABLE`, `REQUEST_CLAIMED_BY_OTHER`, `VERSION_CONFLICT` (incluye `current.status`), `REQUEST_CLOSED`, `NOT_ASSIGNEE` (403), `SESSION_NOT_ACTIVE`, `STALE_EPOCH`, `WINDOW_CLOSED` (`templateAllowed`), `TEMPLATE_ALREADY_SENT`, `IDEMPOTENCY_CONFLICT`, `RATE_LIMITED` (429). Un nombre en la respuesta no es un dato personal del cliente: es el nombre visible de un compañero.
 
@@ -984,6 +985,14 @@ La fila de la lista (§3.8) agrega estos campos. Como la fila es el payload de l
 - `liveSession` es `null` si la solicitud no es una conversación o todavía no hubo sesión; `state` es `WAITING | STARTING | ACTIVE | ENDING | ENDED | CANCELLED` (§4.2).
 - **El nombre de quien atiende es `assignee.displayName`** (el nombre visible del compañero, copiado al tomar). No se duplica dentro de `liveSession`.
 - `counts` agrega `needsReschedule` para el aviso de citas por reagendar (§3.8, §3.10).
+
+**[v1.2, 2026-11-11] Desviación: `customerKey` es un token opaco sellado (`k1.…`), no el E.164.** Los ejemplos de §3.8 y de este apartado muestran `"525512345678"`; en la API del personal ese valor **nunca** sale tal cual, porque es el teléfono completo (D11, R12). Reglas, probadas en `chatbot-request-reads.integration.spec.ts`:
+- El token es el mismo para **todo** el que llama (también con `read:CustomerPhone`), determinista (un cliente, un token por sucursal) y atado a la sucursal; el frontend lo trata como una cadena opaca y lo manda igual en `GET /chatbot-requests?customerKey=`. Los cursores de las listas tampoco llevan la clave cruda ni el teléfono.
+- Un token alterado, de otra sucursal o emitido antes de rotar el secreto responde `400 VALIDATION_ERROR`; el frontend recarga la lista (no reintenta con el mismo valor).
+- **Rotar `JWT_SECRET` invalida todos los tokens** (de ahí se derivan las llaves con HKDF): solo provoca esos `400` y la recarga, nunca una fuga.
+- **La unidad 8 (SSE) debe usar el mismo sellador** (`CustomerKeySealer`) al armar cada fila por destinatario, y `previousCustomerKey` también va sellado. El teléfono sigue saliendo solo por `toStaffPhone`.
+- Las respuestas de los comandos del personal (unidades 2b y 3a) no llevan teléfono ni `customerKey`.
+- `zoneImpact` lleva además `validationId` (§3.8): `{validationId, requests, customers, setVersion}`.
 
 ### 12.5 Mensajes de la conversación y medios
 

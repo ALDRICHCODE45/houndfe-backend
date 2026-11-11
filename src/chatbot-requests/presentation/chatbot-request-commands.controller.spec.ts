@@ -505,7 +505,12 @@ describe('ChatbotRequestCommandsController', () => {
         version: 1,
         status: 'NEW' as const,
         claimedBy: null,
-        zoneImpact: { requests: 4, customers: 4, setVersion: 8 },
+        zoneImpact: {
+          validationId: 'v-1',
+          requests: 4,
+          customers: 4,
+          setVersion: 8,
+        },
       };
       execute.mockRejectedValue(
         new ChatbotRequestCommandError('ZONE_SET_CHANGED', 409, current),
@@ -522,8 +527,13 @@ describe('ChatbotRequestCommandsController', () => {
     });
   });
 
-  it('serves GET zone-impact as {requests, customers, setVersion}', async () => {
-    const impact = { requests: 4, customers: 3, setVersion: 7 };
+  it('serves GET zone-impact as {validationId, requests, customers, setVersion}', async () => {
+    const impact = {
+      validationId: 'v-1',
+      requests: 4,
+      customers: 3,
+      setVersion: 7,
+    };
     zoneImpact.mockResolvedValue(impact);
     const response = await request(
       app.getHttpServer() as Parameters<typeof request>[0],

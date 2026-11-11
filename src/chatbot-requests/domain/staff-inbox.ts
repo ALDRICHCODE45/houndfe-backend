@@ -40,10 +40,19 @@ export type AllowedAction =
   | 'RESOLVE'
   | 'CANCEL';
 
+export interface AllowedActionsOptions {
+  /**
+   * The row `resolve` would act on is missing (a zone request without a
+   * validation): the route answers 404, so `RESOLVE` is not offered.
+   */
+  resolveTargetMissing?: boolean;
+}
+
 export function computeAllowedActions(
   state: ChatbotRequestState,
   ability: PermissionCheck,
   userId: string,
+  options: AllowedActionsOptions = {},
 ): AllowedAction[] {
   const actor = { userId, displayName: '-' };
   const now = new Date();
@@ -74,6 +83,7 @@ export function computeAllowedActions(
     [
       'RESOLVE',
       canUpdate &&
+        !options.resolveTargetMissing &&
         canResolveSubtype(ability, state.subtype) &&
         resolve(state, { actor, expectedVersion, action: 'RESOLVE', now }).ok,
     ],
@@ -97,7 +107,42 @@ export function encodeCursor(parts: Array<string | null>): string {
   return Buffer.from(JSON.stringify(parts)).toString('base64url');
 }
 
-export function decodeCursor(raw: string, arity: number): Array<string | null> {
+/** `date?` may be null (a group with no deadline); the others may not. */
+export type CursorKind = 'date' | 'date?' | 'uuid' | 'text';
+
+/** The only form this module writes: `Date#toISOString`. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A date PostgreSQL `timestamp` stores (year 1900 to 9999), never Invalid. */
+export function isSaneDate(date: Date): boolean {
+  const time = date.getTime();
+  return (
+    !Number.isNaN(time) &&
+    date.getUTCFullYear() >= 1900 &&
+    date.getUTCFullYear() <= 9999
+  );
+}
+
+function isValidPart(part: string | null, kind: CursorKind): boolean {
+  if (part === null) return kind === 'date?';
+  if (kind === 'text') return part.length > 0;
+  if (kind === 'uuid') return UUID.test(part);
+  const date = new Date(part);
+  return (
+    ISO_INSTANT.test(part) && isSaneDate(date) && date.toISOString() === part
+  );
+}
+
+/**
+ * Decodes a cursor whose parts have these kinds. A well-formed but bad part
+ * (an impossible date, an id that is not a UUID) is a 400, never a database
+ * error: the store only ever receives parts it can bind.
+ */
+export function decodeCursor(
+  raw: string,
+  kinds: CursorKind[],
+): Array<string | null> {
   let decoded: unknown;
   try {
     decoded = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
@@ -106,8 +151,11 @@ export function decodeCursor(raw: string, arity: number): Array<string | null> {
   }
   if (
     !Array.isArray(decoded) ||
-    decoded.length !== arity ||
-    !decoded.every((part) => part === null || typeof part === 'string')
+    decoded.length !== kinds.length ||
+    !decoded.every((part) => part === null || typeof part === 'string') ||
+    !(decoded as Array<string | null>).every((part, i) =>
+      isValidPart(part, kinds[i]),
+    )
   ) {
     throw new InvalidArgumentError('Invalid cursor', 'VALIDATION_ERROR');
   }

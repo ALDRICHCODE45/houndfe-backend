@@ -126,6 +126,80 @@ describe('ChatbotRequestReadsService', () => {
     ).rejects.toBeInstanceOf(InvalidArgumentError);
   });
 
+  it('answers 400, not a database error, for a well-formed cursor with a bad date or id', async () => {
+    const service = build({
+      groups: jest.fn().mockResolvedValue([]),
+      listByCustomer: jest.fn().mockResolvedValue([]),
+      history: jest.fn().mockResolvedValue([]),
+      audit: jest.fn().mockResolvedValue([]),
+    });
+    const reader = { userId: 'u', ability: MANAGER };
+    const cursor = (...parts: Array<string | null>) =>
+      Buffer.from(JSON.stringify(parts)).toString('base64url');
+    const key = sealer.seal(TENANT, KEY);
+    const date = '2026-11-10T00:00:00.000Z';
+    const id = '2b7c1a90-6f3e-4d2a-8b1c-0d9e8f7a6b5c';
+    const bad = [
+      () =>
+        service.groups(reader, {
+          tab: 'open',
+          filters: {},
+          cursor: cursor('nope', key),
+        }),
+      () =>
+        service.groups(reader, {
+          tab: 'resolved',
+          filters: {},
+          cursor: cursor(null, key),
+        }),
+      () =>
+        service.listByCustomer(reader, {
+          customerKey: key,
+          tab: 'open',
+          cursor: cursor(date, 'nope', id),
+        }),
+      () =>
+        service.listByCustomer(reader, {
+          customerKey: key,
+          tab: 'open',
+          cursor: cursor(null, date, 'not-a-uuid'),
+        }),
+      () =>
+        service.listByCustomer(reader, {
+          customerKey: key,
+          tab: 'resolved',
+          cursor: cursor(date, 'not-a-uuid'),
+        }),
+      () =>
+        service.history(reader, {
+          cursor: cursor('0000-01-01T00:00:00.000Z', id),
+        }),
+      () => service.history(reader, { cursor: cursor(date, 'x') }),
+      () =>
+        service.audit('r-1', {
+          cursor: cursor('2026-02-30T00:00:00.000Z', id),
+        }),
+    ];
+    for (const call of bad) {
+      await expect(call()).rejects.toBeInstanceOf(InvalidArgumentError);
+    }
+    // the same shapes with good parts are accepted
+    await expect(
+      service.listByCustomer(reader, {
+        customerKey: key,
+        tab: 'open',
+        cursor: cursor(null, date, id),
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      service.groups(reader, {
+        tab: 'open',
+        filters: {},
+        cursor: cursor(null, key),
+      }),
+    ).resolves.toBeDefined();
+  });
+
   describe('history range', () => {
     const history = jest.fn().mockResolvedValue([]);
     const reader = { userId: 'u', ability: MANAGER };
@@ -145,6 +219,16 @@ describe('ChatbotRequestReadsService', () => {
       ).rejects.toBeInstanceOf(InvalidArgumentError);
       await expect(
         service.history(reader, { from: at(5), to: at(10) }),
+      ).rejects.toBeInstanceOf(InvalidArgumentError);
+    });
+
+    it('rejects from/to that PostgreSQL cannot store', async () => {
+      const service = build({ history });
+      await expect(
+        service.history(reader, {
+          from: new Date('0001-01-01T00:00:00.000Z'),
+          to: new Date('0001-02-01T00:00:00.000Z'),
+        }),
       ).rejects.toBeInstanceOf(InvalidArgumentError);
     });
 
@@ -170,6 +254,43 @@ describe('ChatbotRequestReadsService', () => {
     ]) {
       await expect(call()).rejects.toBeInstanceOf(ChatbotRequestCommandError);
     }
+  });
+
+  it('detail: no RESOLVE on a zone request without a validation, RESOLVE with one', async () => {
+    const grants = ['update:ChatbotRequest', 'validate:DeliveryZone'];
+    const ability = {
+      can: (action: string, subject: string) =>
+        grants.includes(`${action}:${subject}`),
+    };
+    const detail = (zoneImpact: DetailRecord['zoneImpact']): DetailRecord => ({
+      request: {
+        ...record({ kind: 'DECISION', subtype: 'DELIVERY_ZONE' }),
+        needs: null,
+        context: null,
+        resolution: null,
+        resolvedAt: null,
+      },
+      customer: null,
+      recentOrders: [],
+      otherOpen: [],
+      decision: { subtype: 'DELIVERY_ZONE' },
+      zoneImpact,
+      audit: [],
+      deliveries: [],
+    });
+    const view = async (zoneImpact: DetailRecord['zoneImpact']) =>
+      build({
+        findDetail: jest.fn().mockResolvedValue(detail(zoneImpact)),
+      }).detail({ userId: 'u', ability }, 'r-1');
+    expect((await view(null)).allowedActions).toEqual(['CLAIM']);
+    const impact = {
+      validationId: 'v-1',
+      requests: 2,
+      customers: 2,
+      setVersion: 2,
+    };
+    expect((await view(impact)).allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+    expect((await view(impact)).zoneImpact).toEqual(impact);
   });
 
   it('detail: customer card without a linked customer, masked phone, 20 audit rows and a cursor', async () => {
