@@ -19,9 +19,11 @@ import {
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import {
   classifyOutcome,
+  DEFERRED_OUTCOMES,
   FEED_LIMITS,
   type FeedOutcome,
   type FeedOutcomeInput,
+  isDeferredOutcome,
 } from '../domain/chatbot-feed';
 
 const ITEM_SELECT = {
@@ -32,6 +34,9 @@ const ITEM_SELECT = {
   conversationRef: true,
   payload: true,
 } as const;
+
+/** The pending list also needs the outcome: it names the deferral. */
+const PENDING_SELECT = { ...ITEM_SELECT, outcome: true } as const;
 
 interface LockedDelivery {
   cursor: bigint;
@@ -44,6 +49,20 @@ interface LockedDelivery {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * A tenant's highest feed cursor (NULL for a tenant with no items), always
+ * through `(tenantId, cursor)`. `max("cursor") WHERE "tenantId" = $1` would let
+ * the planner walk the primary key backwards from the end of the table
+ * filtering by tenant, which reads every newer row of every other tenant. With
+ * the equality written as a closed range the tenant column is no longer
+ * constant, so `ORDER BY "tenantId" DESC, "cursor" DESC` can only be answered
+ * by `(tenantId, cursor)`: one index probe.
+ */
+export const tenantHeadCursor = (tenantId: string) => Prisma.sql`(
+  SELECT "cursor" FROM "chatbot_feed_items"
+  WHERE "tenantId" >= ${tenantId} AND "tenantId" <= ${tenantId}
+  ORDER BY "tenantId" DESC, "cursor" DESC LIMIT 1)`;
 
 @Injectable()
 export class PrismaChatbotFeedStore implements ChatbotFeedStore {
@@ -71,13 +90,28 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
     }
   }
 
+  /**
+   * The cursor is a global sequence, so the primary key is also an ordered
+   * path to "cursor > after", filtered by tenant. For a tenant that is a big
+   * share of the table the planner prefers it (it assumes the tenant's rows are
+   * spread evenly after `after`), and for a tenant that has been quiet while the
+   * others kept writing it walks every neighbour row written since (measured: a
+   * tenant with 40k items, idle while 270k rows were written, took 78 ms per
+   * poll). Bounding the range by the tenant's own highest cursor
+   * (`tenantHeadCursor`, one probe of `(tenantId, cursor)`) makes the range empty
+   * for a bot that is caught up and never wider than the tenant's own backlog
+   * otherwise. A row above the bound is not visible to this statement, so nothing
+   * is skipped.
+   */
   readAfter(after: bigint, limit: number): Promise<FeedItemRow[]> {
-    return this.db.chatbotFeedItem.findMany({
-      where: { tenantId: this.tenantId, cursor: { gt: after } },
-      orderBy: { cursor: 'asc' },
-      take: limit,
-      select: ITEM_SELECT,
-    });
+    const tenantId = this.tenantId;
+    return this.db.$queryRaw<FeedItemRow[]>(Prisma.sql`
+      SELECT "cursor", "deliveryId"::text AS "deliveryId", "type", "requestId",
+             "conversationRef", "payload"
+      FROM "chatbot_feed_items"
+      WHERE "tenantId" = ${tenantId} AND "cursor" > ${after}
+        AND "cursor" <= ${tenantHeadCursor(tenantId)}
+      ORDER BY "cursor" LIMIT ${limit}`);
   }
 
   pendingDeferred(
@@ -88,12 +122,12 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       where: {
         tenantId: this.tenantId,
         ...filter,
-        outcome: 'DEFERRED_WINDOW_CLOSED',
+        outcome: { in: [...DEFERRED_OUTCOMES] },
         ackedAt: null,
       },
       orderBy: { cursor: 'asc' },
       take: limit,
-      select: ITEM_SELECT,
+      select: PENDING_SELECT,
     });
   }
 
@@ -154,8 +188,7 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
         throw new ChatbotRequestCommandError('OUTCOME_NOT_ALLOWED', 422);
       }
 
-      const ackedAt =
-        input.outcome === 'DEFERRED_WINDOW_CLOSED' ? null : new Date();
+      const ackedAt = isDeferredOutcome(input.outcome) ? null : new Date();
       await db.chatbotFeedItem.updateMany({
         where: { tenantId, cursor: row.cursor },
         data: {

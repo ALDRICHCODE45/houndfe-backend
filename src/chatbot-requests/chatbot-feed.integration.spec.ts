@@ -1041,6 +1041,7 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
       expect(listed.body.items[0]).toMatchObject({
         type: 'request.answered',
         requestId: req.id,
+        deferredReason: 'WINDOW_CLOSED',
       });
       expect((await pending(b, 'wa:other').expect(200)).body.items).toEqual([]);
       await pending(b, '').expect(400);
@@ -1050,6 +1051,196 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
       expect(
         (await pending(b, 'wa:5215599990000').expect(200)).body.items,
       ).toEqual([]);
+    });
+  });
+
+  describe('DEFERRED_HUMAN_SESSION (the conversation is in HUMAN mode)', () => {
+    const humanSession = (attemptId: string, extra: object = {}) => ({
+      attemptId,
+      outcome: 'DEFERRED_HUMAN_SESSION',
+      attemptedAt: AT,
+      ...extra,
+    });
+
+    async function answered(b: Bot, conversationRef: string | null) {
+      const decisionId = await submitRestock(b.tenantId);
+      const req = await prisma.chatbotRequest.findFirstOrThrow({
+        where: { humanDecisionId: decisionId },
+      });
+      await prisma.chatbotRequest.update({
+        where: { id: req.id },
+        data: { conversationRef },
+      });
+      await resolveNew(b.tenantId, req.id, {
+        type: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+      });
+      const [item] = await items(b.tenantId);
+      return { requestId: req.id, deliveryId: item.deliveryId };
+    }
+
+    it('is non-terminal: ackedAt stays NULL, the event records it, and both pending filters serve it with deferredReason HUMAN_SESSION', async () => {
+      const b = await bot();
+      const { requestId, deliveryId } = await answered(b, 'wa:5215588880000');
+      const attemptId = ATTEMPT();
+      const deferred = await outcome(
+        b,
+        deliveryId,
+        humanSession(attemptId),
+      ).expect(200);
+      expect(deferred.body).toEqual({
+        deliveryId,
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        attemptId,
+        ackReceivedAt: null,
+      });
+      // An exact replay changes nothing.
+      await outcome(b, deliveryId, humanSession(attemptId)).expect(200);
+
+      expect(
+        await prisma.chatbotFeedItem.findUniqueOrThrow({
+          where: { deliveryId },
+        }),
+      ).toMatchObject({
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        ackedAt: null,
+        attemptId,
+      });
+      const events = await prisma.chatbotRequestEvent.findMany({
+        where: { requestId, type: 'DELIVERY_OUTCOME' },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0].data).toMatchObject({
+        deliveryId,
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        attemptId,
+        ackReceivedAt: null,
+        needsReconciliation: false,
+      });
+
+      const byConversation = await pending(b, 'wa:5215588880000').expect(200);
+      expect(pluck(byConversation.body, 'deliveryId')).toEqual([deliveryId]);
+      expect(byConversation.body.items[0]).toMatchObject({
+        type: 'request.answered',
+        deferredReason: 'HUMAN_SESSION',
+      });
+      const byRequest = await pending(b, 'x', 'requestId', requestId).expect(
+        200,
+      );
+      expect(pluck(byRequest.body, 'deliveryId')).toEqual([deliveryId]);
+      expect(byRequest.body.items[0].deferredReason).toBe('HUMAN_SESSION');
+    });
+
+    it('a request with no conversationRef is reachable by requestId', async () => {
+      const b = await bot();
+      const { requestId, deliveryId } = await answered(b, null);
+      await outcome(b, deliveryId, humanSession(ATTEMPT())).expect(200);
+      const listed = await pending(b, 'x', 'requestId', requestId).expect(200);
+      expect(pluck(listed.body, 'deliveryId')).toEqual([deliveryId]);
+    });
+
+    it('a later terminal outcome ends it; an old deferral replays 200 afterwards', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215588881111');
+      const first = ATTEMPT();
+      await outcome(b, deliveryId, humanSession(first)).expect(200);
+      const second = ATTEMPT();
+      const ended = await outcome(b, deliveryId, {
+        attemptId: second,
+        outcome: 'PROVIDER_ACCEPTED',
+        attemptedAt: AT,
+        providerMessageId: 'wamid.after-session',
+      }).expect(200);
+      expect(ended.body.ackReceivedAt).toEqual(expect.any(String));
+      expect(
+        (await pending(b, 'wa:5215588881111').expect(200)).body.items,
+      ).toEqual([]);
+
+      const replay = await outcome(b, deliveryId, humanSession(first)).expect(
+        200,
+      );
+      expect(replay.body).toEqual({
+        deliveryId,
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        attemptId: first,
+        ackReceivedAt: null,
+      });
+      const another = await outcome(
+        b,
+        deliveryId,
+        humanSession(ATTEMPT()),
+      ).expect(409);
+      expect(another.body).toMatchObject({ code: 'OUTCOME_ALREADY_RECORDED' });
+    });
+
+    it('the reason follows the last deferral (window closed, then human session)', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215588882222');
+      await outcome(b, deliveryId, {
+        attemptId: ATTEMPT(),
+        outcome: 'DEFERRED_WINDOW_CLOSED',
+        attemptedAt: AT,
+      }).expect(200);
+      expect(
+        (await pending(b, 'wa:5215588882222').expect(200)).body.items[0]
+          .deferredReason,
+      ).toBe('WINDOW_CLOSED');
+      await outcome(b, deliveryId, humanSession(ATTEMPT())).expect(200);
+      expect(
+        (await pending(b, 'wa:5215588882222').expect(200)).body.items[0]
+          .deferredReason,
+      ).toBe('HUMAN_SESSION');
+    });
+
+    it('is not allowed for a staff cancellation notice (same rule as the window deferral), and writes nothing', async () => {
+      const b = await bot();
+      const req = await openRequest(b.tenantId);
+      await cancel(b.tenantId, req.id);
+      const [{ deliveryId }] = await items(b.tenantId);
+      const requestId = req.id;
+      const response = await outcome(
+        b,
+        deliveryId,
+        humanSession(ATTEMPT()),
+      ).expect(422);
+      expect(response.body).toMatchObject({ code: 'OUTCOME_NOT_ALLOWED' });
+      expect(
+        await prisma.chatbotFeedItem.findUniqueOrThrow({
+          where: { deliveryId },
+        }),
+      ).toMatchObject({ outcome: null, attemptId: null, ackedAt: null });
+      expect(
+        await prisma.chatbotRequestEvent.count({
+          where: { requestId, type: 'DELIVERY_OUTCOME' },
+        }),
+      ).toBe(0);
+    });
+
+    it('rejects a providerMessageId and a missing attemptedAt with 400', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215588883333');
+      await outcome(
+        b,
+        deliveryId,
+        humanSession(ATTEMPT(), { providerMessageId: 'w' }),
+      ).expect(400);
+      await outcome(b, deliveryId, {
+        attemptId: ATTEMPT(),
+        outcome: 'DEFERRED_HUMAN_SESSION',
+      }).expect(400);
+    });
+
+    it('the database accepts the deferral only without a terminal ack (migration CHECKs)', async () => {
+      const b = await bot();
+      const { deliveryId } = await answered(b, 'wa:5215588884444');
+      const hash = 'h'.repeat(64);
+      const setState = (outcomeValue: string, acked: boolean) =>
+        prisma.$executeRaw`UPDATE "chatbot_feed_items"
+          SET "outcome" = ${outcomeValue}, "attemptId" = 'a', "evidenceHash" = ${hash},
+              "ackedAt" = ${acked ? new Date() : null}
+          WHERE "deliveryId" = ${deliveryId}::uuid`;
+      await expect(setState('DEFERRED_HUMAN_SESSION', true)).rejects.toThrow();
+      await expect(setState('DEFERRED_ANYTHING', false)).rejects.toThrow();
+      await expect(setState('DEFERRED_HUMAN_SESSION', false)).resolves.toBe(1);
     });
   });
 

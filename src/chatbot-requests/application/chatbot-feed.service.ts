@@ -13,10 +13,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
+  deferredReasonOf,
   FEED_LIMITS,
   formatCursor,
   hashFeedOutcome,
   parseFeedOutcome,
+  type DeferredReason,
   type FeedOutcome,
   type FeedOutcomeInput,
 } from '../domain/chatbot-feed';
@@ -33,6 +35,8 @@ export interface FeedItemRow {
   requestId: string;
   conversationRef: string | null;
   payload: unknown;
+  /** Read only where the outcome matters (pending and recovery lists). */
+  outcome?: string | null;
 }
 
 export interface FeedItemView {
@@ -44,6 +48,11 @@ export interface FeedItemView {
   payload: unknown;
   notBefore: null;
   expiresAt: null;
+}
+
+/** A delivery that is waiting, and why (`null`: no attempt was reported yet). */
+export interface PendingDeliveryView extends FeedItemView {
+  deferredReason: DeferredReason | null;
 }
 
 export interface OutcomeAck {
@@ -86,7 +95,11 @@ export interface FeedWakeupPort {
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-function toView(row: FeedItemRow): FeedItemView {
+export function toPendingView(row: FeedItemRow): PendingDeliveryView {
+  return { ...toView(row), deferredReason: deferredReasonOf(row.outcome) };
+}
+
+export function toView(row: FeedItemRow): FeedItemView {
   return {
     cursor: formatCursor(row.cursor),
     deliveryId: row.deliveryId,
@@ -154,14 +167,15 @@ export class ChatbotFeedService {
   }
 
   /**
-   * Deliveries a bot deferred because the 24 h window was closed (§4.5), by
-   * `conversationRef` or, for a request that has none (L2), by `requestId`.
-   * Exactly one of the two.
+   * Deliveries a bot deferred (§4.5: the 24 h window was closed, or the
+   * conversation is in a human session), by `conversationRef` or, for a request
+   * that has none (L2), by `requestId`. Exactly one of the two. Each item says
+   * which deferral applies (`deferredReason`).
    */
   async pending(query: {
     conversationRef?: unknown;
     requestId?: unknown;
-  }): Promise<{ items: FeedItemView[] }> {
+  }): Promise<{ items: PendingDeliveryView[] }> {
     const { conversationRef, requestId } = query;
     const invalid = () =>
       new InvalidArgumentError('Invalid feed request', 'INVALID_FEED_REQUEST');
@@ -185,7 +199,7 @@ export class ChatbotFeedService {
       filter = { requestId };
     }
     const rows = await this.store.pendingDeferred(filter, FEED_LIMITS.maxLimit);
-    return { items: rows.map(toView) };
+    return { items: rows.map(toPendingView) };
   }
 
   async outcome(input: {

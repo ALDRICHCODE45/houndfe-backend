@@ -4,6 +4,7 @@ import {
   buildAnswerPayload,
   buildCancelPayload,
   classifyOutcome,
+  deferredReasonOf,
   FEED_LIMITS,
   FEED_TYPE,
   LEGACY_DEFAULT_REJECTION_TEXT,
@@ -86,6 +87,20 @@ describe('delivery outcome body (§3.3)', () => {
     });
   });
 
+  it('accepts DEFERRED_HUMAN_SESSION with attemptedAt only', () => {
+    expect(
+      parseFeedOutcome({
+        attemptId: ATTEMPT,
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        attemptedAt: AT,
+      }),
+    ).toEqual({
+      attemptId: ATTEMPT,
+      outcome: 'DEFERRED_HUMAN_SESSION',
+      attemptedAt: AT,
+    });
+  });
+
   it('keeps providerMessageId optional on DELIVERY_UNKNOWN', () => {
     expect(
       parseFeedOutcome({
@@ -125,6 +140,18 @@ describe('delivery outcome body (§3.3)', () => {
         attemptedAt: AT,
         providerMessageId: 'w',
       },
+    ],
+    [
+      'a message id on DEFERRED_HUMAN_SESSION',
+      {
+        outcome: 'DEFERRED_HUMAN_SESSION',
+        attemptedAt: AT,
+        providerMessageId: 'w',
+      },
+    ],
+    [
+      'DEFERRED_HUMAN_SESSION without attemptedAt',
+      { outcome: 'DEFERRED_HUMAN_SESSION' },
     ],
     [
       'a blank message id',
@@ -274,6 +301,69 @@ describe('classifyOutcome: one terminal ACK per delivery (HumanDecisionBotOutcom
         ),
       ).toBe('OUTCOME_NOT_ALLOWED');
     });
+  });
+});
+
+describe('DEFERRED_HUMAN_SESSION keeps the delivery pending like the window deferral', () => {
+  const input = (over: object = {}) =>
+    parseFeedOutcome({
+      attemptId: ATTEMPT,
+      outcome: 'DEFERRED_HUMAN_SESSION',
+      attemptedAt: AT,
+      ...over,
+    });
+  const deferred = input();
+  const deferredHash = hashFeedOutcome(deferred);
+  const deferredRow = {
+    type: FEED_TYPE.answered,
+    attemptId: ATTEMPT,
+    evidenceHash: deferredHash,
+    ackedAt: null,
+  };
+  const fresh = {
+    type: FEED_TYPE.answered,
+    attemptId: null,
+    evidenceHash: null,
+    ackedAt: null,
+  };
+
+  it('applies on a fresh delivery and replays the same deferral', () => {
+    expect(classifyOutcome(fresh, deferred, deferredHash)).toBe('APPLY');
+    expect(classifyOutcome(deferredRow, deferred, deferredHash)).toBe('REPLAY');
+  });
+
+  it('lets a later attempt end it, or defer for either reason', () => {
+    for (const later of [
+      input({
+        attemptId: OTHER_ATTEMPT,
+        outcome: 'PROVIDER_ACCEPTED',
+        providerMessageId: 'w1',
+      }),
+      input({ attemptId: OTHER_ATTEMPT }),
+      input({ attemptId: OTHER_ATTEMPT, outcome: 'DEFERRED_WINDOW_CLOSED' }),
+    ]) {
+      expect(classifyOutcome(deferredRow, later, hashFeedOutcome(later))).toBe(
+        'APPLY',
+      );
+    }
+  });
+
+  it('is not allowed for a staff cancellation notice, same rule as the window deferral (§12.14)', () => {
+    expect(
+      classifyOutcome(
+        { ...fresh, type: FEED_TYPE.cancelled },
+        deferred,
+        deferredHash,
+      ),
+    ).toBe('OUTCOME_NOT_ALLOWED');
+  });
+
+  it('names the deferral reason of each non-terminal outcome', () => {
+    expect(deferredReasonOf('DEFERRED_WINDOW_CLOSED')).toBe('WINDOW_CLOSED');
+    expect(deferredReasonOf('DEFERRED_HUMAN_SESSION')).toBe('HUMAN_SESSION');
+    expect(deferredReasonOf('PROVIDER_ACCEPTED')).toBeNull();
+    expect(deferredReasonOf('STALE')).toBeNull();
+    expect(deferredReasonOf(null)).toBeNull();
   });
 });
 

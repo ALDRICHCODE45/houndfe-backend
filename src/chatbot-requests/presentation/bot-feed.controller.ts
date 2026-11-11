@@ -30,6 +30,7 @@ import {
   ChatbotFeedService,
   type FeedItemView,
   type OutcomeAck,
+  type PendingDeliveryView,
 } from '../application/chatbot-feed.service';
 import { parseFeedQuery } from '../domain/chatbot-feed';
 import { BOT_SCOPES } from '../domain/bot-scopes';
@@ -94,7 +95,7 @@ export class BotFeedController {
     @Query() query: Record<string, unknown>,
     @Req() request: ServiceAuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<{ items: FeedItemView[] }> {
+  ): Promise<{ items: PendingDeliveryView[] }> {
     this.credential(request);
     response.setHeader('Cache-Control', 'no-store');
     return this.feed.pending({

@@ -1,7 +1,7 @@
 /**
  * Chatbot request inbox (human-intervention units 2, 3 and 5): staff commands
  * claim, release, reassign, cancel and resolve, and the bot's create, cancel
- * and feed routes (feed, delivery outcome, pending deliveries). `AuthModule` provides `JwtAuthGuard` and `PermissionsGuard`;
+ * and feed routes (feed, delivery outcome, pending deliveries, recovery). `AuthModule` provides `JwtAuthGuard` and `PermissionsGuard`;
  * `ActiveUserGuard` resolves `PrismaService` from the global `DatabaseModule`;
  * `ChatbotApiModule` supplies the bot guard's credential repository.
  *
@@ -27,6 +27,10 @@ import {
   FEED_WAKEUP,
 } from './application/chatbot-feed.service';
 import {
+  CHATBOT_RECOVERY_STORE,
+  ChatbotRecoveryService,
+} from './application/chatbot-recovery.service';
+import {
   CHATBOT_REQUEST_COMMAND_STORE,
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
@@ -39,10 +43,12 @@ import { ChatbotRequestWrapperModule } from './chatbot-request-wrapper.module';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
 import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
+import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
 import { LegacyIntakeAdapter } from './infrastructure/legacy-intake.adapter';
 import { PrismaBotIntakeStore } from './infrastructure/prisma-bot-intake.store';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { BotFeedController } from './presentation/bot-feed.controller';
+import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
@@ -61,6 +67,7 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
     ChatbotRequestCommandsController,
     BotRequestsController,
     BotFeedController,
+    BotRecoveryController,
   ],
   providers: [
     ActiveUserGuard,
@@ -68,9 +75,11 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
     ChatbotRequestCommandsService,
     BotRequestIntakeService,
     ChatbotFeedService,
+    ChatbotRecoveryService,
     PgFeedWakeup,
     { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
     { provide: CHATBOT_FEED_STORE, useClass: PrismaChatbotFeedStore },
+    { provide: CHATBOT_RECOVERY_STORE, useClass: PrismaChatbotRecoveryStore },
     { provide: FEED_CLOCK, useValue: Date.now },
     { provide: BOT_INTAKE_STORE, useClass: PrismaBotIntakeStore },
     { provide: LEGACY_INTAKE, useClass: LegacyIntakeAdapter },

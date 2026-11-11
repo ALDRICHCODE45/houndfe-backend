@@ -89,9 +89,37 @@ export const FEED_OUTCOMES = [
   'PROVIDER_ACCEPTED',
   'DELIVERY_UNKNOWN',
   'DEFERRED_WINDOW_CLOSED',
+  'DEFERRED_HUMAN_SESSION',
   'STALE',
 ] as const;
 export type FeedOutcome = (typeof FEED_OUTCOMES)[number];
+
+/**
+ * The non-terminal outcomes: the delivery stays pending (`ackedAt` NULL) and
+ * `pending-deliveries` serves it. The window deferral waits for the customer's
+ * next message; the human-session deferral waits for the session to end
+ * (`conversation.ended`) or for the next bot-mode turn.
+ */
+export const DEFERRED_OUTCOMES = [
+  'DEFERRED_WINDOW_CLOSED',
+  'DEFERRED_HUMAN_SESSION',
+] as const;
+export type DeferredOutcome = (typeof DEFERRED_OUTCOMES)[number];
+export type DeferredReason = 'WINDOW_CLOSED' | 'HUMAN_SESSION';
+
+export const isDeferredOutcome = (
+  outcome: string | null | undefined,
+): outcome is DeferredOutcome =>
+  DEFERRED_OUTCOMES.some((deferred) => deferred === outcome);
+
+/** Why a pending delivery is waiting; `null` for anything that is not a deferral. */
+export function deferredReasonOf(
+  outcome: string | null | undefined,
+): DeferredReason | null {
+  if (outcome === 'DEFERRED_WINDOW_CLOSED') return 'WINDOW_CLOSED';
+  if (outcome === 'DEFERRED_HUMAN_SESSION') return 'HUMAN_SESSION';
+  return null;
+}
 
 export interface FeedOutcomeInput {
   attemptId: string;
@@ -199,9 +227,11 @@ export type OutcomeDecision =
  * One terminal ACK per delivery, as `HumanDecisionBotOutcome`: the same
  * attempt with the same evidence replays; the same attempt with other evidence
  * is `IDEMPOTENCY_CONFLICT`; another attempt after a terminal outcome is
- * `OUTCOME_ALREADY_RECORDED`. `DEFERRED_WINDOW_CLOSED` is not terminal: a later
- * attempt may defer again or end it. The bot never defers a staff cancellation
- * notice (§12.14), so it cannot be left pending.
+ * `OUTCOME_ALREADY_RECORDED`. A deferral (`DEFERRED_WINDOW_CLOSED`,
+ * `DEFERRED_HUMAN_SESSION`) is not terminal: a later attempt may defer again,
+ * for either reason, or end it. The bot never defers a staff cancellation
+ * notice (§12.14: a notice that arrives late only annoys the customer, and that
+ * holds whichever the reason), so it cannot be left pending.
  */
 export function classifyOutcome(
   current: {
@@ -218,7 +248,7 @@ export function classifyOutcome(
   }
   if (current.ackedAt) return 'OUTCOME_ALREADY_RECORDED';
   if (
-    input.outcome === 'DEFERRED_WINDOW_CLOSED' &&
+    isDeferredOutcome(input.outcome) &&
     current.type === FEED_TYPE.cancelled
   ) {
     return 'OUTCOME_NOT_ALLOWED';

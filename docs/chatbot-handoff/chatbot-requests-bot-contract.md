@@ -1,13 +1,13 @@
-# Chatbot ↔ backend: human requests (slices 5a and 5b)
+# Chatbot ↔ backend: human requests (slices 5a, 5b and 5c)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.overdue_notice`, `request.cancel_ack`, `conversation.*`, `template.requested`).
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.overdue_notice`, `request.cancel_ack`, `conversation.*`, `template.requested`).
 
 ## Common rules
 
 | Rule | Detail |
 | --- | --- |
 | Auth | `Authorization: Bearer svc_…`. `X-Branch-Id`, when sent, must equal the credential's tenant (else `403 FORBIDDEN`). The tenant, source and credential never go in a body. |
-| Scopes | `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write`, `media:write`. They are free text on `ServiceCredential.scopes`; add the ones a credential needs. A missing scope is `403 INSUFFICIENT_SCOPE`. The create and cancel routes use `requests:create` and `requests:cancel`; the feed and pending deliveries use `feed:read`; the delivery outcome uses `feed:ack`. |
+| Scopes | `requests:create`, `requests:read`, `requests:cancel`, `feed:read`, `feed:ack`, `conversation:write`, `media:write`. They are free text on `ServiceCredential.scopes`; add the ones a credential needs. A missing scope is `403 INSUFFICIENT_SCOPE`. The create and cancel routes use `requests:create` and `requests:cancel`; the recovery route uses `requests:read`; the feed and pending deliveries use `feed:read`; the delivery outcome uses `feed:ack`. |
 | Idempotency | Every write sends `X-Idempotency-Key: <uuid>`. Create: it must equal the body's `sourceRequestId` (compared literally, else `400`). Cancel: any UUID. Same key and same canonical hash → the same answer; same key and another body → `409 IDEMPOTENCY_CONFLICT`. Create keys are one namespace across all subtypes: a `sourceRequestId` already used for a `RESTOCK` and sent again as a `COMPLAINT` (or the other way round) is a conflict, never a second request. |
 | Errors | `{ "statusCode": 409, "code": "…", "message": "…" }` plus the extra fields listed per error. All responses, errors included, carry `Cache-Control: no-store`. |
 | Rate limit | `429 RATE_LIMITED` with `Retry-After` (seconds). See "Route budgets". |
@@ -118,7 +118,7 @@ Counters live in PostgreSQL (`service_rate_buckets`), so every replica shares th
 | `default` | the other chatbot-api routes that existed before this contract (catalog, customers, checkout, shipping quotes, receipts…) | the credential's `rateLimit` (60) | `rateLimits.default`, else `rateLimit` |
 | `humanDecisions` | the stock, expiration and delivery-zone routes: `POST /chatbot-api/human-decisions`, `GET /chatbot-api/human-decisions/:id`, `POST …/:id/application-outcome` | the credential's `rateLimit` (60) | `rateLimits.humanDecisions`, else `rateLimit` |
 | `write` | `POST /chatbot-api/requests`, `…/:id/cancel`, `POST /chatbot-api/deliveries/:id/outcome` | 300 | `rateLimits.write` |
-| `read` | `GET /chatbot-api/requests/pending-deliveries` (more read routes later) | 300 | `rateLimits.read` |
+| `read` | `GET /chatbot-api/requests/pending-deliveries`, `GET /chatbot-api/requests` (recovery) | 300 | `rateLimits.read` |
 | `feed` | `GET /chatbot-api/feed` (the long-poll); never spends `write` or `read` | 120 | `rateLimits.feed` |
 
 `humanDecisions` and `default` have the same budget but **separate counters**: spending one never uses the other (owner decision M1), so stock and expiration traffic cannot starve the catalog and checkout routes, nor the reverse.
@@ -157,7 +157,7 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 
 - **Cursor rules.** Items arrive in ascending cursor order and **cursor order is commit order**: you never see cursor 6 before a cursor 5 that is still to come. Store `nextCursor` **after** you handled the page, and send it as `after`. An empty page returns the `after` you sent, so you can keep it. The cursor is per tenant (the branch of the credential) and is opaque: do not do arithmetic on it. A cursor is never a delivery receipt: reading does not acknowledge anything.
 - **Long-poll.** With no item after `after`, the request waits up to `waitSeconds` and answers `{items: [], nextCursor: <after>}` at the deadline, or as soon as an item commits (well under a second). Reconnect immediately. It spends the `feed` budget **once, when it opens**. At most **2 waiting long-polls per credential** (per replica); a third gets `429 RATE_LIMITED` with `Retry-After: 1`. A request that is answered at once never counts as waiting. Hang up whenever you like; the slot is freed.
-- **`410 CURSOR_EXPIRED`.** The feed keeps **30 days**. A cursor older than what was purged answers `410`; recover with `GET /chatbot-api/requests?status=open&updatedSince=` (not built yet; until then restart from the oldest retained item with no `after`, and de-duplicate by `deliveryId`).
+- **`410 CURSOR_EXPIRED`.** The feed keeps **30 days**. A cursor older than what was purged answers `410`; recover with `GET /chatbot-api/requests?status=open&updatedSince=`: see "Recovery after `410 CURSOR_EXPIRED`" (slice 5c, below) for the exact procedure.
 - **Retry.** The same `after` returns the same items again (plus newer ones), so a crash between "read" and "handled" only repeats work. De-duplicate by `deliveryId` (store it as a unique key **before** calling Meta).
 
 ### Item types in this slice
@@ -212,27 +212,41 @@ Scope `feed:ack`, class `write`. Send it **after** the local effect (the message
 | `PROVIDER_ACCEPTED` | Meta accepted the message | `providerMessageId` required, `attemptedAt` required |
 | `DELIVERY_UNKNOWN` | You cannot tell whether it was sent; **do not retry** (the delivery is marked "to reconcile" for staff) | `attemptedAt` required, `providerMessageId` optional |
 | `DEFERRED_WINDOW_CLOSED` | The 24 h window is closed; the delivery stays **pending** (see below). Not allowed for `request.cancelled` | `attemptedAt` required |
+| `DEFERRED_HUMAN_SESSION` | The conversation is in `HUMAN` mode, so you hold the delivery; it stays **pending** exactly like the window deferral (see below). Not allowed for `request.cancelled` | `attemptedAt` required, no `providerMessageId` |
 | `STALE` | Nothing was sent and nothing needs to be (duplicate, customer cancelled, window closed for a cancel notice) | only `attemptId` (`attemptedAt` optional, no `providerMessageId`) |
 
 Exactly those keys; an unknown key, a missing required key, a key an outcome forbids, `FAILED` or any other outcome is `400 VALIDATION_ERROR`. `attemptId` is a lowercase UUID, `attemptedAt` is canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, `providerMessageId` is 1..512 characters, trimmed, no control characters.
 
-`200`: `{"deliveryId", "outcome", "attemptId", "ackReceivedAt"}` (`ackReceivedAt` is `null` for `DEFERRED_WINDOW_CLOSED`). One terminal outcome per delivery, the same semantics as the human-decision application outcome:
+`200`: `{"deliveryId", "outcome", "attemptId", "ackReceivedAt"}` (`ackReceivedAt` is `null` for both deferrals, `DEFERRED_WINDOW_CLOSED` and `DEFERRED_HUMAN_SESSION`). One terminal outcome per delivery, the same semantics as the human-decision application outcome:
 
 | Status / code | When |
 | --- | --- |
-| `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` replayed after the delivery was accepted): it changes nothing |
+| `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` replayed after the delivery was accepted): it changes nothing |
 | `409 IDEMPOTENCY_CONFLICT` | An `attemptId` this delivery already applied, sent with other evidence |
-| `409 OUTCOME_ALREADY_RECORDED` | A **new** `attemptId` after a terminal outcome (any of the first three) |
-| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` for a `request.cancelled` delivery |
+| `409 OUTCOME_ALREADY_RECORDED` | A **new** `attemptId` after a terminal outcome (`PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` or `STALE`; a deferral is not terminal) |
+| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery |
 | `404 NOT_FOUND` (`message: "Delivery not found"`) | Unknown delivery, or one of another branch |
 | `400 VALIDATION_ERROR` | Body or `deliveryId` malformed |
 | `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget |
 
-Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after `DEFERRED_WINDOW_CLOSED` uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`).
+Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after a deferral (either) uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`).
 
 ### `GET /chatbot-api/requests/pending-deliveries?conversationRef=` (or `?requestId=`)
 
-Scope `feed:read`, class `read`. The deliveries whose last outcome was `DEFERRED_WINDOW_CLOSED` and that have no terminal outcome yet (up to 50, ascending cursor), in the same item shape as the feed: `{ "items": [ … ] }`. Ask for it when the customer writes again (the window is open), deliver them, and ACK each with a new `attemptId`. This avoids walking the feed again.
+Scope `feed:read`, class `read`. The deliveries whose last outcome was a deferral (`DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION`) and that have no terminal outcome yet (up to 50, ascending cursor), in the same item shape as the feed plus **`deferredReason`**: `{ "items": [ … ] }`.
+
+```json
+{ "items": [ { "cursor": "000000001842", "deliveryId": "b1c0…", "type": "request.answered", "requestId": "9a7e…", "conversationRef": "wa:5215512345678", "payload": { "kind": "DECISION", "…": "…" }, "notBefore": null, "expiresAt": null, "deferredReason": "HUMAN_SESSION" } ] }
+```
+
+`deferredReason` says which deferral applies, so you know when to ask again:
+
+| `deferredReason` | Replay it when |
+| --- | --- |
+| `WINDOW_CLOSED` | The customer writes again (the 24 h window is open). Deliver and ACK with a new `attemptId`. |
+| `HUMAN_SESSION` | The human session ended (`conversation.ended`, unit 11) or the conversation's next bot-mode turn. Deliver and ACK with a new `attemptId`. |
+
+Both are served by the same route, by `conversationRef` and by `requestId`. This avoids walking the feed again.
 
 Send **exactly one** filter (both or neither is `400`):
 
@@ -250,10 +264,60 @@ Send **exactly one** filter (both or neither is `400`):
 The proposal leaves these open; this is what the backend does, and the bot should rely on it:
 
 1. **`attemptedAt` is optional only for `STALE`.** §3.3 lists it for every outcome. `STALE` is a definite "nothing was sent", so there is no attempt time to report; every other outcome requires it.
-2. **`providerMessageId` is rejected (`400`) for `DEFERRED_WINDOW_CLOSED` and `STALE`.** No message was accepted in those cases. It is required for `PROVIDER_ACCEPTED` and optional for `DELIVERY_UNKNOWN` (audit only).
-3. **`422 OUTCOME_NOT_ALLOWED`: `DEFERRED_WINDOW_CLOSED` for a `request.cancelled` delivery.** §12.14 says the bot never defers a cancellation notice (a closure notice days later only annoys the customer); the backend enforces it so such an item cannot sit pending forever. Answer `STALE` instead.
+2. **`providerMessageId` is rejected (`400`) for `DEFERRED_WINDOW_CLOSED`, `DEFERRED_HUMAN_SESSION` and `STALE`.** No message was accepted in those cases. It is required for `PROVIDER_ACCEPTED` and optional for `DELIVERY_UNKNOWN` (audit only).
+3. **`422 OUTCOME_NOT_ALLOWED`: `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery.** §12.14 says the bot never defers a cancellation notice (a closure notice days later only annoys the customer); the reason for waiting does not change that, so the backend enforces it for both deferrals and such an item cannot sit pending forever. Answer `STALE` instead.
+4. **`DEFERRED_HUMAN_SESSION` is a non-terminal outcome, exactly like `DEFERRED_WINDOW_CLOSED` (slice 5c).** `ackedAt` stays empty, `GET …/pending-deliveries` serves the delivery (with `deferredReason: "HUMAN_SESSION"`), and a later attempt with a new `attemptId` may end it with any outcome, or defer again for either reason. The deferral is recorded in the request's audit (`DELIVERY_OUTCOME`, `outcome: "DEFERRED_HUMAN_SESSION"`). The backend does not look at the conversation's mode: reporting it is the bot's call.
 
 Also: `FAILED` is not an outcome; the 404 of the outcome route says `Delivery not found`; the backend sends the long-poll answers `Cache-Control: no-store`.
+
+### Recovery after `410 CURSOR_EXPIRED` (slice 5c)
+
+`GET /chatbot-api/requests?status=open&updatedSince=<ISO>&cursor=&limit=50`
+
+Scope `requests:read`, class `read`, tenant from the credential (`X-Branch-Id`, when sent, must equal it). Use it when the feed answers `410 CURSOR_EXPIRED` (or whenever you lose your cursor): it hands back the requests you must know about and the feed position to resume from.
+
+| Param | Rule |
+| --- | --- |
+| `status` | Required, exactly `open`. |
+| `updatedSince` | Optional, canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`. Adds the requests **closed at or after** this instant (`RESOLVED` or `CANCELLED`), so you can drop them. Open requests are returned **all**, however old, with or without it. Send an instant **earlier** than your last sync (the last instant your pending state was complete), never later. |
+| `cursor` | The `nextPage` of the previous page; omit for the first page. Opaque. |
+| `limit` | 1..50, default 50. |
+
+Anything else (a missing or other `status`, an unknown key, a non-canonical `updatedSince`, `limit` 0 or 51, a malformed `cursor`) is `400 VALIDATION_ERROR`, never clamped or ignored. Pages are ordered by `(updatedAt, id)` ascending and keyset-paginated: a request updated while you walk may be seen once more at the end; none is skipped. Cost per page does not depend on how many requests the branch has closed.
+
+```json
+{
+  "items": [
+    {
+      "id": "9a7e…", "folio": "S-000123", "kind": "DECISION", "subtype": "RESTOCK",
+      "status": "RESOLVED",
+      "conversationRef": "wa:5215512345678",
+      "legacyId": "5d0c…",
+      "whatsappWindowClosesAt": "2026-11-11T16:20:00.000Z",
+      "cancelReason": null,
+      "createdAt": "2026-11-10T10:00:00.000Z", "updatedAt": "2026-11-10T16:00:00.000Z", "closedAt": "2026-11-10T16:00:00.000Z",
+      "pendingDeliveries": [
+        { "cursor": "000000001842", "deliveryId": "b1c0…", "type": "request.answered", "requestId": "9a7e…", "conversationRef": "wa:5215512345678", "payload": { "kind": "DECISION", "…": "…" }, "notBefore": null, "expiresAt": null, "deferredReason": null }
+      ]
+    }
+  ],
+  "nextCursor": "000000001900",
+  "nextPage": "eyJ1Ijoi…"
+}
+```
+
+- It is the bot's view: ids, folio, kind, subtype, status, `conversationRef`, `legacyId` (the id you track from the create answer, for wrapped subtypes), the window, `cancelReason` and times. **No customer, phone, assignee or staff data, and no free text.**
+- **`pendingDeliveries`**: the request's latest **5** feed items with no terminal outcome, oldest first, in the feed item shape plus `deferredReason` (`null` when no attempt was reported yet, else `WINDOW_CLOSED` or `HUMAN_SESSION`). Use `deliveryId` to deliver and ACK (or ACK `STALE`) the answers you never delivered. A closed request keeps showing its answer until it is acknowledged.
+- **`nextCursor`** is the tenant's feed position when the **first page** was served (never below the retention watermark; `000000000000` for an empty feed). **Every page of one walk answers the same value** (the page cursor carries it).
+- **`nextPage`** is the `cursor` of the next page, `null` on the last one.
+
+Procedure:
+
+1. The feed answers `410 CURSOR_EXPIRED`. Stop using that cursor.
+2. Call the route with `status=open` and `updatedSince` = the last instant your state was complete. Omit it if you do not know: every open request is returned anyway, so a pending record of yours for a request the walk did not list as open is a closed one (you just do not get its final status or its unacknowledged answer).
+3. Walk every page with `cursor=<nextPage>` until `nextPage` is `null`. Keep the `nextCursor` of the first page.
+4. For each item, make your records match it: `NEW` or `IN_PROGRESS` → you must hold a pending record (create or refresh it from `conversationRef`, `legacyId`, the window); `RESOLVED` or `CANCELLED` → drop the pending record (and the same for any record the walk did not list as open). Then handle its `pendingDeliveries` as feed items (same type rules, dedupe by `deliveryId`, ACK each).
+5. Only after every page was processed and saved, store `nextCursor` as your feed position and resume `GET /chatbot-api/feed?after=<nextCursor>`. Everything that committed after the walk started is after that position; what the walk already showed may arrive again in the feed, which is safe (dedupe by `deliveryId`, ACKs are idempotent). `nextCursor` is accepted by the feed (it is never below the purge watermark), so it cannot answer `410` again right away.
 
 ### Shutdown and restarts
 
@@ -264,3 +328,8 @@ On a deploy or restart the backend wakes its waiting long-polls, which answer `{
 - The credential needs `feed:read` and `feed:ack` (`ServiceCredential.scopes`).
 - The backend needs a direct PostgreSQL connection for `LISTEN` (no transaction-pooling proxy in front of `DATABASE_URL`); each replica opens one extra connection.
 - Migration `20261110050000_chatbot_feed` (additive; see `docs/chatbot-requests-model.md`, "Deploy safety").
+
+### Deploy checklist for 5c
+
+- The credential needs `requests:read` for the recovery route (and keeps `feed:read` / `feed:ack`).
+- Migration `20261110060000_chatbot_feed_recovery` (no table or column change: it widens the outcome CHECKs for `DEFERRED_HUMAN_SESSION`, replaces the pending-deliveries partial index and adds two partial indexes on `chatbot_requests`; see `docs/chatbot-requests-model.md`, "Deploy safety"). Deploy the backend before the bot reports `DEFERRED_HUMAN_SESSION`: an older backend answers `400` for the unknown outcome.

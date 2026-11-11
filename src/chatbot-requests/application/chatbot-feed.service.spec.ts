@@ -326,6 +326,19 @@ describe('ChatbotFeedService.pending (§4.5)', () => {
     });
   });
 
+  it('exposes which deferral applies to each pending delivery', async () => {
+    const { service, mocks } = setup();
+    mocks.pendingDeferred.mockResolvedValueOnce([
+      { ...row(3n), outcome: 'DEFERRED_WINDOW_CLOSED' },
+      { ...row(4n), outcome: 'DEFERRED_HUMAN_SESSION' },
+    ]);
+    const { items } = await service.pending({ conversationRef: 'wa:1' });
+    expect(items.map((item) => item.deferredReason)).toEqual([
+      'WINDOW_CLOSED',
+      'HUMAN_SESSION',
+    ]);
+  });
+
   it('L2: reaches a delivery by requestId (a request with no conversationRef)', async () => {
     const { service, mocks } = setup();
     mocks.pendingDeferred.mockResolvedValueOnce([row(4n)]);
