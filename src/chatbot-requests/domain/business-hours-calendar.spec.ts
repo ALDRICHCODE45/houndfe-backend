@@ -555,9 +555,23 @@ describe('receiptDeadline (margin 60)', () => {
       );
     });
 
-    it('treats the break as outside hours', () => {
+    // Owner decision (L65): «Al cierre de ese mismo día (Recomendado)».
+    it('arrives during the break with more than the margin left: closes that day', () => {
       expect(deadline('2026-11-10T14:30:00-06:00', 60, split)).toBe(
+        iso(at('2026-11-10T20:00:00-06:00')),
+      );
+      expect(deadline('2026-11-10T14:00:00-06:00', 60, split)).toBe(
+        iso(at('2026-11-10T20:00:00-06:00')),
+      );
+    });
+
+    it('arrives during the break with the margin or less left: next business day', () => {
+      // 240 business minutes remain after the break.
+      expect(deadline('2026-11-10T15:00:00-06:00', 240, split)).toBe(
         iso(at('2026-11-11T20:00:00-06:00')),
+      );
+      expect(deadline('2026-11-10T15:00:00-06:00', 239, split)).toBe(
+        iso(at('2026-11-10T20:00:00-06:00')),
       );
     });
 

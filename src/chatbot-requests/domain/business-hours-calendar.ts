@@ -295,15 +295,15 @@ export class BusinessCalendar {
   /**
    * §5.4 receipt rule. Arrives inside hours with MORE than `marginMinutes`
    * of business time left that day: due at that day's last close. Anything
-   * else (60 minutes or fewer left, after the close, during
-   * a break, on a closed day or a holiday): due at the last close of the next
+   * else (60 minutes or fewer left, after the close, on a closed day or a
+   * holiday): due at the last close of the next
    * business day, the first date AFTER the arrival's local date that has hours.
    *
    * The margin counts business minutes left in the day, which for a day with
-   * one range is the time to the close. Owner decision (2026-11-11): a request
-   * that arrives before the first opening of a business day has the whole day
-   * ahead, so it is due at that day's close when the day's business minutes
-   * exceed the margin.
+   * one range is the time to the close. Owner decisions (2026-11-11): arriving
+   * before the opening or during a midday break counts the business minutes
+   * still ahead that day, so it is due at that day's close when they exceed
+   * the margin.
    */
   receiptDeadline(arrival: Date, marginMinutes: number): Date {
     if (!Number.isFinite(marginMinutes) || marginMinutes < 0) {
@@ -312,18 +312,12 @@ export class BusinessCalendar {
     const at = arrival.getTime();
     const day = this.localDateOf(at);
     const today = this.intervalsOf(day);
-    const beforeOpening = today.length > 0 && at < today[0][0];
-    if (
-      beforeOpening ||
-      today.some(([start, end]) => start <= at && at < end)
-    ) {
-      let left = 0;
-      for (const [start, end] of today) {
-        if (end > at) left += end - Math.max(start, at);
-      }
-      if (left > marginMinutes * MINUTE) {
-        return new Date(today[today.length - 1][1]);
-      }
+    let left = 0;
+    for (const [start, end] of today) {
+      if (end > at) left += end - Math.max(start, at);
+    }
+    if (left > marginMinutes * MINUTE) {
+      return new Date(today[today.length - 1][1]);
     }
     let date = nextDate(day);
     for (let scanned = 0; scanned < MAX_SCAN_DAYS; scanned++) {
