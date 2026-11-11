@@ -94,3 +94,25 @@ export function customerHasKey(
     canonicalPhone(customer.phoneCountryCode, customer.phone) === customerKey
   );
 }
+
+/**
+ * The exact `(phoneCountryCode, phone)` forms a stored `Customer` can have for
+ * one canonical key: the cross product of `phoneLookupVariants`, kept only when
+ * `canonicalPhone` of the pair IS the key. A SQL `(cc, phone) IN (pairs)` over
+ * this list is therefore an exact match: the database never returns a loose
+ * hit that has to be dropped afterwards (and never hides an exact one behind a
+ * `LIMIT`).
+ */
+export function phoneLookupPairs(
+  countryCode: string,
+  phone: string,
+): Array<{ phoneCountryCode: string; phone: string }> {
+  const key = canonicalPhone(countryCode, phone);
+  if (!key) return [];
+  const { countryCodes, phones } = phoneLookupVariants(countryCode, phone);
+  return countryCodes.flatMap((cc) =>
+    phones
+      .filter((candidate) => canonicalPhone(cc, candidate) === key)
+      .map((candidate) => ({ phoneCountryCode: cc, phone: candidate })),
+  );
+}

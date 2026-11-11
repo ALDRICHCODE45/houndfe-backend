@@ -21,6 +21,7 @@ function row(over: Partial<ChatbotRequestRow> = {}): ChatbotRequestRow {
     status: 'NEW',
     version: 1,
     customerKey: '525512345678',
+    conversationRef: 'wa:525512345678',
     assigneeUserId: null,
     assigneeDisplayName: null,
     claimedAt: null,

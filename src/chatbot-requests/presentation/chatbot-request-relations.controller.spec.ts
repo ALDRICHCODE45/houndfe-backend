@@ -11,7 +11,9 @@ import {
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
+import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { PERMISSIONS_KEY } from '../../auth/authorization/decorators/require-permissions.decorator';
+import type { AppAbility } from '../../auth/authorization/domain/permission';
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
 import { ActiveUserGuard } from '../../auth/guards/active-user.guard';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -35,13 +37,18 @@ const VIEW = {
   version: 3,
 } as unknown as ChatbotRequestView;
 
+let canReassign = false;
+
 class StubGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    context.switchToHttp().getRequest<{ user: unknown }>().user = {
-      userId: 'u-ana',
-      tenantId: 't-1',
-      isSuperAdmin: false,
-    };
+    const req = context
+      .switchToHttp()
+      .getRequest<{ user: unknown; ability: AppAbility }>();
+    req.user = { userId: 'u-ana', tenantId: 't-1', isSuperAdmin: false };
+    const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    can('update', 'ChatbotRequest');
+    if (canReassign) can('update', 'ChatbotRequestAssignment');
+    req.ability = build();
     return true;
   }
 }
@@ -80,6 +87,7 @@ describe('ChatbotRequestRelationsController', () => {
   beforeEach(() => {
     merge.mockReset().mockResolvedValue(VIEW);
     linkCustomer.mockReset().mockResolvedValue(VIEW);
+    canReassign = false;
   });
 
   const post = (path: string, body: object, key: string | null = KEY) => {
@@ -127,10 +135,34 @@ describe('ChatbotRequestRelationsController', () => {
     expect(merge).toHaveBeenCalledWith({
       requestId: ID,
       actorUserId: 'u-ana',
+      actorCanReassign: false,
       idempotencyKey: KEY,
       expectedVersion: 2,
       intoRequestId: INTO,
       intoExpectedVersion: 4,
+    });
+  });
+
+  it('passes update:ChatbotRequestAssignment as actorCanReassign (merging someone else’s request)', async () => {
+    canReassign = true;
+    await post('merge', mergeBody).expect(200);
+    expect(merge).toHaveBeenCalledWith(
+      expect.objectContaining({ actorCanReassign: true }),
+    );
+  });
+
+  it('maps NOT_ASSIGNEE to 403 with the current row', async () => {
+    merge.mockRejectedValueOnce(
+      new ChatbotRequestCommandError('NOT_ASSIGNEE', 403, {
+        version: 2,
+        status: 'IN_PROGRESS',
+        claimedBy: { id: 'u-luis', displayName: 'Luis' },
+      }),
+    );
+    const res = await post('merge', mergeBody).expect(403);
+    expect(res.body).toMatchObject({
+      code: 'NOT_ASSIGNEE',
+      current: { claimedBy: { id: 'u-luis' } },
     });
   });
 

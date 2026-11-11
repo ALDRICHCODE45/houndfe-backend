@@ -511,6 +511,7 @@ export class ChatbotRequestReadsService {
           resolveTargetMissing:
             request.subtype === 'DELIVERY_ZONE' && !record.zoneImpact,
           hasMergeCandidate: record.hasMergeCandidate,
+          hasLinkCandidate: record.candidates.length > 0,
           customer: {
             customerId: request.customerId,
             customerKey: request.customerKey,

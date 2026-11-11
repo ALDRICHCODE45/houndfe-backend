@@ -5,7 +5,9 @@
  *   POST /chatbot-requests/:id/merge          read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/link-customer  read + update:ChatbotRequest
  *
- * §3.10 gives both the same permission as the other commands; link-customer
+ * §3.10 gives both the same permission as the other commands (merging a
+ * request held by someone else also needs `update:ChatbotRequestAssignment`,
+ * as cancel does); link-customer
  * does not need `read:CustomerPhone`: the user picks among the candidates of
  * the detail (phones masked for them) and the server proves the phone match.
  * Same guards, headers and `200 {request}` as the commands of slice 2b.
@@ -29,6 +31,7 @@ import { RequirePermissions } from '../../auth/authorization/decorators/require-
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
 import { ActiveUserGuard } from '../../auth/guards/active-user.guard';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import type { AppAbility } from '../../auth/authorization/domain/permission';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { ChatbotRequestRelationsService } from '../application/chatbot-request-relations.service';
@@ -39,7 +42,10 @@ import {
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
 
-type StaffRequest = Request & { user?: AuthenticatedUser };
+type StaffRequest = Request & {
+  user?: AuthenticatedUser;
+  ability?: AppAbility;
+};
 
 @Controller('chatbot-requests')
 @UseGuards(JwtAuthGuard, TenantContextGuard, ActiveUserGuard, PermissionsGuard)
@@ -60,6 +66,9 @@ export class ChatbotRequestRelationsController {
     const request = await this.relations.merge({
       requestId: id,
       actorUserId: this.actor(req),
+      // Merging someone else's request needs the reassign permission, like
+      // cancelling it (M5); the state machine decides.
+      actorCanReassign: this.canReassign(req),
       idempotencyKey: key,
       expectedVersion: body.expectedVersion,
       intoRequestId: body.intoRequestId,
@@ -86,6 +95,11 @@ export class ChatbotRequestRelationsController {
       customerId: body.customerId,
     });
     return { request };
+  }
+
+  private canReassign(req: StaffRequest): boolean {
+    if (!req.ability) throw new ForbiddenException();
+    return req.ability.can('update', 'ChatbotRequestAssignment');
   }
 
   /** The actor comes only from the JWT; fail closed if a guard was bypassed. */

@@ -10,6 +10,7 @@ import {
   cancelByStaff,
   canMergeSource,
   claim,
+  heldByOther,
   linkCustomer,
   reassign,
   release,
@@ -57,6 +58,12 @@ export interface AllowedActionsOptions {
   hasMergeCandidate?: boolean;
   /** The request's customer link; `LINK_CUSTOMER` needs it to be offered. */
   customer?: { customerId: string | null; customerKey: string };
+  /**
+   * The tenant has at least one customer whose phone is this request's key
+   * (the detail's `customer.candidates`). Without one `link-customer` could
+   * only answer CUSTOMER_PHONE_MISMATCH, so `LINK_CUSTOMER` is not offered.
+   */
+  hasLinkCandidate?: boolean;
 }
 
 export function computeAllowedActions(
@@ -100,12 +107,18 @@ export function computeAllowedActions(
     ],
     [
       'MERGE',
-      canUpdate && options.hasMergeCandidate === true && canMergeSource(state),
+      // Same rule as `cancelByStaff` (M5): someone else's request needs the
+      // assignment permission.
+      canUpdate &&
+        options.hasMergeCandidate === true &&
+        canMergeSource(state) &&
+        !(heldByOther(state, actor) && !canReassign),
     ],
     [
       'LINK_CUSTOMER',
       canUpdate &&
         options.customer !== undefined &&
+        options.hasLinkCandidate === true &&
         linkCustomer(state, {
           actor,
           expectedVersion,

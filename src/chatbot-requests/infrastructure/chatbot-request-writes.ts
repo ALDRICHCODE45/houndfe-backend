@@ -160,7 +160,7 @@ export async function assertTenantLinks(
 const REQUEST_ROW = Prisma.sql`
   SELECT cr."id", cr."folio", cr."kind"::text AS "kind",
          cr."subtype"::text AS "subtype", cr."status"::text AS "status",
-         cr."version", cr."customerKey", cr."assigneeUserId",
+         cr."version", cr."customerKey", cr."conversationRef", cr."assigneeUserId",
          cr."assigneeDisplayName", cr."claimedAt", cr."overdueAt", cr."closedAt",
          cr."humanDecisionId", cr."deliveryZoneRequestId", cr."receiptEvidenceId"
   FROM "chatbot_requests" cr`;

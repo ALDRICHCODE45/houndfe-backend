@@ -29,7 +29,7 @@ import type {
 } from '../application/chatbot-request-reads.service';
 import { readDecision } from './chatbot-request-decision.reader';
 import { assignableUserWhere } from './assignable-users';
-import { customerHasKey, phoneLookupVariants } from '../domain/canonical-phone';
+import { phoneLookupPairs } from '../domain/canonical-phone';
 import { actorDisplayName } from '../domain/actor-display-name';
 import { MERGEABLE_SUBTYPES } from '../domain/chatbot-request.commands';
 import type { CandidateRecord } from '../application/chatbot-request-reads.service';
@@ -38,6 +38,7 @@ import type { CandidateRecord } from '../application/chatbot-request-reads.servi
 const GROUP_ROWS = 10;
 const MERGE_CANDIDATES = 20;
 const OTHER_OPEN = 20;
+const LINK_CANDIDATES = 10;
 /** Technical default of "ventana por cerrar" (§8) until unit 7 adds settings. */
 const WINDOW_WARNING_MS = 2 * 3_600_000;
 
@@ -88,7 +89,11 @@ function searchPredicate(
   }
 }
 
-/** Same customer, same subtype, open, not itself: the merge-candidate rule. */
+/**
+ * The merge-candidate rule: same customer, same subtype, same non-null
+ * conversation (`request.merged` names one), open, not itself. A NULL
+ * conversation on the source matches nothing (`= NULL` is never true).
+ */
 const mergeCandidateWhere = (
   tenantId: string,
   id: string,
@@ -96,7 +101,10 @@ const mergeCandidateWhere = (
   subtype: string,
 ) => Prisma.sql`r."tenantId" = ${tenantId} AND r."customerKey" = ${customerKey}
   AND ${OPEN} AND r."id" <> ${id}
-  AND r."subtype" = ${subtype}::"ChatbotRequestSubtype"`;
+  AND r."subtype" = ${subtype}::"ChatbotRequestSubtype"
+  AND r."conversationRef" = (
+    SELECT s."conversationRef" FROM "chatbot_requests" s
+    WHERE s."tenantId" = ${tenantId} AND s."id" = ${id})`;
 
 const and = (parts: Prisma.Sql[]) => Prisma.join(parts, ' AND ');
 const asDate = (part: string | null) => new Date(part as string);
@@ -419,8 +427,9 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
 
   /**
    * R1 `link-customer` choices: the tenant's customers whose canonical phone is
-   * the request's key. The indexed `(tenantId, cc, phone)` lookup is loose on
-   * purpose (`521…` variants); `customerHasKey` keeps only exact matches.
+   * the request's key, oldest first, at most 10. The match is exact in SQL
+   * (`phoneLookupPairs` lists every stored form of the key), so the `LIMIT`
+   * only ever cuts the end of an ordered list of real matches.
    */
   private async linkCandidates(
     request: Pick<
@@ -430,24 +439,16 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
   ): Promise<CandidateRecord[]> {
     const open = request.status === 'NEW' || request.status === 'IN_PROGRESS';
     if (!open || !request.phone || !request.phoneCountryCode) return [];
-    const variants = phoneLookupVariants(
-      request.phoneCountryCode,
-      request.phone,
-    );
-    if (variants.phones.length === 0) return [];
+    const pairs = phoneLookupPairs(request.phoneCountryCode, request.phone);
+    if (pairs.length === 0) return [];
     const tenantId = this.tenantId();
     const found = await this.db.customer.findMany({
-      where: {
-        tenantId,
-        phoneCountryCode: { in: variants.countryCodes },
-        phone: { in: variants.phones },
-      },
+      where: { tenantId, OR: pairs },
       select: { id: true },
-      take: 30,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: LINK_CANDIDATES,
     });
-    const exact = (await this.customers(found.map((c) => c.id))).filter((c) =>
-      customerHasKey(c, request.customerKey),
-    );
+    const exact = await this.customers(found.map((c) => c.id));
     if (exact.length === 0) return [];
     const orders = await this.db.$queryRaw<
       { customerId: string; lastOrderAt: Date }[]
@@ -461,8 +462,11 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     const lastOrder = new Map(orders.map((o) => [o.customerId, o.lastOrderAt]));
     return exact
       .map((c) => ({ ...c, lastOrderAt: lastOrder.get(c.id) ?? null }))
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-      .slice(0, 10);
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          a.id.localeCompare(b.id),
+      );
   }
 
   /** `MERGE` in `allowedActions` needs at least one candidate (§12.11). */
@@ -503,9 +507,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     // §12.11: only subtypes without a wrapped table, both requests open.
     if (
       !source.open ||
-      !['UNKNOWN_QUESTION', 'TALK_TO_HUMAN', 'COMPLAINT'].includes(
-        source.subtype,
-      )
+      !MERGEABLE_SUBTYPES.some((subtype) => subtype === source.subtype)
     ) {
       return [];
     }

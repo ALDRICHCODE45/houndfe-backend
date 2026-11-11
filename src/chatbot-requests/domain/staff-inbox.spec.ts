@@ -236,9 +236,9 @@ describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
     subtype: 'UNKNOWN_QUESTION',
   });
   const unlinked = { customerId: null, customerKey: '525512345678' };
+  const withCandidate = { hasMergeCandidate: true };
 
   it('offers MERGE only with update, a mergeable open request and a candidate', () => {
-    const withCandidate = { hasMergeCandidate: true };
     expect(computeAllowedActions(question, CASHIER, ME, withCandidate)).toEqual(
       ['CLAIM', 'MERGE', 'CANCEL'],
     );
@@ -260,31 +260,62 @@ describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
     ).toEqual([]);
   });
 
-  it('offers MERGE on a request held by someone else, like the route', () => {
+  it('on a request held by someone else, MERGE follows the cancel rule: only with the assignment permission', () => {
     const other = state({
       ...question,
       status: 'IN_PROGRESS',
       assignee: heldBy('user-ana'),
     });
-    expect(
-      computeAllowedActions(other, CASHIER, ME, { hasMergeCandidate: true }),
-    ).toEqual(['MERGE']);
+    expect(computeAllowedActions(other, CASHIER, ME, withCandidate)).toEqual(
+      [],
+    );
+    expect(computeAllowedActions(other, MANAGER, ME, withCandidate)).toEqual([
+      'RELEASE',
+      'REASSIGN',
+      'MERGE',
+      'CANCEL',
+    ]);
+    const mine = state({
+      ...question,
+      status: 'IN_PROGRESS',
+      assignee: heldBy(ME),
+    });
+    expect(computeAllowedActions(mine, CASHIER, ME, withCandidate)).toContain(
+      'MERGE',
+    );
   });
 
-  it('offers LINK_CUSTOMER for an open request with a phone key and no customer', () => {
+  it('offers LINK_CUSTOMER for an open request with a phone key, no customer and a candidate', () => {
+    const link = { customer: unlinked, hasLinkCandidate: true };
+    expect(computeAllowedActions(question, CASHIER, ME, link)).toEqual([
+      'CLAIM',
+      'LINK_CUSTOMER',
+      'CANCEL',
+    ]);
+    expect(computeAllowedActions(question, READ_ONLY, ME, link)).toEqual([]);
+  });
+
+  it('does not offer LINK_CUSTOMER without a candidate customer', () => {
     expect(
       computeAllowedActions(question, CASHIER, ME, { customer: unlinked }),
-    ).toEqual(['CLAIM', 'LINK_CUSTOMER', 'CANCEL']);
+    ).not.toContain('LINK_CUSTOMER');
     expect(
-      computeAllowedActions(question, READ_ONLY, ME, { customer: unlinked }),
-    ).toEqual([]);
+      computeAllowedActions(question, CASHIER, ME, {
+        customer: unlinked,
+        hasLinkCandidate: false,
+      }),
+    ).not.toContain('LINK_CUSTOMER');
   });
 
   it('hides LINK_CUSTOMER when linked, for an unknown: key and when closed', () => {
     const none = (customer: {
       customerId: string | null;
       customerKey: string;
-    }) => computeAllowedActions(question, CASHIER, ME, { customer });
+    }) =>
+      computeAllowedActions(question, CASHIER, ME, {
+        customer,
+        hasLinkCandidate: true,
+      });
     expect(none({ ...unlinked, customerId: 'c-1' })).not.toContain(
       'LINK_CUSTOMER',
     );
@@ -296,9 +327,7 @@ describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
         state({ ...question, status: 'CANCELLED' }),
         MANAGER,
         ME,
-        {
-          customer: unlinked,
-        },
+        { customer: unlinked, hasLinkCandidate: true },
       ),
     ).toEqual([]);
   });

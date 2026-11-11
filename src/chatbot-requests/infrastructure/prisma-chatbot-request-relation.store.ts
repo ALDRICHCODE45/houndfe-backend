@@ -14,6 +14,7 @@ import type {
 } from '../application/chatbot-request-relations.service';
 import type { ChatbotRequestRow } from '../application/chatbot-request-commands.service';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
+import { enqueueMerged } from './chatbot-feed-writes';
 import { lockRequestRows, peekRequestRows } from './chatbot-request-writes';
 
 @Injectable()
@@ -50,8 +51,16 @@ export class PrismaChatbotRequestRelationStore implements ChatbotRequestRelation
     });
   }
 
-  /** Distinct postal codes, sorted, so two linkers always lock in one order. */
-  async lockZonesOfKey(customerKey: string): Promise<void> {
+  enqueueMerged(requestId: string, intoRequestId: string): Promise<void> {
+    return enqueueMerged(this.tx, this.tenantId, requestId, intoRequestId);
+  }
+
+  /**
+   * Distinct postal codes, sorted, so two linkers always lock in one order.
+   * Returns the codes it locked: the caller checks them against the zone rows
+   * it locks afterwards.
+   */
+  async lockZonesOfKey(customerKey: string): Promise<string[]> {
     const zips = await this.tx.$queryRaw<{ zipCode: string }[]>(Prisma.sql`
       SELECT DISTINCT dzr."zipCode"
       FROM "chatbot_requests" cr
@@ -62,16 +71,21 @@ export class PrismaChatbotRequestRelationStore implements ChatbotRequestRelation
     for (const { zipCode } of zips) {
       await lockZipCode(this.tx, this.tenantId, zipCode);
     }
+    return zips.map(({ zipCode }) => zipCode);
   }
 
   lockLinkSet(customerKey: string, anchorId: string): Promise<LinkRow[]> {
     return this.tx.$queryRaw<LinkRow[]>(Prisma.sql`
       SELECT cr."id", cr."folio", cr."kind"::text AS "kind",
              cr."subtype"::text AS "subtype", cr."status"::text AS "status",
-             cr."version", cr."customerKey", cr."customerId",
+             cr."version", cr."customerKey", cr."conversationRef",
+             cr."customerId",
              cr."assigneeUserId", cr."assigneeDisplayName", cr."claimedAt",
              cr."overdueAt", cr."closedAt", cr."humanDecisionId",
-             cr."deliveryZoneRequestId", cr."receiptEvidenceId"
+             cr."deliveryZoneRequestId", cr."receiptEvidenceId",
+             (SELECT dzr."zipCode" FROM "delivery_zone_requests" dzr
+               WHERE dzr."id" = cr."deliveryZoneRequestId"
+                 AND dzr."tenantId" = ${this.tenantId}) AS "zipCode"
       FROM "chatbot_requests" cr
       WHERE cr."tenantId" = ${this.tenantId}
         AND ((cr."customerKey" = ${customerKey} AND cr."customerId" IS NULL)

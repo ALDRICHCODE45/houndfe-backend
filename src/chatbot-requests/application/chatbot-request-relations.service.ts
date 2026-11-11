@@ -18,7 +18,10 @@
  *   link   - the postal-code lock of every zone request of the customer key
  *            first (sorted, rule 5's zone exception), then every unlinked
  *            request of that key in one `id`-ordered statement. The key never
- *            changes, so no group is touched.
+ *            changes, so no group is touched. A zone request created between
+ *            the zip locks and the row lock is DETECTED (its zip is not among
+ *            the locked ones): the transaction rolls back and the whole
+ *            command runs once more from the start; a second miss is 409.
  */
 import { createHash } from 'crypto';
 import { Inject, Injectable } from '@nestjs/common';
@@ -47,9 +50,22 @@ export const CHATBOT_REQUEST_RELATION_STORE = Symbol(
   'CHATBOT_REQUEST_RELATION_STORE',
 );
 
-/** A request locked by link-customer: the row plus its current customer. */
+/** A request locked by link-customer: the row plus its customer and its zip. */
 export interface LinkRow extends ChatbotRequestRow {
   customerId: string | null;
+  /** Postal code of a DELIVERY_ZONE request, `null` for any other. */
+  zipCode: string | null;
+}
+
+/**
+ * Internal, never leaves the service: link-customer locked a zone request
+ * whose postal code it had not locked first (it appeared after the zip locks).
+ * Throwing rolls the transaction back; `current` is for the 409 of a second miss.
+ */
+class LinkZoneRaceSignal extends Error {
+  constructor(readonly current: ReturnType<typeof currentOf>) {
+    super('link-customer: a zone request appeared after the zip locks');
+  }
 }
 
 /** Ports of the relation commands; they run on the command store's transaction. */
@@ -63,8 +79,16 @@ export interface ChatbotRequestRelationStore {
     requestId: string,
     event: ChatbotRequestEventDraft,
   ): Promise<void>;
-  /** Takes the postal-code locks of the key's zone requests, sorted. */
-  lockZonesOfKey(customerKey: string): Promise<void>;
+  /**
+   * `request.merged` feed item for the merge's source, on this transaction
+   * (feed rule 6: after the state change, before the group refresh).
+   */
+  enqueueMerged(requestId: string, intoRequestId: string): Promise<void>;
+  /**
+   * Takes the postal-code locks of the key's zone requests, sorted, and
+   * returns the codes it locked.
+   */
+  lockZonesOfKey(customerKey: string): Promise<string[]>;
   /** Locks the key's unlinked requests plus `anchorId`, in `id` order. */
   lockLinkSet(customerKey: string, anchorId: string): Promise<LinkRow[]>;
   findCustomer(customerId: string): Promise<{
@@ -88,6 +112,8 @@ interface Common {
   expectedVersion: number;
 }
 export interface MergeInput extends Common {
+  /** `update:ChatbotRequestAssignment`, from the caller's CASL ability. */
+  actorCanReassign: boolean;
   intoRequestId: string;
   intoExpectedVersion: number;
 }
@@ -164,6 +190,22 @@ export class ChatbotRequestRelationsService {
           }
         }
 
+        // `request.merged` names ONE conversation, so source and target must
+        // share it. Checked before any lock on what the peek saw, and again
+        // under the lock (in `merge`).
+        const [peekSource, peekTarget] = this.assertBoth(peeked, input);
+        if (
+          peekSource.conversationRef === null ||
+          peekTarget.conversationRef !== peekSource.conversationRef
+        ) {
+          throw new ChatbotRequestCommandError(
+            'MERGE_NOT_ALLOWED',
+            409,
+            currentOf(peekTarget),
+            { intoRequestId: input.intoRequestId },
+          );
+        }
+
         const locked = await this.relations.lockRequests(ids);
         const [source, target] = this.assertBoth(locked, input);
         if (this.hasWrappedLink(source) || this.hasWrappedLink(target)) {
@@ -174,6 +216,7 @@ export class ChatbotRequestRelationsService {
           { ...pick(target), state: toState(target) },
           {
             actor,
+            actorCanReassign: input.actorCanReassign,
             expectedVersion: input.expectedVersion,
             intoExpectedVersion: input.intoExpectedVersion,
             now: new Date(),
@@ -195,6 +238,7 @@ export class ChatbotRequestRelationsService {
           result.source.event,
         );
         await this.relations.recordEvent(target.id, result.target.event);
+        await this.relations.enqueueMerged(source.id, target.id);
         await this.commands.refreshGroups([source.customerKey]);
         return toRequestView({
           ...source,
@@ -210,7 +254,29 @@ export class ChatbotRequestRelationsService {
    * linked, or an `unknown:` key), 422 CUSTOMER_PHONE_MISMATCH. Links the
    * request and every other unlinked request of the same customer key.
    */
-  linkCustomer(input: LinkCustomerInput): Promise<ChatbotRequestView> {
+  async linkCustomer(input: LinkCustomerInput): Promise<ChatbotRequestView> {
+    try {
+      return await this.linkOnce(input);
+    } catch (error) {
+      if (!(error instanceof LinkZoneRaceSignal)) throw error;
+    }
+    // The first attempt rolled back, nothing is stored: run it again from the
+    // start, which now locks the new zip first. A second miss is a conflict.
+    try {
+      return await this.linkOnce(input);
+    } catch (error) {
+      if (error instanceof LinkZoneRaceSignal) {
+        throw new ChatbotRequestCommandError(
+          'VERSION_CONFLICT',
+          409,
+          error.current,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private linkOnce(input: LinkCustomerInput): Promise<ChatbotRequestView> {
     const hash = hashOf([
       'link-customer',
       input.requestId,
@@ -230,15 +296,24 @@ export class ChatbotRequestRelationsService {
         if (!peek) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
 
         // Zone rule (model doc, rule 5): postal codes before request rows.
-        if (!isUnknownKey(peek.customerKey)) {
-          await this.relations.lockZonesOfKey(peek.customerKey);
-        }
+        const zipsLocked = new Set<string>(
+          isUnknownKey(peek.customerKey)
+            ? []
+            : await this.relations.lockZonesOfKey(peek.customerKey),
+        );
         const rows = await this.relations.lockLinkSet(
           peek.customerKey,
           input.requestId,
         );
         const anchor = rows.find((row) => row.id === input.requestId);
         if (!anchor) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+        // A zone request created after the zip locks was locked without its
+        // zip: roll back and let `linkCustomer` retry from the start.
+        if (
+          rows.some((r) => r.zipCode !== null && !zipsLocked.has(r.zipCode))
+        ) {
+          throw new LinkZoneRaceSignal(currentOf(anchor));
+        }
         const result = linkCustomer(toState(anchor), {
           actor,
           expectedVersion: input.expectedVersion,
@@ -301,4 +376,5 @@ const pick = (row: ChatbotRequestRow) => ({
   id: row.id,
   folio: row.folio,
   customerKey: row.customerKey,
+  conversationRef: row.conversationRef,
 });

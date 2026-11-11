@@ -92,7 +92,7 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 422 | `ACTION_NOT_ALLOWED` | Release of a `NEW` request; reassign of a `NEW` request or to the current assignee | ✓ |
 | 422 | `CANCEL_NOT_ALLOWED` | Cancel of a `DECISION` (stock, expiry, zone, receipt: close it with its negative action instead), or of a conversation that already ended | ✓ |
 | 422 | `USER_NOT_ASSIGNABLE` | `toUserId` is not an active member with `read:ChatbotRequest` and `update:ChatbotRequest` (an update-only user is refused) | — |
-| 422 | `MERGE_NOT_ALLOWED` | `merge` rule not met (section 3.5) | ✓ |
+| 422 / 409 | `MERGE_NOT_ALLOWED` | `merge` rule not met (section 3.5); `409` for a different or missing conversation | ✓ |
 | 422 | `CUSTOMER_PHONE_MISMATCH` | `link-customer` to a customer whose phone is not the request's (section 3.6) | ✓ |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
@@ -152,19 +152,23 @@ Body: `{ "expectedVersion": 2 }`. `IN_PROGRESS` → `NEW`, assignee cleared, `ve
 { "expectedVersion": 2, "intoRequestId": "9d1e…", "intoExpectedVersion": 4 }
 ```
 
-`:id` is the request that **disappears** (the source); `intoRequestId` is the one that stays. Candidates, with their `id` and `version`, come from `GET /chatbot-requests/:id/merge-candidates` (handoff 14, section 10); `MERGE` is in `allowedActions` only when there is at least one.
+`:id` is the request that **disappears** (the source); `intoRequestId` is the one that stays. Candidates, with their `id` and `version`, come from `GET /chatbot-requests/:id/merge-candidates` (handoff 14, section 10); `MERGE` is in `allowedActions` only when the caller may merge this request **and** there is at least one candidate.
 
-- Rules (§12.11): same customer, same subtype, both open, only `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never a decision), and neither with a started live session. Who holds either request does **not** matter.
+- **`intoExpectedVersion` is required** (v1.2 deviation from contract §12.11, which lists only `expectedVersion` and `intoRequestId`): the version of the request that stays, so a merge never lands on one that changed under you (for example, a colleague just took it). Missing → `400`. It is only checked: the target's `version` does **not** go up.
+- **Rules** (§12.11): same customer, same subtype, both open, only `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never a decision), neither with a started live session, and **both in the same conversation**: the same non-null `conversationRef` (a merge across conversations, or of a request with none, is `409 MERGE_NOT_ALLOWED`). The candidate list already applies all of these.
+- **Who may merge.** Merging a request **held by someone else** needs `update:ChatbotRequestAssignment`, exactly like cancelling it (owner decision; same check order as `cancel`): without it, `403 NOT_ASSIGNEE` with the current holder. The holder merges their own request with plain `update:ChatbotRequest`. Who holds the **target** does not matter.
 - Result `200 {request}` is the **source**: `status: CANCELLED`, `closedAt` set, `version` + 1 (the cancel reason is `SUPERSEDED`, not a staff reason). Both requests get a `MERGED` audit event (`data.role` is `SOURCE` or `TARGET`, with the other request's id and folio). **The target's `version` does not change** (reload it only if you show it): so two sources merged into one target at once both succeed.
 - If the source was held by someone **else**, that person gets an in-app notice "Otra persona la unió con otra solicitud del cliente". Nobody is notified when you merge your own.
-- The bot is **not** told at merge time (no feed item): see the open question in `docs/chatbot-requests-model.md`.
+- **The bot is told** with one informational feed item `request.merged {requestId, intoRequestId, conversationRef}`, created in the same transaction (nothing is created when the merge is rejected). When the target is answered later only the target gets an answer; nothing is sent for the source. See `docs/chatbot-handoff/chatbot-requests-bot-contract.md`.
 - Errors, in the order they are checked (the first failure answers):
 
   | Status | `code` | When | `current` |
   | --- | --- | --- | --- |
   | `404` | `NOT_FOUND` | `:id` or `intoRequestId` does not exist in this sucursal (the other sucursal's id answers the same) | — |
   | `422` | `MERGE_NOT_ALLOWED` | A wrapped subtype (stock, expiry, zone, receipt, discount), checked first and before anything is locked | the failing request |
+  | `409` | `MERGE_NOT_ALLOWED` | The two are not in the same conversation, or one has none; also checked before anything is locked (and again under the lock) | the target, plus `intoRequestId` |
   | `409` | `REQUEST_CLOSED` | The source is already closed | source |
+  | `403` | `NOT_ASSIGNEE` | The source is held by someone else and you lack `update:ChatbotRequestAssignment` | source |
   | `409` | `VERSION_CONFLICT` | `expectedVersion` is stale | source |
   | `422` | `MERGE_NOT_ALLOWED` | Merged into itself, another subtype, another customer, a closed target or a started session on either | source (or target) |
   | `409` | `VERSION_CONFLICT` | `intoExpectedVersion` is stale | **the target**, and the body adds `intoRequestId` so you can tell which side moved |
@@ -177,20 +181,22 @@ Body: `{ "expectedVersion": 2 }`. `IN_PROGRESS` → `NEW`, assignee cleared, `ve
 { "expectedVersion": 1, "customerId": "0c1d…" }
 ```
 
-R1: when several customers share the request's phone, the bot leaves it unlinked (`customer.ambiguous: true` in the detail) and staff picks one of `customer.candidates[]` (handoff 14, section 8). `LINK_CUSTOMER` in `allowedActions` says the button applies.
+R1: when several customers share the request's phone, the bot leaves it unlinked (`customer.ambiguous: true` in the detail) and staff picks one of `customer.candidates[]` (handoff 14, section 8). `LINK_CUSTOMER` in `allowedActions` says the button applies: the request is open, has no customer, has a phone identity **and at least one candidate customer exists**.
 
 - The server checks that the customer belongs to this sucursal **and** that its canonical phone is the request's phone (`521…` and `52…` are the same number). The user does **not** need `read:CustomerPhone`: the candidates come masked and the server proves the match.
 - Result `200 {request}`: the request, `version` + 1 and a `CUSTOMER_LINKED` audit event. It also links **every other request of the same phone that has no customer** (open or closed) and clears their ambiguity, with a `CUSTOMER_LINKED` event each; those other requests keep their `version`. The phone does not change, so inbox groups do not move: reload the detail to show the customer card.
 - Allowed on an open request whoever holds it. Not for a request that already has a customer, nor a legacy `unknown:` request (no phone to match): `422 ACTION_NOT_ALLOWED`.
-- Errors, in order:
+- Errors, **in the order the code checks them** (the first failure answers):
 
   | Status | `code` | When | `current` |
   | --- | --- | --- | --- |
-  | `404` | `NOT_FOUND` | The request does not exist here, or the `customerId` does not exist **in this sucursal** (a customer of another sucursal answers the same, even with the same phone) | — |
+  | `404` | `NOT_FOUND` | The request does not exist in this sucursal (another sucursal's id answers the same) | — |
   | `409` | `REQUEST_CLOSED` | The request is closed | ✓ |
   | `409` | `VERSION_CONFLICT` | `expectedVersion` is stale (also when a claim got there first) | ✓ |
   | `422` | `ACTION_NOT_ALLOWED` | Already linked, or an `unknown:` request | ✓ |
+  | `404` | `NOT_FOUND` | The `customerId` does not exist **in this sucursal** (a customer of another sucursal answers the same, even with the same phone). Checked **after** the request's own state, so a closed or stale request answers its state error, not this one | — |
   | `422` | `CUSTOMER_PHONE_MISMATCH` | The customer's phone is not the request's phone (or the customer has none) | ✓ |
+  | `409` | `VERSION_CONFLICT` | Very rare: a request of the same phone with a delivery zone was created at the very moment you linked, and it happened twice in a row. Nothing was changed; reload and retry | ✓ |
 
 - Two people linking the same phone at once: one wins; the other gets `422 ACTION_NOT_ALLOWED` (already linked). A claim of another request of the same phone at the same moment succeeds and keeps its claim.
 

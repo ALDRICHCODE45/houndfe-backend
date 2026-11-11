@@ -612,6 +612,7 @@ const side = (
   id,
   folio: id === 'a' ? 10 : 11,
   customerKey: '525512345678',
+  conversationRef: 'wa:525512345678',
   state: request({
     kind: 'CLARIFICATION',
     subtype: 'UNKNOWN_QUESTION',
@@ -622,6 +623,7 @@ const side = (
 });
 const mergeCmd = {
   actor: ana,
+  actorCanReassign: false,
   expectedVersion: 2,
   intoExpectedVersion: 2,
   now,
@@ -681,9 +683,73 @@ describe('merge (§12.11)', () => {
     },
   );
 
-  it('merges a request held by someone else (the assignee is notified, not blocked)', () => {
-    const held = side('a', { status: 'IN_PROGRESS', assignee: juan });
-    expect(merge(held, side('b'), mergeCmd).ok).toBe(true);
+  describe('a source held by someone else (same rule as cancelByStaff, M5)', () => {
+    const held = () => side('a', { status: 'IN_PROGRESS', assignee: juan });
+
+    it('is refused with 403 NOT_ASSIGNEE without update:ChatbotRequestAssignment', () => {
+      const result = mergeFail(merge(held(), side('b'), mergeCmd));
+      expect(result).toMatchObject({
+        on: 'SOURCE',
+        error: {
+          code: 'NOT_ASSIGNEE',
+          httpStatus: 403,
+          current: { version: 2, claimedBy: { id: juan.userId } },
+        },
+      });
+    });
+
+    it('is allowed with the assignment permission', () => {
+      expect(
+        merge(held(), side('b'), { ...mergeCmd, actorCanReassign: true }).ok,
+      ).toBe(true);
+    });
+
+    it('is allowed for the holder without the permission', () => {
+      const mine = side('a', { status: 'IN_PROGRESS', assignee: ana });
+      expect(merge(mine, side('b'), mergeCmd).ok).toBe(true);
+    });
+
+    it('answers REQUEST_CLOSED before NOT_ASSIGNEE and NOT_ASSIGNEE before VERSION_CONFLICT', () => {
+      const closed = side('a', { status: 'CANCELLED', assignee: juan });
+      expect(mergeFail(merge(closed, side('b'), mergeCmd)).error.code).toBe(
+        'REQUEST_CLOSED',
+      );
+      expect(
+        mergeFail(merge(held(), side('b'), { ...mergeCmd, expectedVersion: 1 }))
+          .error.code,
+      ).toBe('NOT_ASSIGNEE');
+    });
+
+    it('does not matter who holds the target', () => {
+      const heldTarget = side('b', { status: 'IN_PROGRESS', assignee: juan });
+      expect(merge(side('a'), heldTarget, mergeCmd).ok).toBe(true);
+    });
+  });
+
+  describe('same-conversation rule (request.merged needs one conversation)', () => {
+    it.each([
+      ['another conversation', { conversationRef: 'wa:525599999999' }],
+      ['no conversation on the target', { conversationRef: null }],
+    ])('refuses %s with 409 MERGE_NOT_ALLOWED', (_label, extra) => {
+      const result = mergeFail(
+        merge(side('a'), side('b', {}, extra), mergeCmd),
+      );
+      expect(result).toMatchObject({
+        on: 'TARGET',
+        error: { code: 'MERGE_NOT_ALLOWED', httpStatus: 409 },
+      });
+    });
+
+    it('refuses a source with no conversation, even when the target has none either', () => {
+      const none = { conversationRef: null };
+      const result = mergeFail(
+        merge(side('a', {}, none), side('b', {}, none), mergeCmd),
+      );
+      expect(result.error).toMatchObject({
+        code: 'MERGE_NOT_ALLOWED',
+        httpStatus: 409,
+      });
+    });
   });
 
   it.each([

@@ -21,6 +21,8 @@ const row = (id: string, over: Partial<LinkRow> = {}): LinkRow => ({
   status: 'NEW',
   version: 2,
   customerKey: KEY,
+  conversationRef: `wa:${KEY}`,
+  zipCode: null,
   customerId: null,
   assigneeUserId: null,
   assigneeDisplayName: null,
@@ -40,7 +42,12 @@ function fakes(
     phoneCountryCode: '52',
     phone: '5512345678',
   },
+  /** Zips `lockZonesOfKey` takes, per call (the last one repeats). */
+  zipsLocked: string[][] = [[]],
 ) {
+  let zoneCalls = 0;
+  /** Runs once after the first peek returns (a change between peek and lock). */
+  const hooks: { afterFirstPeek?: () => void } = {};
   const calls: string[] = [];
   const receipts = new Map<
     string,
@@ -82,7 +89,13 @@ function fakes(
   const relations: ChatbotRequestRelationStore = {
     peekRequests: (ids) => {
       calls.push('peek');
-      return Promise.resolve(rows.filter((r) => ids.includes(r.id)));
+      const seen = rows
+        .filter((r) => ids.includes(r.id))
+        .map((r) => ({ ...r }));
+      const hook = hooks.afterFirstPeek;
+      hooks.afterFirstPeek = undefined;
+      hook?.();
+      return Promise.resolve(seen);
     },
     lockRequests: (ids) => {
       calls.push(`lockRequests:${[...ids].sort().join(',')}`);
@@ -98,6 +111,11 @@ function fakes(
     },
     lockZonesOfKey: () => {
       calls.push('lockZonesOfKey');
+      const zips = zipsLocked[Math.min(zoneCalls++, zipsLocked.length - 1)];
+      return Promise.resolve(zips);
+    },
+    enqueueMerged: (source, target) => {
+      calls.push(`enqueueMerged:${source}->${target}`);
       return Promise.resolve();
     },
     lockLinkSet: () => {
@@ -117,6 +135,7 @@ function fakes(
   };
   return {
     service: new ChatbotRequestRelationsService(commands, relations),
+    hooks,
     calls,
   };
 }
@@ -126,6 +145,7 @@ const mergeInput = (over = {}) => ({
   intoRequestId: 'b',
   actorUserId: ANA.userId,
   idempotencyKey: IDEM,
+  actorCanReassign: false,
   expectedVersion: 2,
   intoExpectedVersion: 2,
   ...over,
@@ -161,11 +181,64 @@ describe('ChatbotRequestRelationsService.merge', () => {
       'lockRequests:a,b',
       'applyPatch:a:v3',
       'recordEvent:b:MERGED:v2',
+      'enqueueMerged:a->b',
       'refreshGroups:' + KEY,
       'saveReceipt',
       'commit',
     ]);
     expect(view).toMatchObject({ id: 'a', status: 'CANCELLED', version: 3 });
+  });
+
+  it('refuses a source held by someone else without the assignment permission (403) before any write', async () => {
+    const held = {
+      assigneeUserId: 'u-luis',
+      assigneeDisplayName: 'Luis',
+      status: 'IN_PROGRESS' as const,
+    };
+    const { service, calls } = fakes([row('a', held), row('b')]);
+    const error = await failure(service.merge(mergeInput()));
+    expect(error).toMatchObject({ code: 'NOT_ASSIGNEE', httpStatus: 403 });
+    expect(calls.some((c) => c.startsWith('applyPatch'))).toBe(false);
+    expect(calls.some((c) => c.startsWith('enqueueMerged'))).toBe(false);
+    expect(calls).not.toContain('saveReceipt');
+    const allowed = fakes([row('a', held), row('b')]);
+    await expect(
+      allowed.service.merge(mergeInput({ actorCanReassign: true })),
+    ).resolves.toMatchObject({ id: 'a', status: 'CANCELLED' });
+  });
+
+  it.each([
+    ['another conversation', { conversationRef: 'wa:525599999999' }],
+    ['no conversation on the target', { conversationRef: null }],
+  ])('refuses %s with 409 BEFORE any request lock', async (_label, over) => {
+    const { service, calls } = fakes([row('a'), row('b', over)]);
+    const error = await failure(service.merge(mergeInput()));
+    expect(error).toMatchObject({ code: 'MERGE_NOT_ALLOWED', httpStatus: 409 });
+    expect(calls.some((c) => c.startsWith('lockRequests'))).toBe(false);
+    expect(calls.some((c) => c.startsWith('enqueueMerged'))).toBe(false);
+    expect(calls).not.toContain('saveReceipt');
+  });
+
+  it('refuses a source with no conversation before any lock', async () => {
+    const none = { conversationRef: null };
+    const { service, calls } = fakes([row('a', none), row('b', none)]);
+    const error = await failure(service.merge(mergeInput()));
+    expect(error).toMatchObject({ code: 'MERGE_NOT_ALLOWED', httpStatus: 409 });
+    expect(calls.some((c) => c.startsWith('lockRequests'))).toBe(false);
+  });
+
+  it('re-checks the conversation under the lock (it changed after the peek)', async () => {
+    const rows = [row('a'), row('b')];
+    const f = fakes(rows);
+    // the peek saw equal refs; by the time the rows are locked, they differ
+    f.hooks.afterFirstPeek = () => {
+      rows[1].conversationRef = 'wa:525500000000';
+    };
+    const error = await failure(f.service.merge(mergeInput()));
+    expect(error).toMatchObject({ code: 'MERGE_NOT_ALLOWED', httpStatus: 409 });
+    expect(f.calls.some((c) => c.startsWith('lockRequests'))).toBe(true);
+    expect(f.calls.some((c) => c.startsWith('enqueueMerged'))).toBe(false);
+    expect(f.calls).not.toContain('saveReceipt');
   });
 
   it('merging B into A locks the same pair in the same order (no crossing)', async () => {
@@ -250,6 +323,60 @@ describe('ChatbotRequestRelationsService.merge', () => {
     await service.merge(mergeInput());
     const error = await failure(service.linkCustomer(linkInput()));
     expect(error.code).toBe('IDEMPOTENCY_CONFLICT');
+  });
+});
+
+describe('ChatbotRequestRelationsService.linkCustomer: a zone request that appeared after the zip locks', () => {
+  const zone = (id: string, zipCode: string) =>
+    row(id, { zipCode, deliveryZoneRequestId: `dz-${id}` });
+
+  it('links normally when every zone row of the set has its zip locked', async () => {
+    const { service, calls } = fakes(
+      [row('a'), zone('b', '01000')],
+      undefined,
+      [['01000']],
+    );
+    await expect(service.linkCustomer(linkInput())).resolves.toMatchObject({
+      id: 'a',
+    });
+    expect(calls.filter((c) => c === 'begin')).toHaveLength(1);
+  });
+
+  it('rolls back and retries the whole operation once, taking the new zip lock the second time', async () => {
+    const { service, calls } = fakes(
+      [row('a'), zone('b', '01000')],
+      undefined,
+      [[], ['01000']],
+    );
+    await expect(service.linkCustomer(linkInput())).resolves.toMatchObject({
+      id: 'a',
+      version: 3,
+    });
+    expect(calls.filter((c) => c === 'begin')).toHaveLength(2);
+    // the first attempt wrote nothing and stored no receipt
+    const firstCommit = calls.indexOf('begin', 1);
+    expect(
+      calls.slice(0, firstCommit).some((c) => c.startsWith('applyPatch')),
+    ).toBe(false);
+    expect(calls.filter((c) => c === 'saveReceipt')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'commit')).toHaveLength(1);
+  });
+
+  it('answers 409 VERSION_CONFLICT with the current row when it happens again', async () => {
+    const { service, calls } = fakes(
+      [row('a'), zone('b', '01000')],
+      undefined,
+      [[]],
+    );
+    const error = await failure(service.linkCustomer(linkInput()));
+    expect(error).toMatchObject({
+      code: 'VERSION_CONFLICT',
+      httpStatus: 409,
+      current: { version: 2, status: 'NEW' },
+    });
+    expect(calls.filter((c) => c === 'begin')).toHaveLength(2);
+    expect(calls.some((c) => c.startsWith('applyPatch'))).toBe(false);
+    expect(calls).not.toContain('saveReceipt');
   });
 });
 

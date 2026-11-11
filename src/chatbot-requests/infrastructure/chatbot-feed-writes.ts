@@ -20,6 +20,7 @@ import { Prisma } from '@prisma/client';
 import {
   buildAnswerPayload,
   buildCancelPayload,
+  buildMergedPayload,
   FEED_CHANNEL,
   FEED_TYPE,
   type AnswerSource,
@@ -251,6 +252,39 @@ export async function enqueueCancelled(
       type: FEED_TYPE.cancelled,
       conversationRef: request.conversationRef,
       payload: buildCancelPayload({ requestId, reason, customerNote }),
+    },
+  ]);
+}
+
+/**
+ * `request.merged` (§3.5): the merge's source request, already CANCELLED, was
+ * closed into `intoRequestId`. Only the target is answered later (no fan-out),
+ * so this is the bot's single signal for the source. The caller has checked
+ * that source and target share one non-null `conversationRef`.
+ */
+export async function enqueueMerged(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  intoRequestId: string,
+): Promise<void> {
+  const request = await tx.chatbotRequest.findFirst({
+    where: { tenantId, id: requestId, status: 'CANCELLED' },
+    select: { conversationRef: true },
+  });
+  if (!request?.conversationRef) {
+    throw new Error('feed merged: the source has no conversation to tell');
+  }
+  await insertFeedItems(tx, tenantId, [
+    {
+      requestId,
+      type: FEED_TYPE.merged,
+      conversationRef: request.conversationRef,
+      payload: buildMergedPayload({
+        requestId,
+        intoRequestId,
+        conversationRef: request.conversationRef,
+      }),
     },
   ]);
 }

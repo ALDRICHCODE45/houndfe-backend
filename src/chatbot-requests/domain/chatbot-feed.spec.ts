@@ -3,6 +3,7 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   buildAnswerPayload,
   buildCancelPayload,
+  buildMergedPayload,
   classifyOutcome,
   deferredReasonOf,
   FEED_LIMITS,
@@ -627,6 +628,94 @@ describe('request.cancelled payload (§12.14)', () => {
       reason: 'OTHER',
       cancelledBy: 'STAFF',
       customerNote: 'Lo vemos mañana',
+    });
+  });
+});
+
+describe('request.merged (informational feed item)', () => {
+  it('is its own feed type', () => {
+    expect(FEED_TYPE.merged).toBe('request.merged');
+  });
+
+  it('carries the source, the target and the conversation, and nothing else', () => {
+    expect(
+      buildMergedPayload({
+        requestId: 'src',
+        intoRequestId: 'dst',
+        conversationRef: 'wa:525512345678',
+      }),
+    ).toEqual({
+      requestId: 'src',
+      intoRequestId: 'dst',
+      conversationRef: 'wa:525512345678',
+    });
+  });
+
+  describe('outcomes: only STALE is allowed', () => {
+    const merged = {
+      type: FEED_TYPE.merged,
+      attemptId: null,
+      evidenceHash: null,
+      ackedAt: null,
+    };
+    const body = (outcome: string) =>
+      parseFeedOutcome({
+        attemptId: ATTEMPT,
+        outcome,
+        ...(outcome === 'PROVIDER_ACCEPTED'
+          ? { providerMessageId: 'w1', attemptedAt: AT }
+          : outcome === 'STALE'
+            ? {}
+            : { attemptedAt: AT }),
+      });
+
+    it('accepts STALE', () => {
+      const stale = body('STALE');
+      expect(classifyOutcome(merged, stale, hashFeedOutcome(stale))).toBe(
+        'APPLY',
+      );
+    });
+
+    it.each([
+      'PROVIDER_ACCEPTED',
+      'DELIVERY_UNKNOWN',
+      'DEFERRED_WINDOW_CLOSED',
+      'DEFERRED_HUMAN_SESSION',
+    ])('refuses %s with OUTCOME_NOT_ALLOWED', (outcome) => {
+      const input = body(outcome);
+      expect(classifyOutcome(merged, input, hashFeedOutcome(input))).toBe(
+        'OUTCOME_NOT_ALLOWED',
+      );
+    });
+
+    it('does not turn a replay or a second terminal outcome into a 422', () => {
+      const stale = body('STALE');
+      const hash = hashFeedOutcome(stale);
+      const acked = {
+        ...merged,
+        attemptId: ATTEMPT,
+        evidenceHash: hash,
+        ackedAt: new Date(AT),
+      };
+      expect(classifyOutcome(acked, stale, hash)).toBe('REPLAY');
+      const other = parseFeedOutcome({
+        attemptId: OTHER_ATTEMPT,
+        outcome: 'STALE',
+      });
+      expect(classifyOutcome(acked, other, hashFeedOutcome(other))).toBe(
+        'OUTCOME_ALREADY_RECORDED',
+      );
+    });
+
+    it('leaves the other types as they were (answered accepts PROVIDER_ACCEPTED)', () => {
+      const accepted = body('PROVIDER_ACCEPTED');
+      expect(
+        classifyOutcome(
+          { ...merged, type: FEED_TYPE.answered },
+          accepted,
+          hashFeedOutcome(accepted),
+        ),
+      ).toBe('APPLY');
     });
   });
 });

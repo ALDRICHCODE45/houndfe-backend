@@ -165,6 +165,7 @@ export interface ChatbotRequestRow {
   status: ChatbotRequestStatus;
   version: number;
   customerKey: string;
+  conversationRef: string | null;
   assigneeUserId: string | null;
   assigneeDisplayName: string | null;
   claimedAt: Date | null;

@@ -1,4 +1,8 @@
-import { canonicalPhone, phoneLookupVariants } from './canonical-phone';
+import {
+  phoneLookupPairs,
+  canonicalPhone,
+  phoneLookupVariants,
+} from './canonical-phone';
 
 describe('canonicalPhone (R1)', () => {
   it.each([
@@ -91,5 +95,39 @@ describe('phoneLookupVariants (R1: stored customer phones)', () => {
       countryCodes: [],
       phones: [],
     });
+  });
+});
+
+describe('phoneLookupPairs (exact stored forms of one canonical key)', () => {
+  it('lists only (countryCode, phone) pairs whose canonical form is the key', () => {
+    const pairs = phoneLookupPairs('52', '5512345678');
+    expect(pairs).toEqual(
+      expect.arrayContaining([
+        { phoneCountryCode: '52', phone: '5512345678' },
+        { phoneCountryCode: '521', phone: '5512345678' },
+        { phoneCountryCode: '52', phone: '15512345678' },
+        { phoneCountryCode: '52', phone: '525512345678' },
+        { phoneCountryCode: '521', phone: '5215512345678' },
+      ]),
+    );
+    for (const { phoneCountryCode, phone } of pairs) {
+      expect(canonicalPhone(phoneCountryCode, phone)).toBe('525512345678');
+    }
+  });
+
+  it('is empty when the number has no canonical form', () => {
+    expect(phoneLookupPairs('52', 'abc')).toEqual([]);
+  });
+
+  it('covers NANP and other countries', () => {
+    expect(phoneLookupPairs('1', '2025550123')).toEqual(
+      expect.arrayContaining([
+        { phoneCountryCode: '1', phone: '2025550123' },
+        { phoneCountryCode: '1', phone: '12025550123' },
+      ]),
+    );
+    expect(phoneLookupPairs('44', '7911123456')).toEqual([
+      { phoneCountryCode: '44', phone: '7911123456' },
+    ]);
   });
 });

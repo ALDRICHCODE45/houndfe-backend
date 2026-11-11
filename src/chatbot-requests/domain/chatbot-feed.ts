@@ -10,6 +10,8 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 export const FEED_TYPE = {
   answered: 'request.answered',
   cancelled: 'request.cancelled',
+  /** Informational: a staff merge closed this request into another (§3.5). */
+  merged: 'request.merged',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -253,6 +255,12 @@ export function classifyOutcome(
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
+  // `request.merged` says something to the bot, never to the customer: there is
+  // nothing to send, accept or defer. The only thing the bot may report is
+  // that it no longer cares (STALE).
+  if (current.type === FEED_TYPE.merged && input.outcome !== 'STALE') {
+    return 'OUTCOME_NOT_ALLOWED';
+  }
   return 'APPLY';
 }
 
@@ -432,5 +440,21 @@ export function buildCancelPayload(input: {
     reason: input.reason,
     cancelledBy: 'STAFF',
     ...(input.customerNote ? { customerNote: input.customerNote } : {}),
+  };
+}
+
+/**
+ * `request.merged` (§3.5, agreed with the chatbot): the source request was
+ * closed into the target by staff. Ids and the conversation only, no text.
+ */
+export function buildMergedPayload(input: {
+  requestId: string;
+  intoRequestId: string;
+  conversationRef: string;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    intoRequestId: input.intoRequestId,
+    conversationRef: input.conversationRef,
   };
 }

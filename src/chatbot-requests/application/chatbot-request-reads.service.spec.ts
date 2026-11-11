@@ -285,22 +285,15 @@ describe('ChatbotRequestReadsService', () => {
       build({
         findDetail: jest.fn().mockResolvedValue(detail(zoneImpact)),
       }).detail({ userId: 'u', ability }, 'r-1');
-    // the fixture has no customer, so linking one is offered too
-    expect((await view(null)).allowedActions).toEqual([
-      'CLAIM',
-      'LINK_CUSTOMER',
-    ]);
+    // the fixture has no candidate customer, so LINK_CUSTOMER is not offered
+    expect((await view(null)).allowedActions).toEqual(['CLAIM']);
     const impact = {
       validationId: 'v-1',
       requests: 2,
       customers: 2,
       setVersion: 2,
     };
-    expect((await view(impact)).allowedActions).toEqual([
-      'CLAIM',
-      'RESOLVE',
-      'LINK_CUSTOMER',
-    ]);
+    expect((await view(impact)).allowedActions).toEqual(['CLAIM', 'RESOLVE']);
     expect((await view(impact)).zoneImpact).toEqual(impact);
   });
 
@@ -496,6 +489,14 @@ describe('ChatbotRequestReadsService', () => {
         'CANCEL',
       ]);
       expect((await view({ can: () => false })).allowedActions).toEqual([]);
+    });
+
+    it('offers LINK_CUSTOMER only when at least one candidate customer exists', async () => {
+      const none = await build({
+        findDetail: jest.fn().mockResolvedValue(detail({ candidates: [] })),
+      }).detail({ userId: 'u', ability: UPDATE as never }, 'r-1');
+      expect(none.allowedActions).toEqual(['CLAIM', 'MERGE', 'CANCEL']);
+      expect((await view(UPDATE)).allowedActions).toContain('LINK_CUSTOMER');
     });
 
     it('hides both when there is no candidate request and the customer is linked', async () => {

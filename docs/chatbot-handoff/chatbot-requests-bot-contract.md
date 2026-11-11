@@ -166,6 +166,7 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 | --- | --- | --- |
 | `request.answered` | Staff resolved a wrapped decision (stock, expiration, delivery zone, transfer receipt), from the new `resolve` command or from the old staff routes | `{kind: "DECISION", subtype, action, legacyId, text, prefix, …fields}` below |
 | `request.cancelled` | Staff cancelled a request (§12.14); no message of its own | `{requestId, reason, cancelledBy: "STAFF", customerNote?}` |
+| `request.merged` | Staff merged this request into another open one of the same customer, subtype **and conversation** (§3.5, §12.11). Informational | `{requestId, intoRequestId, conversationRef}` |
 
 `conversationRef` is the request's (`null` when the request has none, e.g. a stock request created without one). `legacyId` is the id the bot already tracks from the create answer (`legacy.id`: the human decision, the zone requester or the receipt).
 
@@ -199,6 +200,8 @@ Structured fields (always present unless marked): `kind`, `subtype`, `action`, `
 - A customer who cancelled the request (`POST /requests/:id/cancel`) gets **no** item when staff later resolves the old row (the customer withdrew); drop your pending record, as the cancel section says.
 - **`request.cancelled` (§12.14).** `reason` is `DUPLICATE`, `NOT_ACTIONABLE`, `CUSTOMER_UNREACHABLE` or `OTHER`. Forget the pending state of that request. `DUPLICATE`: send nothing, ACK `STALE`. The other reasons: send a short notice (`customerNote`, when present and the 24 h window is open, goes as written with the team prefix instead of the generic notice) and ACK `PROVIDER_ACCEPTED` with the `providerMessageId`; with the window closed send nothing and ACK `STALE`. **Never `DEFERRED_WINDOW_CLOSED` for this type**: it is refused with `422 OUTCOME_NOT_ALLOWED`.
 
+- **`request.merged` (§3.5, §12.11; agreed with the chatbot).** `requestId` is the request that was merged away (now `CANCELLED`, reason `SUPERSEDED`); `intoRequestId` is the one that stays open. Both have the **same** `conversationRef` (the backend refuses a merge across conversations, or when either has none, with `409 MERGE_NOT_ALLOWED`), so this item is addressed to one conversation: the item's own `conversationRef` equals the payload's. There is **nothing to send to the customer**. Treat `requestId` as an alias of `intoRequestId`: whatever you were waiting on for the first one, wait on the second. **Only the target is answered later**: when it is resolved you get one `request.answered` for `intoRequestId`, and **none** for `requestId` (no fan-out; this replaces §3.5's "salen entregas para las dos"). The only outcome you may report is **`STALE`**; `PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN`, `DEFERRED_WINDOW_CLOSED` and `DEFERRED_HUMAN_SESSION` are refused with `422 OUTCOME_NOT_ALLOWED`. It is enqueued in the same transaction as the merge, so it exists if and only if the merge committed (a rejected merge leaves no item).
+
 ### `POST /chatbot-api/deliveries/:deliveryId/outcome`
 
 Scope `feed:ack`, class `write`. Send it **after** the local effect (the message was accepted by Meta, or you decided not to send). One call per attempt:
@@ -224,7 +227,7 @@ Exactly those keys; an unknown key, a missing required key, a key an outcome for
 | `200` | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` replayed after the delivery was accepted): it changes nothing |
 | `409 IDEMPOTENCY_CONFLICT` | An `attemptId` this delivery already applied, sent with other evidence |
 | `409 OUTCOME_ALREADY_RECORDED` | A **new** `attemptId` after a terminal outcome (`PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` or `STALE`; a deferral is not terminal) |
-| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery |
+| `422 OUTCOME_NOT_ALLOWED` | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery; **any outcome except `STALE` for a `request.merged` delivery** |
 | `404 NOT_FOUND` (`message: "Delivery not found"`) | Unknown delivery, or one of another branch |
 | `400 VALIDATION_ERROR` | Body or `deliveryId` malformed |
 | `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget |
@@ -267,6 +270,8 @@ The proposal leaves these open; this is what the backend does, and the bot shoul
 2. **`providerMessageId` is rejected (`400`) for `DEFERRED_WINDOW_CLOSED`, `DEFERRED_HUMAN_SESSION` and `STALE`.** No message was accepted in those cases. It is required for `PROVIDER_ACCEPTED` and optional for `DELIVERY_UNKNOWN` (audit only).
 3. **`422 OUTCOME_NOT_ALLOWED`: `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` delivery.** §12.14 says the bot never defers a cancellation notice (a closure notice days later only annoys the customer); the reason for waiting does not change that, so the backend enforces it for both deferrals and such an item cannot sit pending forever. Answer `STALE` instead.
 4. **`DEFERRED_HUMAN_SESSION` is a non-terminal outcome, exactly like `DEFERRED_WINDOW_CLOSED` (slice 5c).** `ackedAt` stays empty, `GET …/pending-deliveries` serves the delivery (with `deferredReason: "HUMAN_SESSION"`), and a later attempt with a new `attemptId` may end it with any outcome, or defer again for either reason. The deferral is recorded in the request's audit (`DELIVERY_OUTCOME`, `outcome: "DEFERRED_HUMAN_SESSION"`). The backend does not look at the conversation's mode: reporting it is the bot's call.
+
+5. **`request.merged` takes only `STALE`** (a v1.2 type, §3.5): it carries information, not a message, so there is nothing to accept, defer or reconcile. Any other outcome is `422 OUTCOME_NOT_ALLOWED` and the item stays pending until a `STALE` ACK. A replay of the same `STALE` attempt answers `200`, like any outcome.
 
 Also: `FAILED` is not an outcome; the 404 of the outcome route says `Delivery not found`; the backend sends the long-poll answers `Cache-Control: no-store`.
 

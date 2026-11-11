@@ -191,7 +191,7 @@ The row (section 3) plus:
 
 - `needs` and `context` are bot-untrusted text/JSON: show as text.
 - `customer.id = null` and `displayName = null` when no customer is linked; `recentOrders` is then `[]`, `priceList` `null`, `isTrusted` `false`. `recentOrders` are the last five confirmed or canceled sales of the customer, newest first (drafts are not shown).
-- **`customer.candidates[]`** (R1, for `LINK_CUSTOMER`): only while the request is open and has **no** customer. The tenant's customers whose canonical phone is this request's phone (`521…` and `52…` count as the same number), at most 10, oldest first: `{id, displayName, phone, isTrusted, customerSince, lastOrderAt}`. `phone` follows the same mask as everywhere (full only with `read:CustomerPhone`). **`customer.ambiguous`** is `true` when the bot found several customers with that phone and left the request unlinked: the user picks one and sends it to `POST …/link-customer` (handoff 11). It can also hold one customer that was created after the request. It is `[]` once linked, for a closed request and for a legacy request with no phone.
+- **`customer.candidates[]`** (R1, for `LINK_CUSTOMER`): only while the request is open and has **no** customer. The tenant's customers whose canonical phone is this request's phone (`521…` and `52…` count as the same number; the match is exact in SQL, so a busy sucursal never hides one behind a page), at most 10, oldest first: `{id, displayName, phone, isTrusted, customerSince, lastOrderAt}`. `phone` follows the same mask as everywhere (full only with `read:CustomerPhone`). **`customer.ambiguous`** is `true` when the bot found several customers with that phone and left the request unlinked: the user picks one and sends it to `POST …/link-customer` (handoff 11). It can also hold one customer that was created after the request. It is `[]` once linked, for a closed request and for a legacy request with no phone.
 - **`decision`** is `null` for `CLARIFICATION` and `CONVERSATION`. For decisions it is discriminated by `subtype`:
 
   | `subtype` | Shape |
@@ -213,11 +213,11 @@ The row (section 3) plus:
   | `RELEASE` | `update:ChatbotRequest`, request `IN_PROGRESS`, and it is yours or you also have `update:ChatbotRequestAssignment`; not for a live conversation |
   | `REASSIGN` | `update:ChatbotRequestAssignment`, request `IN_PROGRESS` |
   | `RESOLVE` | `update:ChatbotRequest` **and** the legacy permission of the subtype (`update:HumanDecision` for stock and expiry, `validate:DeliveryZone`, `update:ReceiptEvidence`), `kind = DECISION`, open and not held by someone else; for `DELIVERY_ZONE` also only when it has a validation (without one the resolve route answers `404`) |
-  | `MERGE` | `update:ChatbotRequest`, request open, subtype `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` or `COMPLAINT` with no started session, **and** at least one merge candidate (section 10). Held by someone else does not hide it |
-  | `LINK_CUSTOMER` | `update:ChatbotRequest`, request open, no customer linked yet, and a phone identity (not a legacy `unknown:` request). Held by someone else does not hide it |
+  | `MERGE` | `update:ChatbotRequest`, request open, subtype `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` or `COMPLAINT` with no started session, **and** at least one merge candidate (section 10). If it is held by someone else you also need `update:ChatbotRequestAssignment` (the same rule as `CANCEL`) |
+  | `LINK_CUSTOMER` | `update:ChatbotRequest`, request open, no customer linked yet, a phone identity (not a legacy `unknown:` request) **and at least one candidate customer** (`customer.candidates` is not empty). Held by someone else does not hide it |
   | `CANCEL` | `update:ChatbotRequest`, open, not a `DECISION`, and (if held by someone else) you have `update:ChatbotRequestAssignment` |
 
-  `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request of an unlinked phone gets `["CLAIM","RESOLVE","LINK_CUSTOMER"]`; a Cashier gets `["CLAIM","LINK_CUSTOMER"]`; the Cashier who claimed an `UNKNOWN_QUESTION` of a linked customer gets `["RELEASE","CANCEL"]`, plus `MERGE` when that customer has another open question.
+  `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request whose phone has no customer gets `["CLAIM","RESOLVE"]`, and `["CLAIM","RESOLVE","LINK_CUSTOMER"]` when a customer with that phone exists; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","CANCEL"]`, plus `MERGE` when that customer has another open question in the same conversation. A Cashier looking at a colleague's request gets neither `MERGE` nor `CANCEL` (a Manager gets both).
 
 ## 9. `GET /chatbot-requests/:id/audit`
 
@@ -225,7 +225,7 @@ The row (section 3) plus:
 
 ## 10. `GET /chatbot-requests/:id/merge-candidates`
 
-`{ "items": [ /* rows */ ] }`: up to 20 open requests of the same customer and the same subtype, nearest deadline first, only for `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never for decisions). Empty when the request is closed or not mergeable: hide "Unir con…". The command is `POST /chatbot-requests/:id/merge` (handoff 11); each row's `id` and `version` are the `intoRequestId` and `intoExpectedVersion` it needs.
+`{ "items": [ /* rows */ ] }`: up to 20 open requests of the same customer, the same subtype and the **same conversation** (`conversationRef`, non-null: a merge across conversations is refused), nearest deadline first, only for `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never for decisions). Empty when the request is closed or not mergeable: hide "Unir con…". The command is `POST /chatbot-requests/:id/merge` (handoff 11); each row's `id` and `version` are the `intoRequestId` and `intoExpectedVersion` it needs.
 
 ## 11. Errors
 

@@ -177,7 +177,7 @@ function accept(
 const isClosed = (state: ChatbotRequestState) =>
   state.status === 'RESOLVED' || state.status === 'CANCELLED';
 
-const heldByOther = (state: ChatbotRequestState, actor: StaffActor) =>
+export const heldByOther = (state: ChatbotRequestState, actor: StaffActor) =>
   state.status === 'IN_PROGRESS' && state.assignee?.userId !== actor.userId;
 
 const userEvent = (actor: StaffActor) => ({
@@ -459,6 +459,8 @@ export interface MergeSide {
   id: string;
   folio: number;
   customerKey: string;
+  /** `request.merged` tells the bot about ONE conversation: see `merge`. */
+  conversationRef: string | null;
   state: ChatbotRequestState;
 }
 
@@ -477,16 +479,25 @@ export type MergeResult =
  * table, no started session. A rule failure is 422 MERGE_NOT_ALLOWED; like
  * every command a closed source is REQUEST_CLOSED and a stale version is
  * VERSION_CONFLICT, each with the `current` of the side that failed (`on`).
- * Holding is not a rule: a source held by someone else merges and its
- * assignee is told by the caller. The target's version does not move (a merge
- * must not fail the CAS of someone about to claim it, like the bot's merge),
- * but its expected version is still checked.
+ * Check order (the same as `cancelByStaff`, M5): closed, then a source held
+ * by someone else without `update:ChatbotRequestAssignment` (403
+ * NOT_ASSIGNEE), then the version, then the rules. The holder of the target
+ * does not matter. The source's assignee, if someone else, is told by the
+ * caller. The target's version does not move (a merge must not fail the CAS of
+ * someone about to claim it, like the bot's merge), but its expected version
+ * is still checked.
+ *
+ * Same conversation: both requests need the SAME non-null `conversationRef`,
+ * because the `request.merged` feed item names one conversation. A different
+ * or missing one is 409 MERGE_NOT_ALLOWED (`on` the target, or the source when
+ * it is the one with none).
  */
 export function merge(
   source: MergeSide,
   target: MergeSide,
   cmd: {
     actor: StaffActor;
+    actorCanReassign: boolean;
     expectedVersion: number;
     intoExpectedVersion: number;
     now: Date;
@@ -495,7 +506,7 @@ export function merge(
   const fail = (
     side: 'SOURCE' | 'TARGET',
     code: ChatbotRequestErrorCode,
-    httpStatus: 409 | 422,
+    httpStatus: 403 | 409 | 422,
   ): MergeResult => {
     const failed = reject(
       side === 'SOURCE' ? source.state : target.state,
@@ -506,6 +517,8 @@ export function merge(
     return { ok: false, error: failed.error, on: side };
   };
   if (isClosed(source.state)) return fail('SOURCE', 'REQUEST_CLOSED', 409);
+  if (heldByOther(source.state, cmd.actor) && !cmd.actorCanReassign)
+    return fail('SOURCE', 'NOT_ASSIGNEE', 403);
   if (source.state.version !== cmd.expectedVersion)
     return fail('SOURCE', 'VERSION_CONFLICT', 409);
   if (source.id === target.id || !canMergeSource(source.state))
@@ -517,6 +530,10 @@ export function merge(
   ) {
     return fail('TARGET', 'MERGE_NOT_ALLOWED', 422);
   }
+  if (source.conversationRef === null)
+    return fail('SOURCE', 'MERGE_NOT_ALLOWED', 409);
+  if (target.conversationRef !== source.conversationRef)
+    return fail('TARGET', 'MERGE_NOT_ALLOWED', 409);
   if (target.state.version !== cmd.intoExpectedVersion)
     return fail('TARGET', 'VERSION_CONFLICT', 409);
   const closed = accept(

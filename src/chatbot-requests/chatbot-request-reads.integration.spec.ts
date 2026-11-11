@@ -797,14 +797,10 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       const { id } = await restockRequest();
       const actions = async (role: string) =>
         (await get(`/chatbot-requests/${id}`, role)).body.allowedActions;
-      // unlinked, with a phone key: linking a customer is offered too (R1)
-      expect(await actions('manager')).toEqual([
-        'CLAIM',
-        'RESOLVE',
-        'LINK_CUSTOMER',
-      ]);
-      expect(await actions('cashier')).toEqual(['CLAIM', 'LINK_CUSTOMER']);
-      expect(await actions('updateOnly')).toEqual(['CLAIM', 'LINK_CUSTOMER']);
+      // no customer of that phone exists, so LINK_CUSTOMER is not offered (R1)
+      expect(await actions('manager')).toEqual(['CLAIM', 'RESOLVE']);
+      expect(await actions('cashier')).toEqual(['CLAIM']);
+      expect(await actions('updateOnly')).toEqual(['CLAIM']);
       expect(await actions('readOnly')).toEqual([]);
 
       const claimed = await post(
@@ -818,7 +814,6 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         'RELEASE',
         'REASSIGN',
         'RESOLVE',
-        'LINK_CUSTOMER',
       ]);
       expect(mine.body.assignee.displayName).toBeTruthy();
       expect(mine.body.audit.map((e: any) => e.type)).toEqual(['CLAIMED']);
@@ -829,19 +824,14 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         tenantA,
         users.luis,
       );
-      // linking a customer is a data fix, open to anyone with update (R1)
-      expect(other.body.allowedActions).toEqual(['LINK_CUSTOMER']);
+      expect(other.body.allowedActions).toEqual([]);
       const reassigner = await get(
         `/chatbot-requests/${id}`,
         'manager',
         tenantA,
         users.luis,
       );
-      expect(reassigner.body.allowedActions).toEqual([
-        'RELEASE',
-        'REASSIGN',
-        'LINK_CUSTOMER',
-      ]);
+      expect(reassigner.body.allowedActions).toEqual(['RELEASE', 'REASSIGN']);
     });
 
     it('builds the customer card, decision, other open requests, deliveries and audit', async () => {
@@ -934,8 +924,11 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
     });
 
     it('pages a long audit trail and lists merge candidates only for mergeable subtypes', async () => {
-      const { id, customerKey } = await create({});
-      const twin = await create({ customerKey });
+      const conversationRef = 'wa:merge-candidates';
+      const { id, customerKey } = await create({ conversationRef });
+      const twin = await create({ customerKey, conversationRef });
+      // same customer and subtype but another conversation: not a candidate
+      await create({ customerKey, conversationRef: 'wa:elsewhere' });
       for (let i = 0; i < 22; i++) {
         await prisma.chatbotRequestEvent.create({
           data: {
@@ -1018,11 +1011,12 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect(route.body).toEqual(detail.body.zoneImpact);
       // the wrapped row's customer phone and conversation never come out
       expect(JSON.stringify(detail.body)).not.toContain('wa:');
-      expect(detail.body.allowedActions).toEqual([
-        'CLAIM',
-        'RESOLVE',
-        'LINK_CUSTOMER',
-      ]);
+      // LINK_CUSTOMER depends on whether customers of this shared phone exist
+      expect(
+        (detail.body.allowedActions as string[]).filter(
+          (action) => action !== 'LINK_CUSTOMER',
+        ),
+      ).toEqual(['CLAIM', 'RESOLVE']);
     });
 
     it('DELIVERY_ZONE: requesterCount counts every requester like the legacy projection, also after resolution', async () => {
@@ -1113,7 +1107,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         validationId: null,
         requesterCount: 1,
       });
-      expect(detail.body.allowedActions).toEqual(['CLAIM', 'LINK_CUSTOMER']);
+      expect(detail.body.allowedActions).toEqual(['CLAIM']);
       expect((await get(`/chatbot-requests/${id}/zone-impact`)).status).toBe(
         422,
       );
@@ -1215,11 +1209,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         },
         resolution: null,
       });
-      expect(detail.body.allowedActions).toEqual([
-        'CLAIM',
-        'RESOLVE',
-        'LINK_CUSTOMER',
-      ]);
+      expect(detail.body.allowedActions).toEqual(['CLAIM', 'RESOLVE']);
 
       const variantId = randomUUID();
       const variant = await expirationRequest({

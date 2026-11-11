@@ -31,12 +31,14 @@ import { ActiveUserGuard } from '../auth/guards/active-user.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
+import type { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import {
   CHATBOT_REQUEST_COMMAND_STORE,
   CHATBOT_REQUEST_RESOLVER,
+  ChatbotRequestCommandError,
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
 import {
@@ -54,6 +56,8 @@ import {
   allocateFolio,
   refreshCustomerGroup,
 } from './infrastructure/chatbot-request-writes';
+import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
+import { hashFeedOutcome, parseFeedOutcome } from './domain/chatbot-feed';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-request-read.store';
 import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
@@ -297,6 +301,8 @@ describeIfDb(
                 kind: 'CLARIFICATION',
                 subtype: 'UNKNOWN_QUESTION',
                 summary: `Pregunta ${seq}`,
+                // one conversation per phone unless a test says otherwise
+                conversationRef: `wa:${customerKey}`,
                 source: 'chatbot',
                 sourceRequestId: randomUUID(),
                 ...over,
@@ -748,19 +754,203 @@ describeIfDb(
         });
       });
 
-      it('enqueues no feed item: the contract defines none at merge time', async () => {
+      it('enqueues one request.merged feed item for the source, with ids and the conversation only', async () => {
+        const { source, target, customerKey } = await pair();
+        await merge(source.id, target.id).expect(200);
+        const items = await prisma.chatbotFeedItem.findMany({
+          where: { requestId: { in: [source.id, target.id] } },
+        });
+        expect(items).toHaveLength(1);
+        expect(items[0]).toMatchObject({
+          tenantId: tenantA,
+          requestId: source.id,
+          type: 'request.merged',
+          conversationRef: `wa:${customerKey}`,
+          outcome: null,
+          ackedAt: null,
+          payload: {
+            requestId: source.id,
+            intoRequestId: target.id,
+            conversationRef: `wa:${customerKey}`,
+          },
+        });
+        // nothing else leaves in the payload (no phone, no text)
+        expect(Object.keys(items[0].payload as object).sort()).toEqual([
+          'conversationRef',
+          'intoRequestId',
+          'requestId',
+        ]);
+      });
+
+      it('request.merged accepts only STALE; every other outcome is 422 OUTCOME_NOT_ALLOWED', async () => {
         const { source, target } = await pair();
         await merge(source.id, target.id).expect(200);
+        const item = await prisma.chatbotFeedItem.findFirstOrThrow({
+          where: { requestId: source.id },
+        });
+        const feed = new PrismaChatbotFeedStore(
+          tenantPrisma,
+          prisma as unknown as PrismaService,
+        );
+        const ack = (body: Record<string, unknown>) => {
+          const input = parseFeedOutcome({
+            attemptId: randomUUID(),
+            ...body,
+          });
+          return cls.runWith(
+            { tenantId: tenantA, userId: 'bot', isSuperAdmin: false },
+            () =>
+              feed.recordOutcome(
+                item.deliveryId,
+                'cred-1',
+                input,
+                hashFeedOutcome(input),
+              ),
+          );
+        };
+        const at = new Date().toISOString();
+        const code = (promise: Promise<unknown>) =>
+          promise.then(
+            () => 'OK',
+            (error: unknown) =>
+              error instanceof ChatbotRequestCommandError
+                ? `${error.httpStatus} ${error.code}`
+                : String(error),
+          );
+        for (const body of [
+          {
+            outcome: 'PROVIDER_ACCEPTED',
+            providerMessageId: 'w1',
+            attemptedAt: at,
+          },
+          { outcome: 'DELIVERY_UNKNOWN', attemptedAt: at },
+          { outcome: 'DEFERRED_WINDOW_CLOSED', attemptedAt: at },
+          { outcome: 'DEFERRED_HUMAN_SESSION', attemptedAt: at },
+        ]) {
+          expect(await code(ack(body))).toBe('422 OUTCOME_NOT_ALLOWED');
+        }
+        // nothing was recorded by the refusals
+        expect(
+          await prisma.chatbotFeedItem.findUniqueOrThrow({
+            where: { cursor: item.cursor },
+          }),
+        ).toMatchObject({ outcome: null, ackedAt: null });
+        expect(await code(ack({ outcome: 'STALE' }))).toBe('OK');
+        expect(
+          await prisma.chatbotFeedItem.findUniqueOrThrow({
+            where: { cursor: item.cursor },
+          }),
+        ).toMatchObject({ outcome: 'STALE' });
+      });
+
+      it('rejected merges leave no feed item behind', async () => {
+        const key = phoneKey();
+        const source = await create({ customerKey: key });
+        const otherConversation = await create({
+          customerKey: key,
+          conversationRef: 'wa:other',
+        });
+        const noConversation = await create({
+          customerKey: key,
+          conversationRef: null,
+        });
+        const sameConversation = await create({ customerKey: key });
+        for (const target of [otherConversation, noConversation]) {
+          const res = await merge(source.id, target.id);
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({
+            code: 'MERGE_NOT_ALLOWED',
+            intoRequestId: target.id,
+          });
+        }
+        // 403 for a held source without the permission, 409 for a stale version
+        await post(`/chatbot-requests/${sameConversation.id}/claim`, {
+          expectedVersion: 1,
+        }).set('x-test-user', users.luis);
+        await merge(sameConversation.id, source.id, {}, 'cashier').expect(403);
+        await merge(source.id, sameConversation.id, {
+          expectedVersion: 9,
+        }).expect(409);
         expect(
           await prisma.chatbotFeedItem.count({
-            where: { requestId: { in: [source.id, target.id] } },
+            where: {
+              requestId: {
+                in: [source.id, otherConversation.id, noConversation.id],
+              },
+            },
           }),
         ).toBe(0);
+        expect(await stored(source.id)).toMatchObject({
+          status: 'NEW',
+          version: 1,
+        });
+      });
+
+      it('refuses a merge across conversations or without one with 409 before any lock, writing nothing', async () => {
+        for (const over of [
+          { conversationRef: 'wa:other' },
+          { conversationRef: null },
+        ]) {
+          const { source, target } = await pair({}, over);
+          const before = [await stored(source.id), await stored(target.id)];
+          const res = await merge(source.id, target.id);
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('MERGE_NOT_ALLOWED');
+          expect([await stored(source.id), await stored(target.id)]).toEqual(
+            before,
+          );
+          expect(await events(source.id)).toHaveLength(0);
+        }
+        // a source with no conversation, whatever the target has
+        const none = { conversationRef: null };
+        const { source, target } = await pair(none, none);
+        expect((await merge(source.id, target.id)).status).toBe(409);
+      });
+
+      it('a source held by someone else: 403 NOT_ASSIGNEE without the assignment permission, 200 for the holder and for a reassigner', async () => {
+        const held = await pair(heldBy(users.luis, 'Luis'));
+        const refused = await merge(
+          held.source.id,
+          held.target.id,
+          {},
+          'cashier',
+        );
+        expect(refused.status).toBe(403);
+        expect(refused.body).toMatchObject({
+          code: 'NOT_ASSIGNEE',
+          current: { claimedBy: { id: users.luis } },
+        });
+        expect(await stored(held.source.id)).toMatchObject({
+          status: 'IN_PROGRESS',
+          version: 1,
+        });
+        expect(await events(held.source.id)).toHaveLength(0);
+        // the holder, a cashier
+        await merge(
+          held.source.id,
+          held.target.id,
+          {},
+          'cashier',
+          users.luis,
+        ).expect(200);
+        // a user with update:ChatbotRequestAssignment (manager)
+        const other = await pair(heldBy(users.luis, 'Luis'));
+        await merge(other.source.id, other.target.id, {}, 'manager').expect(
+          200,
+        );
+        // who holds the TARGET does not matter
+        const heldTarget = await pair({}, heldBy(users.luis, 'Luis'));
+        await merge(
+          heldTarget.source.id,
+          heldTarget.target.id,
+          {},
+          'cashier',
+        ).expect(200);
       });
 
       it("tells the source's assignee when someone else merged it, never the merger", async () => {
         const { source, target } = await pair(heldBy(users.luis, 'Luis'));
-        await merge(source.id, target.id).expect(200);
+        await merge(source.id, target.id, {}, 'manager').expect(200);
         const notices = await prisma.outboxEvent.findMany({
           where: {
             tenantId: tenantA,
@@ -813,8 +1003,15 @@ describeIfDb(
           [
             'another customer',
             async () => {
-              const s = await create({ customerKey: phoneKey() });
-              const t = await create({ customerKey: phoneKey() });
+              // same conversation, so only the customer rule can refuse
+              const s = await create({
+                customerKey: phoneKey(),
+                conversationRef: 'wa:shared',
+              });
+              const t = await create({
+                customerKey: phoneKey(),
+                conversationRef: 'wa:shared',
+              });
               return { s: s.id, t: t.id };
             },
           ],
@@ -1194,6 +1391,76 @@ describeIfDb(
         expect(detail.body.allowedActions).not.toContain('LINK_CUSTOMER');
       });
 
+      it('does not offer LINK_CUSTOMER while no customer has that phone, and offers it once one does', async () => {
+        const key = phoneKey();
+        const request = await create({
+          customerKey: key,
+          phoneCountryCode: '52',
+          phone: key.slice(2),
+        });
+        const before = await get(`/chatbot-requests/${request.id}`, 'cashier');
+        expect(before.body.customer.candidates).toEqual([]);
+        expect(before.body.allowedActions).not.toContain('LINK_CUSTOMER');
+        await prisma.customer.create({
+          data: {
+            tenantId: tenantA,
+            firstName: 'Llegó después',
+            phoneCountryCode: '52',
+            phone: key.slice(2),
+          },
+        });
+        const after = await get(`/chatbot-requests/${request.id}`, 'cashier');
+        expect(after.body.allowedActions).toContain('LINK_CUSTOMER');
+      });
+
+      it('lists exact candidates oldest first and never loses one to a loose match or the cap', async () => {
+        const key = phoneKey();
+        const national = key.slice(2);
+        const request = await create({
+          customerKey: key,
+          ambiguousCustomer: true,
+          phoneCountryCode: '52',
+          phone: national,
+        });
+        // 40 customers of ANOTHER phone sharing the same country code, created
+        // first: a loose lookup that takes a page before filtering would fill
+        // up with them
+        await prisma.customer.createMany({
+          data: Array.from({ length: 40 }, (_, i) => ({
+            tenantId: tenantA,
+            firstName: `Otro ${i}`,
+            phoneCountryCode: '52',
+            phone: `5599${String(i).padStart(6, '0')}`,
+            createdAt: new Date('2025-01-01T00:00:00.000Z'),
+          })),
+        });
+        const forms: Array<[string, string]> = [
+          ['52', national],
+          ['521', national],
+          ['52', `1${national}`],
+          ['52', `52${national}`],
+        ];
+        const made: string[] = [];
+        for (let i = 0; i < 12; i++) {
+          const [cc, phone] = forms[i % forms.length];
+          const customer = await prisma.customer.create({
+            data: {
+              tenantId: tenantA,
+              firstName: `Dup ${String(i).padStart(2, '0')}`,
+              phoneCountryCode: cc,
+              phone,
+              createdAt: new Date(Date.UTC(2026, 0, 1 + i)),
+            },
+          });
+          made.push(customer.id);
+        }
+        const detail = await get(`/chatbot-requests/${request.id}`);
+        expect(
+          detail.body.customer.candidates.map((c: { id: string }) => c.id),
+        ).toEqual(made.slice(0, 10));
+        expect(detail.body.allowedActions).toContain('LINK_CUSTOMER');
+      });
+
       it('accepts the customer stored in the 521 mobile form', async () => {
         const { c2, anchor } = await ambiguous();
         await link(anchor.id, c2.id).expect(200);
@@ -1356,6 +1623,138 @@ describeIfDb(
             customerId: winner,
           });
         }
+      });
+
+      describe('a zone request created after the zip locks (L1)', () => {
+        /** Creates a zone request of `key` right after the zip locks, `times` times. */
+        class InjectingStore extends PrismaChatbotRequestRelationStore {
+          injections = 0;
+          constructor(
+            tenants: TenantPrismaService,
+            private readonly inject: () => Promise<void>,
+            private times: number,
+          ) {
+            super(tenants);
+          }
+          override async lockZonesOfKey(customerKey: string) {
+            const zips = await super.lockZonesOfKey(customerKey);
+            if (this.times > 0) {
+              this.times--;
+              this.injections++;
+              await this.inject();
+            }
+            return zips;
+          }
+        }
+
+        async function scenario(times: number) {
+          const { c1, key, national, anchor } = await ambiguousWithKey();
+          const injected: string[] = [];
+          const store = new InjectingStore(
+            tenantPrisma,
+            async () => {
+              // committed on another connection, like a bot intake would
+              const zipCode = String(80_000 + ++seq);
+              const validation = await prisma.deliveryZoneValidation.create({
+                data: {
+                  tenantId: tenantA,
+                  zipCode,
+                  state: 'CDMX',
+                  municipality: 'Cuauhtémoc',
+                  neighborhood: 'Centro',
+                  branchName: 'Centro',
+                },
+              });
+              const wrapped = await prisma.deliveryZoneRequest.create({
+                data: {
+                  tenantId: tenantA,
+                  source: 'chatbot',
+                  sourceRequestId: randomUUID(),
+                  canonicalRequestHash: 'h',
+                  submittedCredentialId: 'cred',
+                  validationId: validation.id,
+                  branchName: 'Centro',
+                  zipCode,
+                  state: 'CDMX',
+                  municipality: 'Cuauhtémoc',
+                  neighborhood: 'Centro',
+                  customerPhoneCountryCode: '52',
+                  customerPhone: national,
+                  conversationRef: `wa:${key}`,
+                  lastCustomerMessageAt: NOW,
+                },
+              });
+              const created = await create({
+                customerKey: key,
+                kind: 'DECISION',
+                subtype: 'DELIVERY_ZONE',
+                deliveryZoneRequestId: wrapped.id,
+                ambiguousCustomer: true,
+                phoneCountryCode: '52',
+                phone: national,
+              });
+              injected.push(created.id);
+            },
+            times,
+          );
+          const service = new ChatbotRequestRelationsService(
+            new PrismaChatbotRequestCommandStore(tenantPrisma),
+            store,
+          );
+          const run = () =>
+            cls.runWith(
+              { tenantId: tenantA, userId: users.ana, isSuperAdmin: false },
+              () =>
+                service.linkCustomer({
+                  requestId: anchor.id,
+                  actorUserId: users.ana,
+                  idempotencyKey: randomUUID(),
+                  expectedVersion: 1,
+                  customerId: c1.id,
+                }),
+            );
+          return { run, store, injected, anchor, c1 };
+        }
+
+        /** An ambiguous key with one open request, plus its candidate customers. */
+        async function ambiguousWithKey() {
+          const setup = await ambiguous();
+          return setup;
+        }
+
+        it('detects it, rolls back and retries once from the start: the new zone request is linked too', async () => {
+          const { run, store, injected, anchor, c1 } = await scenario(1);
+          const view = await run();
+          expect(view).toMatchObject({ id: anchor.id, version: 2 });
+          expect(store.injections).toBe(1);
+          expect(injected).toHaveLength(1);
+          for (const id of [anchor.id, ...injected]) {
+            expect(await stored(id)).toMatchObject({
+              customerId: c1.id,
+              ambiguousCustomer: false,
+            });
+          }
+          // one command, one audit event on the anchor (the aborted try left none)
+          expect(await events(anchor.id)).toHaveLength(1);
+        });
+
+        it('answers 409 VERSION_CONFLICT with the current row when it happens again, writing nothing', async () => {
+          const { run, store, injected, anchor } = await scenario(2);
+          await expect(run()).rejects.toMatchObject({
+            code: 'VERSION_CONFLICT',
+            httpStatus: 409,
+            current: { version: 1, status: 'NEW' },
+          });
+          expect(store.injections).toBe(2);
+          expect(await stored(anchor.id)).toMatchObject({
+            customerId: null,
+            version: 1,
+          });
+          for (const id of injected) {
+            expect(await stored(id)).toMatchObject({ customerId: null });
+          }
+          expect(await events(anchor.id)).toHaveLength(0);
+        });
       });
 
       it('a zone request of the key links too, and a concurrent zone resolve never deadlocks', async () => {
