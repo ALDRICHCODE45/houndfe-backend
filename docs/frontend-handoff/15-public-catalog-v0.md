@@ -32,7 +32,7 @@ Rules:
 
 - The order covers **all** eligible products, then the page is cut from it. Page 2 continues exactly where page 1 ended, and `meta.total` is unchanged by the sort.
 - Products whose price is hidden (`price.hidden: true`, including prescription products) go **last** in both directions.
-- Ties break by `name` ascending, then `id`.
+- Ties break by the product's internal (operational) `name` ascending, then `id`. With the editorial switch on, cards show the Published title, so two products at the same price may not look alphabetical on screen.
 - `q`, `categoryId` and `facet` filters apply before ordering and paging.
 - A product that is not sold in the selected price list is not eligible (it is counted in `excludedCount`), exactly as before.
 
