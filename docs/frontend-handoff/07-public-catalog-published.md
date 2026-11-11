@@ -13,17 +13,19 @@ What is new:
 
 With the switch off, every public response is byte-identical to today (section 8).
 
+Later changes to the same public routes (`sort`, brand search with the switch on, `exactQuantity`, branch card, bot number, share previews) are in [15](15-public-catalog-v0.md). With the switch on, `q` now also matches the brand name; that supersedes the «Published text only» statement here and in section 4.
+
 ## 1. The switch (admin)
 
 The existing tenant catalog settings endpoint, with one more field.
 
-| | `GET /tenants/:tenantId/catalog-settings` | `PATCH /tenants/:tenantId/catalog-settings` |
-| --- | --- | --- |
-| Permission | `TenantCatalogSettings:read` | `TenantCatalogSettings:update` |
-| Who has it | Nobody by default. An admin grants it per role. Global `manage:all` (super admin) also passes. The dev showcase grants both to the Centro `Manager` role. | Same |
-| Tenant | `:tenantId` must be the JWT tenant. Otherwise `404` (not an oracle), unless `manage:all`. | Same |
-| Body | — | Any subset of the settings fields. To flip the switch, send only `{ "catalogRequiresPublishedEditorial": true }` (or `false`). |
-| Response headers | — | `Cache-Control: no-store` |
+|                  | `GET /tenants/:tenantId/catalog-settings`                                                                                                                 | `PATCH /tenants/:tenantId/catalog-settings`                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Permission       | `TenantCatalogSettings:read`                                                                                                                              | `TenantCatalogSettings:update`                                                                                                 |
+| Who has it       | Nobody by default. An admin grants it per role. Global `manage:all` (super admin) also passes. The dev showcase grants both to the Centro `Manager` role. | Same                                                                                                                           |
+| Tenant           | `:tenantId` must be the JWT tenant. Otherwise `404` (not an oracle), unless `manage:all`.                                                                 | Same                                                                                                                           |
+| Body             | —                                                                                                                                                         | Any subset of the settings fields. To flip the switch, send only `{ "catalogRequiresPublishedEditorial": true }` (or `false`). |
+| Response headers | —                                                                                                                                                         | `Cache-Control: no-store`                                                                                                      |
 
 `catalogRequiresPublishedEditorial` is a boolean. It is never `null`, and existing tenants have `false`. The PATCH rejects `null` and non-booleans with `400` from the validation pipe.
 
@@ -36,10 +38,21 @@ Response `200` (both routes; real output, dev DB):
   "catalogRequiresPublishedEditorial": false,
   "effectivePublication": true,
   "priceContexts": [
-    { "priceListId": "afc925de-abbd-4460-abaa-fcac228413ef", "name": "Mayoreo", "isCatalogDefault": false },
-    { "priceListId": "dae52cee-79b8-44e8-b5b2-8d2502f8f7e3", "name": "PUBLICO", "isCatalogDefault": true }
+    {
+      "priceListId": "afc925de-abbd-4460-abaa-fcac228413ef",
+      "name": "Mayoreo",
+      "isCatalogDefault": false
+    },
+    {
+      "priceListId": "dae52cee-79b8-44e8-b5b2-8d2502f8f7e3",
+      "name": "PUBLICO",
+      "isCatalogDefault": true
+    }
   ],
-  "stockPresentationDefault": { "mode": "SYSTEM_STATUS", "customQuantity": null },
+  "stockPresentationDefault": {
+    "mode": "SYSTEM_STATUS",
+    "customQuantity": null
+  },
   "warnings": [],
   "updatedAt": "2026-11-05T22:45:05.967Z"
 }
@@ -53,7 +66,9 @@ Response `200` (both routes; real output, dev DB):
     {
       "property": "catalogRequiresPublishedEditorial",
       "children": [],
-      "constraints": { "isBoolean": "catalogRequiresPublishedEditorial must be a boolean value" }
+      "constraints": {
+        "isBoolean": "catalogRequiresPublishedEditorial must be a boolean value"
+      }
     }
   ],
   "error": "Bad Request",
@@ -98,18 +113,27 @@ Two additive keys, present only with the switch on:
 
 ```ts
 interface PublicProductAttribute {
-  code: string;            // vocabulary definition code, e.g. "animal.target" (stable key)
-  label: string;           // es-MX definition label, e.g. "Especie"
-  facet: boolean;          // true = also a list filter (FACET); false = detail only (DETAIL)
+  code: string; // vocabulary definition code, e.g. "animal.target" (stable key)
+  label: string; // es-MX definition label, e.g. "Especie"
+  facet: boolean; // true = also a list filter (FACET); false = detail only (DETAIL)
   section: { code: string; label: string } | null; // form section, for grouping
   value:
     | { type: 'text'; text: string }
     | { type: 'boolean'; value: boolean }
     | { type: 'single'; option: { code: string; label: string } }
     | { type: 'multi'; options: { code: string; label: string }[] }
-    | { type: 'number'; value: number; unit: { code: string; label: string } | null }
-    | { type: 'range'; min: number; max: number; unit: { code: string; label: string } };
-  display: string;         // ready-to-show es-MX text: "Perro, Gato", "1.5 kg", "30–45 cm", "Sí"
+    | {
+        type: 'number';
+        value: number;
+        unit: { code: string; label: string } | null;
+      }
+    | {
+        type: 'range';
+        min: number;
+        max: number;
+        unit: { code: string; label: string };
+      };
+  display: string; // ready-to-show es-MX text: "Perro, Gato", "1.5 kg", "30–45 cm", "Sí"
 }
 ```
 
@@ -129,7 +153,10 @@ Real output, «Croqueta Royal Canin Indoor para gato 1.5 kg» (`123d1b11-44a7-4f
   "name": "Croqueta Royal Canin Indoor para gato 1.5 kg",
   "slug": null,
   "description": null,
-  "category": { "id": "0f288cac-65b5-4813-a13d-d9d659ed3555", "name": "Alimento para gato" },
+  "category": {
+    "id": "0f288cac-65b5-4813-a13d-d9d659ed3555",
+    "name": "Alimento para gato"
+  },
   "brand": { "name": "Royal Canin" },
   "images": [
     {
@@ -140,7 +167,11 @@ Real output, «Croqueta Royal Canin Indoor para gato 1.5 kg» (`123d1b11-44a7-4f
   ],
   "price": { "priceCents": 54900, "hidden": false },
   "availability": "low_stock",
-  "stockPresentation": { "mode": "SYSTEM_STATUS", "status": "low_stock", "customQuantity": null },
+  "stockPresentation": {
+    "mode": "SYSTEM_STATUS",
+    "status": "low_stock",
+    "customQuantity": null
+  },
   "hasVariants": false,
   "variants": [],
   "rating": null,
@@ -151,7 +182,10 @@ Real output, «Croqueta Royal Canin Indoor para gato 1.5 kg» (`123d1b11-44a7-4f
       "label": "Especie",
       "facet": true,
       "section": { "code": "para-quien", "label": "Para quién" },
-      "value": { "type": "multi", "options": [{ "code": "ani.dom.cat", "label": "Gato" }] },
+      "value": {
+        "type": "multi",
+        "options": [{ "code": "ani.dom.cat", "label": "Gato" }]
+      },
       "display": "Gato"
     },
     {
@@ -159,15 +193,25 @@ Real output, «Croqueta Royal Canin Indoor para gato 1.5 kg» (`123d1b11-44a7-4f
       "label": "Formato del alimento",
       "facet": true,
       "section": { "code": "que-es", "label": "Qué es" },
-      "value": { "type": "single", "option": { "code": "food.format.kibble", "label": "Croquetas" } },
+      "value": {
+        "type": "single",
+        "option": { "code": "food.format.kibble", "label": "Croquetas" }
+      },
       "display": "Croquetas"
     },
     {
       "code": "measure.net_mass",
       "label": "Peso neto",
       "facet": true,
-      "section": { "code": "contenido-empaque", "label": "Contenido y empaque" },
-      "value": { "type": "number", "value": 1.5, "unit": { "code": "kg", "label": "kg" } },
+      "section": {
+        "code": "contenido-empaque",
+        "label": "Contenido y empaque"
+      },
+      "value": {
+        "type": "number",
+        "value": 1.5,
+        "unit": { "code": "kg", "label": "kg" }
+      },
       "display": "1.5 kg"
     }
   ],
@@ -201,10 +245,10 @@ GET /public/catalog/:tenantSlug/products
 
 Errors:
 
-| When | Status | Body |
-| --- | --- | --- |
-| Malformed token (no `:`, bad characters, more than 50, duplicates) | `400` | Validation pipe body: `{"message":[{"property":"facet","children":[],"constraints":{"matches":"each value in facet must match /^[A-Za-z0-9._-]{1,120}:[A-Za-z0-9._-]{1,120}$/ regular expression"}}],"error":"Bad Request","statusCode":400}` |
-| Unknown definition or option, a DETAIL/INTERNAL definition, a number/range FACET, **or any `facet` while the switch is off** | `400` | `{"statusCode":400,"error":"FACET_NOT_AVAILABLE","message":"Facet is not available: animal.target:nope.nope","timestamp":"…"}` |
+| When                                                                                                                         | Status | Body                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Malformed token (no `:`, bad characters, more than 50, duplicates)                                                           | `400`  | Validation pipe body: `{"message":[{"property":"facet","children":[],"constraints":{"matches":"each value in facet must match /^[A-Za-z0-9._-]{1,120}:[A-Za-z0-9._-]{1,120}$/ regular expression"}}],"error":"Bad Request","statusCode":400}` |
+| Unknown definition or option, a DETAIL/INTERNAL definition, a number/range FACET, **or any `facet` while the switch is off** | `400`  | `{"statusCode":400,"error":"FACET_NOT_AVAILABLE","message":"Facet is not available: animal.target:nope.nope","timestamp":"…"}`                                                                                                                |
 
 FE action on `FACET_NOT_AVAILABLE`: drop the stale facet from the URL and reload the list. This happens when the vocabulary changed or the switch was turned off. Switch on `error`, never on `message`.
 
@@ -212,8 +256,8 @@ Response (switch on only): `facets` gains `attributes`. With the switch off, `fa
 
 ```ts
 interface PublicAttributeFacet {
-  code: string;    // definition code, the left side of the facet token
-  label: string;   // es-MX
+  code: string; // definition code, the left side of the facet token
+  label: string; // es-MX
   options: { code: string; label: string; count: number }[];
 }
 ```
@@ -261,18 +305,22 @@ Example: `q=Adulto` finds nothing in Centro with the switch on, because only unp
 
 `POST /public/catalog/:tenantSlug/cart/validate`: same request and the same redacted contract, with the same scope as the list when the switch is on.
 
-| Line | Result |
-| --- | --- |
+| Line                                                                               | Result                                                                        |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | Product without a valid Published version (or its simple presentation not covered) | `status: "BLOCKED"`, `blockingCodes: ["NOT_IN_CATALOG"]`, `productName: null` |
-| Variant not covered by the current Published version | `status: "BLOCKED"`, `blockingCodes: ["VARIANT_NOT_IN_CATALOG"]` |
-| Published and covered | As today (`VALID`, or the other existing codes) |
+| Variant not covered by the current Published version                               | `status: "BLOCKED"`, `blockingCodes: ["VARIANT_NOT_IN_CATALOG"]`              |
+| Published and covered                                                              | As today (`VALID`, or the other existing codes)                               |
 
 Real output, an unpublished product with the switch on:
 
 ```json
 {
   "valid": false,
-  "priceContext": { "priceListId": "dae52cee-79b8-44e8-b5b2-8d2502f8f7e3", "name": "PUBLICO", "isCatalogDefault": true },
+  "priceContext": {
+    "priceListId": "dae52cee-79b8-44e8-b5b2-8d2502f8f7e3",
+    "name": "PUBLICO",
+    "isCatalogDefault": true
+  },
   "items": [
     {
       "productId": "c89a04e8-c39f-430b-b570-e8556a2993d2",
@@ -303,13 +351,13 @@ FE action: remove the line or mark it «Ya no está disponible», exactly like a
 
 `POST /products/:productId/editorial/published/unpublish`
 
-| | |
-| --- | --- |
-| Permission | `ProductEditorialDraft:read` + `ProductEditorialDraft:publish`, the same as «Publicar». `read` + `update` alone gives `403`. |
-| Request headers | `Authorization`, `Idempotency-Key` (1–200 characters, one value, no commas), exactly one `Editorial-Vocabulary-Revision: <R>`. Never send `Editorial-Care-Confirmation`, `Editorial-Contract-Version` or `Editorial-Adoption` (any of them gives `400`), even for care products. |
-| Query | none (any query gives `400`) |
-| Body | `{ "expectedCycle": <state.cycle>, "expectedRevision": <state.published.revision> }`, exactly these keys. `expectedRevision` is the **Published** revision being removed, not the draft revision. |
-| Response headers | `Cache-Control: no-store`, `Editorial-Contract-Version: 2`, `Editorial-Vocabulary-Revision: <R>` |
+|                  |                                                                                                                                                                                                                                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Permission       | `ProductEditorialDraft:read` + `ProductEditorialDraft:publish`, the same as «Publicar». `read` + `update` alone gives `403`.                                                                                                                                                     |
+| Request headers  | `Authorization`, `Idempotency-Key` (1–200 characters, one value, no commas), exactly one `Editorial-Vocabulary-Revision: <R>`. Never send `Editorial-Care-Confirmation`, `Editorial-Contract-Version` or `Editorial-Adoption` (any of them gives `400`), even for care products. |
+| Query            | none (any query gives `400`)                                                                                                                                                                                                                                                     |
+| Body             | `{ "expectedCycle": <state.cycle>, "expectedRevision": <state.published.revision> }`, exactly these keys. `expectedRevision` is the **Published** revision being removed, not the draft revision.                                                                                |
+| Response headers | `Cache-Control: no-store`, `Editorial-Contract-Version: 2`, `Editorial-Vocabulary-Revision: <R>`                                                                                                                                                                                 |
 
 Effect: the Published version and its coverage are removed. The draft, if any, and the cycle are kept. With the switch on, the product leaves the public list, its detail becomes `404` and the cart rejects it, all on the next request (subject to the 60-second public cache, section 1).
 
@@ -321,7 +369,11 @@ Effect: the Published version and its coverage are removed. The draft, if any, a
   "vocabularyRevision": "ev2-sha256-1c0e15b91c7fe78bff36f9021a80339ad7d72e7729988807d06c0777cdd426a9",
   "state": {
     "cycle": 3,
-    "draft": { "revision": 1, "basePublishedRevision": 2, "document": { "…": "the kept draft, as stored" } },
+    "draft": {
+      "revision": 1,
+      "basePublishedRevision": 2,
+      "document": { "…": "the kept draft, as stored" }
+    },
     "published": null
   }
 }
@@ -340,15 +392,15 @@ Order of checks (like publish):
 3. `expectedCycle`/`expectedRevision` do not match, or nothing is published: `409 CONFLICT`.
 4. The vocabulary changed: `409 VOCABULARY_CHANGED`.
 
-| Status | `error` | When | FE action |
-| --- | --- | --- | --- |
-| 400 | `MALFORMED` | Bad body, a query, a forbidden header, a missing/duplicated `Idempotency-Key` or R | Bug in the request; do not retry |
-| 401 | `UNAUTHORIZED` | Missing or invalid token | Log in again |
-| 403 | `FORBIDDEN` | No `:read` + `:publish` for this tenant/product | Hide «Despublicar» |
-| 404 | `NOT_FOUND` | The product disappeared | Leave the editor |
-| 409 | `CONFLICT` | Stale cycle/revision, already unpublished, or a reused key with another body | Reload the editorial read; retry with a **new** key if still published |
-| 409 | `VOCABULARY_CHANGED` | The vocabulary changed | Reload the vocabulary and read, retry once with a new key (as in 05 §4) |
-| 500 | `INTERNAL_ERROR` | Unexpected | Generic error |
+| Status | `error`              | When                                                                               | FE action                                                               |
+| ------ | -------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 400    | `MALFORMED`          | Bad body, a query, a forbidden header, a missing/duplicated `Idempotency-Key` or R | Bug in the request; do not retry                                        |
+| 401    | `UNAUTHORIZED`       | Missing or invalid token                                                           | Log in again                                                            |
+| 403    | `FORBIDDEN`          | No `:read` + `:publish` for this tenant/product                                    | Hide «Despublicar»                                                      |
+| 404    | `NOT_FOUND`          | The product disappeared                                                            | Leave the editor                                                        |
+| 409    | `CONFLICT`           | Stale cycle/revision, already unpublished, or a reused key with another body       | Reload the editorial read; retry with a **new** key if still published  |
+| 409    | `VOCABULARY_CHANGED` | The vocabulary changed                                                             | Reload the vocabulary and read, retry once with a new key (as in 05 §4) |
+| 500    | `INTERNAL_ERROR`     | Unexpected                                                                         | Generic error                                                           |
 
 Errors carry `Cache-Control: no-store` and `Editorial-Contract-Version: 2`, and no `Editorial-Vocabulary-Revision`. On an ambiguous network failure (no response), retry with the **same** key, body and headers.
 
@@ -394,29 +446,29 @@ PostgreSQL integration specs pin this. The runtime proof confirmed it: this buil
 
 Built app on a separate port over the dev DB, Sucursal Centro (`slug: centro`, id `ced6cc10-a037-4f41-92af-ee69bbb51c8b`), logged in as `admin@houndfe.com` (dev login, no email code). Real HTTP. All checks passed except the first republish attempt, which lacked the care header (see the C7 row).
 
-| # | Check | Result |
-| --- | --- | --- |
-| S1a | `GET catalog-settings` | `200`, `catalogRequiresPublishedEditorial: false` |
-| A1–A2 | Switch off: list (86 products) and the Royal Canin detail vs the main API before the migrations | Byte-identical |
-| A3 | Switch off: shampoo and an unpublished product's detail, list vs the main API now | Byte-identical |
-| A4 | Switch off: no `attributes`, `facets` keys `["categories"]` | Pass |
-| A5 | Switch off: `facet=animal.target:ani.dom.dog` | `400 FACET_NOT_AVAILABLE` |
-| B0 | `PATCH {catalogRequiresPublishedEditorial:true}` | `200`, `Cache-Control: no-store` |
-| B1 | Switch on: list | `total 3` (was 86): Alimento para Cachorro Raza Mediana 3 kg, Shampoo de avena Bio-Groom 355 ml, Croqueta Royal Canin Indoor 1.5 kg |
-| B1b | The 2 legacy pre-V2 Published rows | Absent from the list (`200`), detail `404`, cart `NOT_IN_CATALOG`; one warning per request with only their ids |
-| B2 | Detail of an unpublished product (Croquetas Adulto 15 kg) | `404` generic body |
-| B3–B4 | Royal Canin detail `attributes` | `animal.target`, `food.format`, `measure.net_mass`; no evidence, facts, INTERNAL or editorial internals |
-| B5–B6 | `facets.attributes`; `facet=animal.target:ani.dom.cat` | 8 facet definitions; filtered `total 2` = option count 2; «Especie» counts unchanged by its own selection |
-| B7 | Unknown option / malformed token | `400 FACET_NOT_AVAILABLE` / validation `400` |
-| B8 | `q=Croqueta` (Published title word) / `q=Adulto` (operational only) | Royal Canin found / `total 0` |
-| B9–B10 | Cart: unpublished product / published shampoo | `BLOCKED NOT_IN_CATALOG` / `valid: true` |
-| C1–C2 | Shampoo: `initialize` (keep content), then `unpublish` | `201` cycle 3 / `200`, `published: null`, draft kept |
-| C3–C5 | Replay same key / new key, already unpublished / no key | Identical `200` / `409 CONFLICT` / `400 MALFORMED` |
-| C6 | After unpublish | Shampoo out of the list (`total 2`), detail `404`, cart `NOT_IN_CATALOG` |
-| C7 | Republish the kept draft | The first attempt without `Editorial-Care-Confirmation` gave `400` (care family, §7). With `review-v1`: `200`, revision 3 (was 2), same document |
-| C8 | After republish (switch on) | Shampoo detail and the list byte-identical to before the unpublish |
-| D1 | `PATCH {…:false}`, list and detail | Byte-identical to the first switch-off read |
-| D2 | Main API list at the end | Unchanged |
+| #      | Check                                                                                           | Result                                                                                                                                           |
+| ------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| S1a    | `GET catalog-settings`                                                                          | `200`, `catalogRequiresPublishedEditorial: false`                                                                                                |
+| A1–A2  | Switch off: list (86 products) and the Royal Canin detail vs the main API before the migrations | Byte-identical                                                                                                                                   |
+| A3     | Switch off: shampoo and an unpublished product's detail, list vs the main API now               | Byte-identical                                                                                                                                   |
+| A4     | Switch off: no `attributes`, `facets` keys `["categories"]`                                     | Pass                                                                                                                                             |
+| A5     | Switch off: `facet=animal.target:ani.dom.dog`                                                   | `400 FACET_NOT_AVAILABLE`                                                                                                                        |
+| B0     | `PATCH {catalogRequiresPublishedEditorial:true}`                                                | `200`, `Cache-Control: no-store`                                                                                                                 |
+| B1     | Switch on: list                                                                                 | `total 3` (was 86): Alimento para Cachorro Raza Mediana 3 kg, Shampoo de avena Bio-Groom 355 ml, Croqueta Royal Canin Indoor 1.5 kg              |
+| B1b    | The 2 legacy pre-V2 Published rows                                                              | Absent from the list (`200`), detail `404`, cart `NOT_IN_CATALOG`; one warning per request with only their ids                                   |
+| B2     | Detail of an unpublished product (Croquetas Adulto 15 kg)                                       | `404` generic body                                                                                                                               |
+| B3–B4  | Royal Canin detail `attributes`                                                                 | `animal.target`, `food.format`, `measure.net_mass`; no evidence, facts, INTERNAL or editorial internals                                          |
+| B5–B6  | `facets.attributes`; `facet=animal.target:ani.dom.cat`                                          | 8 facet definitions; filtered `total 2` = option count 2; «Especie» counts unchanged by its own selection                                        |
+| B7     | Unknown option / malformed token                                                                | `400 FACET_NOT_AVAILABLE` / validation `400`                                                                                                     |
+| B8     | `q=Croqueta` (Published title word) / `q=Adulto` (operational only)                             | Royal Canin found / `total 0`                                                                                                                    |
+| B9–B10 | Cart: unpublished product / published shampoo                                                   | `BLOCKED NOT_IN_CATALOG` / `valid: true`                                                                                                         |
+| C1–C2  | Shampoo: `initialize` (keep content), then `unpublish`                                          | `201` cycle 3 / `200`, `published: null`, draft kept                                                                                             |
+| C3–C5  | Replay same key / new key, already unpublished / no key                                         | Identical `200` / `409 CONFLICT` / `400 MALFORMED`                                                                                               |
+| C6     | After unpublish                                                                                 | Shampoo out of the list (`total 2`), detail `404`, cart `NOT_IN_CATALOG`                                                                         |
+| C7     | Republish the kept draft                                                                        | The first attempt without `Editorial-Care-Confirmation` gave `400` (care family, §7). With `review-v1`: `200`, revision 3 (was 2), same document |
+| C8     | After republish (switch on)                                                                     | Shampoo detail and the list byte-identical to before the unpublish                                                                               |
+| D1     | `PATCH {…:false}`, list and detail                                                              | Byte-identical to the first switch-off read                                                                                                      |
+| D2     | Main API list at the end                                                                        | Unchanged                                                                                                                                        |
 
 End state: switch **off** for Centro. The shampoo is published again, now at cycle 3 and revision 3 instead of cycle 2 and revision 2, with the same document and identical public output. The probe added receipt rows for its initialize, unpublish and publish calls. The legacy rows were left untouched.
 

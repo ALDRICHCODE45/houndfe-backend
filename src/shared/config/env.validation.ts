@@ -242,6 +242,25 @@ export function buildEnvValidationSchema(): Joi.ObjectSchema {
     // known IANA name at first use, so a typo fails loudly at boot.
     PROMOTIONS_BUSINESS_TIMEZONE: Joi.string().default('America/Mexico_City'),
 
+    // Public catalog v0 (S5) — the single WhatsApp number of the sales bot,
+    // exposed as `whatsappNumber` by the public branch routes. E.164. Optional:
+    // absent or empty means `whatsappNumber: null`; a malformed value fails
+    // boot instead of publishing a broken number.
+    PUBLIC_BOT_WHATSAPP: Joi.string()
+      .pattern(/^\+[1-9]\d{7,14}$/)
+      .allow('')
+      .optional(),
+
+    // Public catalog v0 (S6) — base URL of the storefront (e.g.
+    // https://sistem.houndfe.com/catalogo). Only the share-preview route
+    // needs it; unset makes that route answer 503. http(s) only, no query or
+    // fragment (the route appends `/<slug>/p/<id>`).
+    PUBLIC_STORE_URL: Joi.string()
+      .uri({ scheme: ['http', 'https'] })
+      .pattern(/^[^?#]*$/)
+      .allow('')
+      .optional(),
+
     // CORS — comma-separated list of allowed origins (production).
     // Absent → open CORS with a boot warning (dev fallback).
     CORS_ORIGINS: Joi.string().optional().default(''),
