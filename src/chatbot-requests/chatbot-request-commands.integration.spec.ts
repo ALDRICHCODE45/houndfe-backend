@@ -327,9 +327,18 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
       kind: 'cancel',
       reason: 'NOT_ACTIONABLE',
     });
+    // Unit 7a: the claim recomputed the first request's deadlines from the
+    // tenant's policy (the seeded ones were placeholders), and the group
+    // follows its resolve deadline.
+    const claimed = await prisma.chatbotRequest.findUniqueOrThrow({
+      where: { id: first.id },
+    });
+    expect(claimed.resolveDeadlineAt?.toISOString()).not.toBe(
+      '2026-11-10T19:00:00.000Z',
+    );
     expect(await group(tenantA, customerKey)).toEqual({
       openCount: 1,
-      mostUrgentAt: at('2026-11-10T19:00:00Z'),
+      mostUrgentAt: claimed.resolveDeadlineAt,
       hasOverdue: false,
     });
 
@@ -342,8 +351,15 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
         expectedVersion: 2,
       },
     );
+    // Released: back to the claim clock, restarted at the release.
+    const released = await prisma.chatbotRequest.findUniqueOrThrow({
+      where: { id: first.id },
+    });
+    expect(released.claimDeadlineAt?.toISOString()).not.toBe(
+      '2026-11-10T17:00:00.000Z',
+    );
     expect(await group(tenantA, customerKey)).toMatchObject({
-      mostUrgentAt: at('2026-11-10T17:00:00Z'),
+      mostUrgentAt: released.claimDeadlineAt,
     });
     await run(
       tenantA,

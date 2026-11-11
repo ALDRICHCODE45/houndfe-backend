@@ -1156,3 +1156,15 @@ No damos fecha. Cada unidad se entrega con su documento de handoff en `docs/fron
 - **Fin y reversión mantienen la época.** `HUMAN → BOT` ocurre en la misma época N, tanto al finalizar como al revertir.
 - **La reversión avisa al bot.** Si `STARTING` no recibe `session-ack STARTED` en 60 s, el backend vuelve a `WAITING`. En la misma transacción agrega al feed `conversation.ended {requestId, handoffEpoch: N, reason: START_TIMEOUT}`. Así, si el bot sí vio `conversation.started` en N pero su ACK se perdió, sale del modo callado sin esperar la conciliación de 5 min.
 - **ACK tardío.** Si después llega `session-ack STARTED` de la época N, responde `409 STALE_EPOCH`. El bot ya recibió el `conversation.ended` de N y queda en `BOT`.
+
+## 13. Nota v1.2 (2026-11-11): desviaciones de la unidad 7
+
+Lo implementado en la unidad 7 (7a ajustes y reloj, 7b retención) se aparta del texto del contrato en estos puntos. Ninguna cambia el contrato hacia el chatbot ni hacia el frontend, salvo la forma de la respuesta de «aplicar a todas».
+
+- **Purgas cada hora, no «cron diario».** La purga del feed (30 días) y la de notificaciones (90 días) corren cada hora, lotes de 1000, máximo 20 lotes por tick, con `FOR UPDATE SKIP LOCKED`. Sigue cumpliendo «al menos diaria».
+- **Aplicar a todas (S7).** La respuesta lista `tenantsApplied`, `tenantsUnchanged`, `tenantsSkipped` y `tenantsFailed`. No lista las sucursales donde quien llama no tiene membresía, así que no hay fuga entre tenants.
+- **Relojes.** Al liberar, el reloj de toma (claim) se reinicia; el reloj de resolución cuenta desde la creación.
+- **`enabledSubtypes`** se guarda pero todavía no se aplica.
+- **Valores por defecto:** `windowWarningMinutes` 120 y `templateName` null.
+- **`slaPaused`** sigue siendo un marcador hasta la unidad 7c.
+- **Comprobante antes de abrir.** Un comprobante que llega antes de la primera apertura de un día hábil vence al cierre de ese mismo día, no al del siguiente (decisión del dueño 2026-11-11: «Al cierre de ese mismo día (Recomendado)»). El resto de §5.4 queda igual.

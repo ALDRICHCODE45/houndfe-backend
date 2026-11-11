@@ -1127,6 +1127,7 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
         where: { id: b.id },
         data: {
           status: 'CANCELLED',
+          nextSlaCheckAt: null,
           cancelledAt: new Date(),
           closedAt: new Date(),
           cancelReason: 'CUSTOMER_WITHDREW',

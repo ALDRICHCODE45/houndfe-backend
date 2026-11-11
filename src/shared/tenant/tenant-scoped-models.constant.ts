@@ -156,4 +156,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   // TenantPrismaService. `NotificationPreference` is per person, not per
   // tenant, and is read by `userId` from the JWT.
   'Notification',
+  // Unit 7a — per-sucursal attention settings and their audit trail. Same
+  // fail-open allowlist semantics: without these entries a sucursal could read
+  // or rewrite another sucursal's business hours, SLA windows or audit events
+  // through TenantPrismaService.
+  'ChatbotAttentionSettings',
+  'ChatbotAttentionSettingsEvent',
 ]);

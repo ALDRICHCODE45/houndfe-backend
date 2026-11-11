@@ -647,6 +647,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         where: { id: request.id },
         data: {
           status: 'RESOLVED',
+          nextSlaCheckAt: null,
           resolvedAt: new Date(),
           closedAt: new Date(),
           resolvedByActorId: 'u',
@@ -704,6 +705,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         where: { tenantId, customerKey: KEY },
         data: {
           status: 'CANCELLED',
+          nextSlaCheckAt: null,
           cancelledAt: new Date(),
           cancelReason: 'STAFF',
           staffCancelReason: 'DUPLICATE',
@@ -1427,6 +1429,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
         where: { id: requestId },
         data: {
           status: 'RESOLVED',
+          nextSlaCheckAt: null,
           resolvedAt: new Date(),
           closedAt: new Date(),
           resolvedByActorId: 'u',

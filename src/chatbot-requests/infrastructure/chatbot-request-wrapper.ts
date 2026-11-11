@@ -62,6 +62,7 @@ import {
   type TenantClient,
   type WrappedLink,
 } from './chatbot-request-writes';
+import { slaColumnsForNew } from './chatbot-sla-policy';
 
 export const WRAP_SOURCE = {
   humanDecision: 'WRAP:HUMAN_DECISION',
@@ -436,7 +437,7 @@ export class ChatbotRequestWrapper {
       }
       await assertIntakeLimits(tx, tenantId, customerKey, envelope.limits);
     }
-    const data = requestCreateData(
+    const created = requestCreateData(
       tenantId,
       await allocateFolio(tx, tenantId),
       input,
@@ -449,6 +450,11 @@ export class ChatbotRequestWrapper {
         },
       },
     );
+    // Unit 7a (§5.4): deadlines from the tenant's settings, in this insert.
+    const data = {
+      ...created,
+      ...(await slaColumnsForNew(tx, tenantId, { subtype: input.subtype })),
+    };
     // A lost dedup race (a creator that skipped the lock) merges too.
     const requestId = envelope
       ? await insertRequestOnDedup(tx, data)

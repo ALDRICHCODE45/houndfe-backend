@@ -717,10 +717,18 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
           resolvedAt: null,
           closedAt: null,
           assigneeUserId: null,
-          claimDeadlineAt: null,
-          nextSlaCheckAt: null,
+          // Unit 7a: open rows get deadlines from the tenant's settings (the
+          // defaults here), counted from the wrapped row's own createdAt.
+          slaPolicyVersion: 0,
+          nextSlaCheckAt: expect.any(Date) as Date,
+          resolveDeadlineAt: expect.any(Date) as Date,
           sourceRequestId: id,
         });
+        // A receipt has no claim time (its resolve deadline is the §5.4 rule).
+        const isReceipt = [fx.receiptOpen, fx.receiptOpenNoCustomer].includes(
+          id,
+        );
+        expect(request?.claimDeadlineAt === null).toBe(isReceipt);
       }
       expect(await requestOf(fx.tenantId, fx.restockOpen[0])).toMatchObject({
         subtype: 'RESTOCK',
@@ -1106,10 +1114,11 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       const fx = await seedLegacy();
       await runBackfill(prisma, { apply: true, tenantIds: [fx.tenantId] });
       const request = await requestOf(fx.tenantId, fx.expirationOpen);
-      await prisma.$executeRaw`
+      await prisma.$executeRaw(Prisma.sql`
         UPDATE "chatbot_requests"
-        SET "status" = 'RESOLVED', "resolvedAt" = now(), "closedAt" = now()
-        WHERE "id" = ${request?.id}`;
+        SET "status" = 'RESOLVED', "resolvedAt" = now(), "closedAt" = now(),
+            "nextSlaCheckAt" = NULL
+        WHERE "id" = ${request?.id}`);
       const [check] = (
         await checkInvariant(prisma, { tenantIds: [fx.tenantId] })
       ).tenants;
@@ -1147,15 +1156,15 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       const fx = await seedLegacy();
       await runBackfill(prisma, { apply: true, tenantIds: [fx.tenantId] });
       const request = await requestOf(fx.tenantId, fx.expirationOpen);
-      await prisma.$executeRaw`
+      await prisma.$executeRaw(Prisma.sql`
         UPDATE "chatbot_requests"
-        SET "status" = 'CANCELLED', "cancelledAt" = now(),
+        SET "status" = 'CANCELLED', "cancelledAt" = now(), "nextSlaCheckAt" = NULL,
             "cancelReason" = 'CUSTOMER_WITHDREW', "closedAt" = now()
-        WHERE "id" = ${request?.id}`;
-      await prisma.$executeRaw`
+        WHERE "id" = ${request?.id}`);
+      await prisma.$executeRaw(Prisma.sql`
         DELETE FROM "chatbot_customer_groups"
         WHERE "tenantId" = ${fx.tenantId}
-          AND "customerKey" = ${`unknown:${fx.expirationOpen}`}`;
+          AND "customerKey" = ${`unknown:${fx.expirationOpen}`}`);
       await expectClean(fx.tenantId);
     });
   });

@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-zone.policy';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import type { TenantClient } from './chatbot-request-writes';
+import { slaColumnsForNew } from './chatbot-sla-policy';
 
 /** §6.4: open requests per customer, all subtypes together. */
 export const CUSTOMER_OPEN_LIMIT = 20;
@@ -174,7 +175,25 @@ export async function assertIntakeLimits(
 export async function insertRequestOnDedup(
   tx: TenantClient,
   data: Prisma.ChatbotRequestCreateManyInput,
+  now: Date = new Date(),
 ): Promise<string | null> {
+  // Unit 7a (§5.4): the deadlines are part of the insert. A caller that already
+  // computed them (the wrapper) passes them in `data`; the direct creator does
+  // not, so they are computed here, under `FOR SHARE` on the settings row.
+  const sla =
+    data.slaPolicyVersion === undefined || data.slaPolicyVersion === null
+      ? await slaColumnsForNew(
+          tx,
+          data.tenantId,
+          { subtype: data.subtype },
+          now,
+        )
+      : {
+          claimDeadlineAt: (data.claimDeadlineAt as Date | null) ?? null,
+          resolveDeadlineAt: (data.resolveDeadlineAt as Date | null) ?? null,
+          slaPolicyVersion: data.slaPolicyVersion,
+          nextSlaCheckAt: (data.nextSlaCheckAt as Date | null) ?? null,
+        };
   const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
     INSERT INTO "chatbot_requests" (
       "id", "tenantId", "folio", "kind", "subtype", "customerKey", "customerId",
@@ -182,7 +201,8 @@ export async function insertRequestOnDedup(
       "lastCustomerMessageAt", "whatsappWindowClosesAt", "summary", "needs",
       "context", "dedupKey", "humanDecisionId", "deliveryZoneRequestId",
       "receiptEvidenceId", "source", "sourceRequestId", "canonicalRequestHash",
-      "submittedCredentialId", "updatedAt")
+      "submittedCredentialId", "claimDeadlineAt", "resolveDeadlineAt",
+      "slaPolicyVersion", "nextSlaCheckAt", "updatedAt")
     VALUES (
       ${randomUUID()}, ${data.tenantId}, ${data.folio},
       ${data.kind}::"ChatbotRequestKind", ${data.subtype}::"ChatbotRequestSubtype",
@@ -196,7 +216,9 @@ export async function insertRequestOnDedup(
       ${data.dedupKey ?? null}, ${data.humanDecisionId ?? null},
       ${data.deliveryZoneRequestId ?? null}, ${data.receiptEvidenceId ?? null},
       ${data.source}, ${data.sourceRequestId}, ${data.canonicalRequestHash ?? null},
-      ${data.submittedCredentialId ?? null}, now())
+      ${data.submittedCredentialId ?? null}, ${sla.claimDeadlineAt},
+      ${sla.resolveDeadlineAt}, ${sla.slaPolicyVersion}, ${sla.nextSlaCheckAt},
+      now())
     ON CONFLICT ("tenantId", "customerKey", "dedupKey")
       WHERE "status" IN ('NEW', 'IN_PROGRESS') AND "dedupKey" IS NOT NULL
       DO NOTHING

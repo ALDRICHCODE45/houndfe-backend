@@ -533,6 +533,9 @@ model Tenant {
   chatbotFeedRetention        ChatbotFeedRetention?
   // human-intervention / unit 6 — in-app notices.
   notifications               Notification[]
+  // human-intervention / unit 7a — chatbot attention settings and their audit.
+  chatbotAttentionSettings        ChatbotAttentionSettings?
+  chatbotAttentionSettingsEvents  ChatbotAttentionSettingsEvent[]
 
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
@@ -3668,6 +3671,58 @@ model TenantOpeningHours {
   @@map("tenant_opening_hours")
 }
 
+// human-intervention / unit 7a (contract §5.4, §5.5): one row per tenant with
+// the chatbot attention hours (kept apart from `TenantOpeningHours`: pickup and
+// chat are different schedules), closed dates, SLA minutes per subtype, the
+// receipt close margin and the stored-only scheduling/template fields. No row
+// means the defaults (version 0, `defaultSettings()`). `version` is the CAS of
+// `PUT /chatbot-settings` and the `slaPolicyVersion` stamped on every request
+// deadline computed from it. CHECKs are migration-authoritative.
+model ChatbotAttentionSettings {
+  tenantId                  String                  @id
+  version                   Int                     @default(1)
+  timeZone                  String
+  days                      Json
+  closedDates               String[]
+  slas                      Json
+  windowWarningMinutes      Int
+  templateName              String?
+  templateCostText          String
+  enabledSubtypes           ChatbotRequestSubtype[]
+  receiptCloseMarginMinutes Int
+  schedulingEnabled         Boolean
+  slotMinutes               Int
+  slotsOffered              Int
+  maxScheduledPerSlot       Int
+  updatedById               String?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_attention_settings")
+}
+
+// Audit of every settings write (PUT and apply-to-all), one row per tenant
+// and write. `data` holds the changed field names and, for apply-to-all, the
+// source tenant; never customer text.
+model ChatbotAttentionSettingsEvent {
+  id               String   @id @default(uuid())
+  tenantId         String
+  type             String
+  actorUserId      String?
+  actorDisplayName String?
+  fromVersion      Int
+  toVersion        Int
+  data             Json     @default("{}")
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("chatbot_attention_settings_events")
+}
+
 // ============================================================================
 // CHATBOT REQUEST INBOX (human-intervention / unit 2 — contract §2, §6.2, §10.1)
 // ============================================================================
@@ -4002,6 +4057,7 @@ model Notification {
 
   @@unique([tenantId, userId, dedupKey])
   @@index([tenantId, userId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([createdAt])
   @@map("notifications")
 }
 

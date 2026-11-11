@@ -38,6 +38,8 @@ import { createTenantScopedPrisma } from '../../shared/prisma/tenant-prisma.fact
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { RESTOCK_SOURCE } from '../../human-decisions/domain/restock-request-canonicalizer';
 import { actorDisplayName } from '../domain/actor-display-name';
+import { computeSla } from '../domain/chatbot-sla';
+import { loadSlaPolicy } from './chatbot-sla-policy';
 import {
   allocateFolios,
   refreshCustomerGroups,
@@ -611,14 +613,33 @@ async function applyBatch(
     family: family.name,
     ids: prepared.map((item) => item.id),
   });
+  // Unit 7a (§5.4): open rows get their deadlines from the tenant's settings,
+  // counted from the wrapped row's own `createdAt` (an old open row is overdue
+  // at once; the sweep sizes that burst). Rows born resolved keep none.
+  const policy = await loadSlaPolicy(tx, tenantId, { lock: true });
+  const backfillNow = new Date();
   const { count } = await tx.chatbotRequest.createMany({
-    data: prepared.map((item, index) =>
-      requestCreateData(tenantId, firstFolio + index, item.wrap, {
+    data: prepared.map((item, index) => ({
+      ...requestCreateData(tenantId, firstFolio + index, item.wrap, {
         id: requestIds[index],
         createdAt: item.createdAt,
         resolved: item.resolved,
       }),
-    ),
+      ...(item.resolved
+        ? {}
+        : computeSla(
+            policy,
+            {
+              subtype: item.subtype,
+              status: 'NEW',
+              createdAt: item.createdAt,
+              scheduledFor: null,
+              lastReleasedAt: null,
+              overdueAt: null,
+            },
+            backfillNow,
+          )),
+    })),
     skipDuplicates: true,
   });
   let inserted = new Set<string>(requestIds);
@@ -735,11 +756,11 @@ async function runTenant(
       if (options.apply) {
         const { created, changed } = await scoped.$transaction(
           (tx) =>
-            // SAFETY: the interactive client of the tenant-extended client has
-            // the same model delegates as `TenantClient` (the same cast the
-            // ambient-transaction service makes); its type only omits the
-            // top-level lifecycle methods.
             applyBatch(
+              // SAFETY: the interactive client of the tenant-extended client
+              // has the same model delegates as `TenantClient` (the same cast
+              // the ambient-transaction service makes); its type only omits
+              // the top-level lifecycle methods.
               tx as unknown as TenantClient,
               tenantId,
               family,

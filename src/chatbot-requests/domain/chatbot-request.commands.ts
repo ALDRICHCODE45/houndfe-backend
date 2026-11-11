@@ -70,7 +70,11 @@ export interface ChatbotRequestPatch {
   cancelReason?: 'STAFF' | 'SUPERSEDED' | CustomerCancelReason;
   staffCancelReason?: StaffCancelReason;
   closedAt?: Date;
-  nextSlaCheckAt?: null;
+  nextSlaCheckAt?: Date | null;
+  /** Unit 7a: set by the persistence layer on claim/release (never by a command). */
+  claimDeadlineAt?: Date | null;
+  resolveDeadlineAt?: Date | null;
+  slaPolicyVersion?: number;
   /** Chosen option and its parameters, staff-visible only (§2.1). */
   resolution?: Record<string, unknown>;
   /** `link-customer` (R1): the customer the staff picked. */

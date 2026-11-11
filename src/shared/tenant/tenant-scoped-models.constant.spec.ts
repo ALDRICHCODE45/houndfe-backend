@@ -35,3 +35,12 @@ describe('TENANT_SCOPED_MODELS — chatbot request inbox registration (human-int
     expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — chatbot attention settings registration (human-intervention unit 7a)', () => {
+  it.each(['ChatbotAttentionSettings', 'ChatbotAttentionSettingsEvent'])(
+    'scopes %s by tenant',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+});

@@ -13,6 +13,7 @@ import type {
   ChatbotRequestEventDraft,
   ChatbotRequestPatch,
 } from '../domain/chatbot-request.commands';
+import { slaColumnsForTransition } from './chatbot-sla-policy';
 
 export type TenantClient = ReturnType<TenantPrismaService['getClient']>;
 
@@ -238,20 +239,32 @@ export async function lockOpenWrapping(
     FOR UPDATE OF cr`);
 }
 
-/** CAS patch plus its audit event, on a request row the caller has locked. */
+/**
+ * CAS patch plus its audit event, on a request row the caller has locked. A
+ * claim or release also stamps the SLA columns (`now` is the injected clock).
+ */
 export async function applyRequestPatch(
   tx: TenantClient,
   tenantId: string,
   row: Pick<ChatbotRequestRow, 'id' | 'version'>,
   patch: ChatbotRequestPatch,
   event: ChatbotRequestEventDraft,
+  now: Date = new Date(),
 ): Promise<void> {
   const { resolution, ...columns } = patch;
+  // Unit 7a (§5.4): a claim moves the active clock to "resolve" and a release
+  // restarts the claim clock, so both recompute the deadlines with the policy
+  // read under `FOR SHARE` (a concurrent PUT of the settings waits for us).
+  const sla =
+    patch.status === 'NEW' || patch.status === 'IN_PROGRESS'
+      ? await slaColumnsForTransition(tx, tenantId, row.id, patch.status, now)
+      : null;
   // The row is locked, so the CAS cannot lose; a miss is a broken invariant.
   const { count } = await tx.chatbotRequest.updateMany({
     where: { tenantId, id: row.id, version: row.version },
     data: {
       ...columns,
+      ...(sla ?? {}),
       ...(resolution
         ? { resolution: resolution as Prisma.InputJsonObject }
         : {}),

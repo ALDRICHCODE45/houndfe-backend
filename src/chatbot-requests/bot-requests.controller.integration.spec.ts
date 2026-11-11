@@ -432,6 +432,7 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
         where: { id: second.body.id as string },
         data: {
           status: 'RESOLVED',
+          nextSlaCheckAt: null,
           resolvedAt: new Date(),
           closedAt: new Date(),
           resolvedByActorId: 'u',
