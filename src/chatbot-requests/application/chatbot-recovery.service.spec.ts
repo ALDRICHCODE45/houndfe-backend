@@ -4,6 +4,7 @@ import {
   ChatbotRecoveryService,
   type ChatbotRecoveryStore,
   type RecoveryRequestRow,
+  type UndeliveredSummary,
 } from './chatbot-recovery.service';
 import type { FeedItemRow } from './chatbot-feed.service';
 
@@ -43,6 +44,7 @@ const delivery = (
 function setup(
   rows: RecoveryRequestRow[] = [],
   deliveries: FeedItemRow[] = [],
+  summary: UndeliveredSummary[] = [],
 ) {
   const events: string[] = [];
   const currentFeedCursor = jest.fn(() => {
@@ -54,14 +56,16 @@ function setup(
     return Promise.resolve(rows);
   });
   const undelivered = jest.fn(() => Promise.resolve(deliveries));
+  const undeliveredSummary = jest.fn(() => Promise.resolve(summary));
   const store: ChatbotRecoveryStore = {
     currentFeedCursor,
     readPage,
     undelivered,
+    undeliveredSummary,
   };
   return {
     service: new ChatbotRecoveryService(store),
-    mocks: { currentFeedCursor, readPage, undelivered },
+    mocks: { currentFeedCursor, readPage, undelivered, undeliveredSummary },
     events,
   };
 }
@@ -94,6 +98,8 @@ describe('ChatbotRecoveryService (§3.3 recovery after 410 CURSOR_EXPIRED)', () 
         updatedAt: '2026-11-10T10:00:01.000Z',
         closedAt: null,
         pendingDeliveries: [],
+        undeliveredTruncated: false,
+        undeliveredResumeAfter: null,
       },
     ]);
   });
@@ -198,11 +204,34 @@ describe('ChatbotRecoveryService (§3.3 recovery after 410 CURSOR_EXPIRED)', () 
       status: 'open',
       updatedSince: '2026-11-10T16:20:00.000Z',
     });
+    // 5 s earlier: replicas stamp updatedAt/closedAt with their own clocks.
     expect(mocks.readPage).toHaveBeenCalledWith({
-      since: new Date('2026-11-10T16:20:00.000Z'),
+      since: new Date('2026-11-10T16:19:55.000Z'),
       after: null,
       limit: 51,
     });
+  });
+
+  it('flags a request with more undelivered items than it lists, and says where to resume the feed', async () => {
+    const a = request(1);
+    const b = request(2);
+    const { service, mocks } = setup(
+      [a, b],
+      [delivery(a.id, 9n), delivery(b.id, 10n)],
+      [
+        { requestId: a.id, count: 8, oldestCursor: 4n },
+        { requestId: b.id, count: 5, oldestCursor: 10n },
+      ],
+    );
+    const { items } = await service.recover({ status: 'open' });
+    expect(mocks.undeliveredSummary).toHaveBeenCalledWith([a.id, b.id]);
+    expect(
+      items.map((i) => [i.undeliveredTruncated, i.undeliveredResumeAfter]),
+    ).toEqual([
+      // `after` that makes the feed serve cursor 4 again.
+      [true, '000000000003'],
+      [false, null],
+    ]);
   });
 
   it('rejects a malformed query before touching the store', async () => {

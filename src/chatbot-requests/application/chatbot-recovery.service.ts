@@ -57,6 +57,14 @@ export interface ChatbotRecoveryStore {
   }): Promise<RecoveryRequestRow[]>;
   /** Per request, its latest `perRequest` items with no terminal outcome. */
   undelivered(requestIds: string[], perRequest: number): Promise<FeedItemRow[]>;
+  /** Per request with any: how many items have no terminal outcome, and the oldest. */
+  undeliveredSummary(requestIds: string[]): Promise<UndeliveredSummary[]>;
+}
+
+export interface UndeliveredSummary {
+  requestId: string;
+  count: number;
+  oldestCursor: bigint;
 }
 
 /** What the bot sees of a request: no customer, no staff, no free text. */
@@ -75,6 +83,14 @@ export interface RecoveryRequestView {
   updatedAt: string;
   closedAt: string | null;
   pendingDeliveries: PendingDeliveryView[];
+  /** More undelivered items exist than `pendingDeliveries` lists. */
+  undeliveredTruncated: boolean;
+  /**
+   * When truncated: the feed `after` that serves this request's oldest
+   * undelivered item again (its cursor minus one). Resume the feed from the
+   * smallest of these and `nextCursor`. `null` otherwise.
+   */
+  undeliveredResumeAfter: string | null;
 }
 
 export interface RecoveryAnswer {
@@ -83,6 +99,17 @@ export interface RecoveryAnswer {
   nextCursor: string;
   /** `cursor` of the next page; `null` on the last one. */
   nextPage: string | null;
+}
+
+function truncation(summary: UndeliveredSummary | undefined) {
+  const truncated =
+    summary !== undefined &&
+    summary.count > RECOVERY_LIMITS.deliveriesPerRequest;
+  return {
+    undeliveredTruncated: truncated,
+    undeliveredResumeAfter:
+      truncated && summary ? formatCursor(summary.oldestCursor - 1n) : null,
+  };
 }
 
 const iso = (date: Date | null): string | null =>
@@ -100,20 +127,24 @@ export class ChatbotRecoveryService {
     const feedCursor =
       page?.feedCursor ?? (await this.store.currentFeedCursor());
     const rows = await this.store.readPage({
-      since: updatedSince,
+      since: updatedSince
+        ? new Date(updatedSince.getTime() - RECOVERY_LIMITS.clockSkewMs)
+        : null,
       after: page ? { updatedAt: page.updatedAt, id: page.id } : null,
       limit: limit + 1,
     });
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    const deliveries =
-      pageRows.length === 0
-        ? []
-        : await this.store.undelivered(
-            pageRows.map((row) => row.id),
-            RECOVERY_LIMITS.deliveriesPerRequest,
-          );
+    const ids = pageRows.map((row) => row.id);
+    const [deliveries, summaries] =
+      ids.length === 0
+        ? [[], []]
+        : await Promise.all([
+            this.store.undelivered(ids, RECOVERY_LIMITS.deliveriesPerRequest),
+            this.store.undeliveredSummary(ids),
+          ]);
+    const summaryOf = new Map(summaries.map((item) => [item.requestId, item]));
     const byRequest = new Map<string, PendingDeliveryView[]>();
     for (const delivery of deliveries) {
       const list = byRequest.get(delivery.requestId) ?? [];
@@ -140,6 +171,7 @@ export class ChatbotRecoveryService {
         updatedAt: row.updatedAt.toISOString(),
         closedAt: iso(row.closedAt),
         pendingDeliveries: byRequest.get(row.id) ?? [],
+        ...truncation(summaryOf.get(row.id)),
       })),
       nextCursor: formatCursor(feedCursor),
       nextPage:

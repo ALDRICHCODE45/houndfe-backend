@@ -759,6 +759,52 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
 
   // ------------------------------------------------------------ long-poll
 
+  describe('store readAfter over interleaved tenants', () => {
+    it("returns only the tenant's own items, in cursor order, honoring after and limit", async () => {
+      const a = await bot();
+      const other = await bot();
+      const ra = await openRequest(a.tenantId);
+      const ro = await openRequest(other.tenantId);
+      const mine: bigint[] = [];
+      for (let i = 0; i < 6; i++) {
+        const own = await prisma.chatbotFeedItem.create({
+          data: {
+            tenantId: a.tenantId,
+            requestId: ra.id,
+            type: 'request.cancelled',
+            payload: {},
+          },
+        });
+        mine.push(own.cursor);
+        await prisma.chatbotFeedItem.create({
+          data: {
+            tenantId: other.tenantId,
+            requestId: ro.id,
+            type: 'request.cancelled',
+            payload: {},
+          },
+        });
+      }
+      const read = (after: bigint, limit: number) =>
+        inTenant(a.tenantId, async () => {
+          const rows = await feedStore.readAfter(after, limit);
+          return rows.map((row) => row.cursor);
+        });
+      expect(await read(0n, 50)).toEqual(mine);
+      expect(await read(mine[1], 2)).toEqual([mine[2], mine[3]]);
+      expect(await read(mine[5], 50)).toEqual([]);
+      // Past the highest cursor of the whole table: nothing, not the neighbour.
+      expect(await read(mine[5] + 1000n, 50)).toEqual([]);
+      const rows = await inTenant(a.tenantId, () => feedStore.readAfter(0n, 1));
+      expect(rows[0]).toMatchObject({
+        cursor: mine[0],
+        requestId: ra.id,
+        type: 'request.cancelled',
+      });
+      expect(typeof rows[0].deliveryId).toBe('string');
+    });
+  });
+
   describe('GET /chatbot-api/feed', () => {
     it('answers the scopes and the query errors in the sanitized envelope', async () => {
       const noScope = await bot(['feed:ack']);

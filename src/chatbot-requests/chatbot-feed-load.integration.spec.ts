@@ -51,7 +51,10 @@ import {
 } from './application/chatbot-recovery.service';
 import { enqueueCancelled } from './infrastructure/chatbot-feed-writes';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
-import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
+import {
+  PrismaChatbotFeedStore,
+  tenantHeadCursor,
+} from './infrastructure/prisma-chatbot-feed.store';
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
@@ -111,7 +114,11 @@ function stats(values: number[]) {
 
 /** `$n` → a literal, so EXPLAIN plans the statement the app really ran. */
 function inline(query: string, rawParams: string): string {
-  const params: unknown[] = JSON.parse(rawParams);
+  // Integers beyond 2^53 (the cursor's upper bound) would lose digits as JS
+  // numbers: keep them as strings, which PostgreSQL reads as untyped literals.
+  const params: unknown[] = JSON.parse(
+    rawParams.replace(/(?<![\d."])(\d{16,})(?![\d."])/g, '"$1"'),
+  );
   const literal = (value: unknown): string => {
     if (typeof value === 'number' || typeof value === 'boolean') {
       return String(value);
@@ -184,6 +191,7 @@ describePerf('chatbot feed load test (PostgreSQL, PERF=1)', () => {
   let B: { tenantId: string };
   let quiet: string;
   let stalled: string;
+  let gap: string;
   let cancelledPool: string[] = [];
   let cancelledNext = 0;
 
@@ -401,10 +409,14 @@ describePerf('chatbot feed load test (PostgreSQL, PERF=1)', () => {
     const C = await createTenant('quiet');
     // D: a mid-size tenant that went quiet early, while the others kept writing.
     const D = await createTenant('stalled');
+    // E: a mid-share tenant with 50k items early and a few at the very end,
+    // so a bot that polls after its first block faces a gap of foreign rows.
+    const E = await createTenant('gap');
     await seedRequests(A.tenantId, SIZE.openRequests, SIZE.closedRequests);
     await seedRequests(B.tenantId, SIZE.noiseOpen, SIZE.noiseClosed);
     await seedRequests(C, 20, 80);
     await seedRequests(D, 100, 100);
+    await seedRequests(E, 200, 200);
     const slices = 40;
     const slice = (n: number, i: number): [number, number] => [
       Math.floor((n * i) / slices) + 1,
@@ -428,11 +440,15 @@ describePerf('chatbot feed load test (PostgreSQL, PERF=1)', () => {
         toB,
       );
       if (i % 10 === 0) await seedFeed(C, 100, 4, i / 10 + 1, i / 10 + 1);
+      if (i < 10)
+        await seedFeed(E, 400, 60_000, i * 5_000 + 1, (i + 1) * 5_000);
+      if (i === slices - 1) await seedFeed(E, 400, 60_000, 50_001, 60_000);
       if (i < 4)
         await seedFeed(D, 200, 40_000, i * 10_000 + 1, (i + 1) * 10_000);
     }
     quiet = C;
     stalled = D;
+    gap = E;
     // A fresh table has no statistics; autovacuum would not have run yet.
     await adminPrisma.$executeRawUnsafe('ANALYZE "chatbot_requests"');
     await adminPrisma.$executeRawUnsafe('ANALYZE "chatbot_feed_items"');
@@ -835,9 +851,6 @@ describePerf('chatbot feed load test (PostgreSQL, PERF=1)', () => {
       )[0];
     const neighbour = await range(B.tenantId);
     const sparse = await range(quiet);
-    const quietItems = await adminPrisma.chatbotFeedItem.count({
-      where: { tenantId: quiet },
-    });
     await explainLast(
       'feed read, big neighbour tenant B: readAfter(after=mid)',
       () =>
@@ -863,40 +876,88 @@ describePerf('chatbot feed load test (PostgreSQL, PERF=1)', () => {
       () => feedStore.readAfter(idle.hi, 50),
       stalled,
     );
+    // E: after its first block of 50 000 items, the next item of E is behind a
+    // gap of foreign rows. The shape this slice replaced (a head-cursor bound
+    // on `tenantId = $1 AND cursor > $2`) is explained next to the current one.
+    const endOfFirstBlock = (
+      await adminPrisma.$queryRaw<{ cursor: bigint }[]>(Prisma.sql`
+        SELECT "cursor" FROM "chatbot_feed_items" WHERE "tenantId" = ${gap}
+        ORDER BY "cursor" OFFSET 49999 LIMIT 1`)
+    )[0].cursor;
+    const gapLabel =
+      'feed read, mid-share tenant E after a gap of foreign rows: readAfter(after = end of its first block)';
+    const legacyLabel =
+      'feed read, tenant E after the gap, PREVIOUS shape (tenantId = $1 AND cursor > $2 AND cursor <= head): for comparison only';
+    await explainLast(
+      gapLabel,
+      () => feedStore.readAfter(endOfFirstBlock, 50),
+      gap,
+    );
+    await explainLast(
+      legacyLabel,
+      () =>
+        writerTenant.getClient().$queryRaw(Prisma.sql`
+          SELECT "cursor", "deliveryId"::text AS "deliveryId", "type", "requestId",
+                 "conversationRef", "payload"
+          FROM "chatbot_feed_items"
+          WHERE "tenantId" = ${gap} AND "cursor" > ${endOfFirstBlock}
+            AND "cursor" <= ${tenantHeadCursor(gap)}
+          ORDER BY "cursor" LIMIT 50`),
+      gap,
+    );
     report.explain = explain;
 
     const FEED_INDEX = 'chatbot_feed_items_tenantId_cursor_idx';
     const planOf = (label: string) => (explain[label] ?? []).join('\n');
     const executionMs = (label: string) =>
       Number(/Execution Time: ([\d.]+) ms/.exec(planOf(label))?.[1] ?? NaN);
-    const sparseLabels = [
+    const buffers = (label: string) => {
+      const line = /Buffers: shared (hit=\d+)?(?: )?(read=\d+)?/.exec(
+        planOf(label),
+      );
+      return (line?.slice(1) ?? []).reduce(
+        (sum, part) => sum + Number(part?.split('=')[1] ?? 0),
+        0,
+      );
+    };
+    const usedIndex = (label: string) =>
+      /Index (?:Only )?Scan(?: Backward)? using "?([\w]+)"? on chatbot_feed_items(?! chatbot_feed_items_1)/.exec(
+        planOf(label),
+      )?.[1] ?? '?';
+    const feedLabels = [
+      'feed read: readAfter(after=mid, limit 50)',
+      'feed read: nearest-tail readAfter(after=max-10)',
+      'feed read, big neighbour tenant B: readAfter(after=mid)',
       'feed read, quiet tenant C: readAfter(after=0)',
       'feed read, quiet tenant C: poll at its own tail (after=its max, others keep writing)',
+      'feed read, stalled tenant D (40k items, none for a long time): poll at its own tail (after=its max)',
+      gapLabel,
     ];
     verdict(
-      'Feed read uses index (tenantId, cursor) for a tenant that is a small share of the table',
-      `Index Scan on ${FEED_INDEX} (quiet tenant: ${quietItems} items among ${report.sizes.tenantA.tableFeed} rows)`,
-      sparseLabels
-        .map((label) => (planOf(label).includes(FEED_INDEX) ? 'yes' : 'NO'))
+      'Feed read always uses index (tenantId, cursor): every tenant shape, including a mid-share tenant after a gap',
+      `Index Scan on ${FEED_INDEX} for all ${feedLabels.length} cases`,
+      feedLabels
+        .map((label) =>
+          usedIndex(label) === FEED_INDEX ? 'yes' : `NO (${usedIndex(label)})`,
+        )
         .join(' / '),
-      sparseLabels.every((label) => planOf(label).includes(FEED_INDEX)),
-    );
-    const pick = (label: string) =>
-      /Index Scan(?: Backward)? using (\S+)/.exec(planOf(label))?.[1] ?? '?';
-    const stalledLabel =
-      'feed read, stalled tenant D (40k items, none for a long time): poll at its own tail (after=its max)';
-    verdict(
-      'Feed read for a mid-size tenant idle for a long time (worst case for a cursor scan; informational)',
-      'bounded buffers: reads must not walk the neighbours rows',
-      `${pick(stalledLabel)}, ${executionMs(stalledLabel)} ms, ${/Buffers: shared hit=(\d+)/.exec(planOf(stalledLabel))?.[1]} buffers`,
-      planOf(stalledLabel).includes(FEED_INDEX),
+      feedLabels.every((label) => usedIndex(label) === FEED_INDEX),
     );
     verdict(
-      'Feed read plan for the big tenants (informational)',
-      'fast, bounded buffers whichever index the planner picks',
-      `A (62 % of the feed rows): ${pick('feed read: readAfter(after=mid, limit 50)')}, ${executionMs('feed read: readAfter(after=mid, limit 50)')} ms; B: ${pick('feed read, big neighbour tenant B: readAfter(after=mid)')}, ${executionMs('feed read, big neighbour tenant B: readAfter(after=mid)')} ms`,
-      executionMs('feed read: readAfter(after=mid, limit 50)') < 5,
+      'Feed read after a gap of foreign rows (tenant E) reads a bounded number of buffers',
+      'under 100 buffers',
+      `${buffers(gapLabel)} buffers, ${executionMs(gapLabel)} ms (previous shape: ${usedIndex(legacyLabel)}, ${buffers(legacyLabel)} buffers, ${executionMs(legacyLabel)} ms)`,
+      buffers(gapLabel) < 100,
     );
+    verdict(
+      'Feed read plans of the big tenants are fast',
+      'under 5 ms',
+      `A ${executionMs('feed read: readAfter(after=mid, limit 50)')} ms, B ${executionMs('feed read, big neighbour tenant B: readAfter(after=mid)')} ms, D (idle) ${executionMs(feedLabels[5])} ms`,
+      feedLabels.every((label) => executionMs(label) < 5),
+    );
+    // The invariant this slice's query shape exists for.
+    expect(usedIndex(gapLabel)).toBe(FEED_INDEX);
+    expect(buffers(gapLabel)).toBeLessThan(100);
   }, 1_800_000);
 
   // ------------------------------------------- (c) an idle long-poll is free

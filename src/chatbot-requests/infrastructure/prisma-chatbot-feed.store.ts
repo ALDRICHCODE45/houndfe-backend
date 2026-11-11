@@ -50,6 +50,9 @@ interface LockedDelivery {
 
 const DAY_MS = 86_400_000;
 
+/** Largest `bigint` (the cursor column's type): the upper end of a tenant's range. */
+const MAX_CURSOR = 9223372036854775807n;
+
 /**
  * A tenant's highest feed cursor (NULL for a tenant with no items), always
  * through `(tenantId, cursor)`. `max("cursor") WHERE "tenantId" = $1` would let
@@ -91,17 +94,18 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
   }
 
   /**
-   * The cursor is a global sequence, so the primary key is also an ordered
-   * path to "cursor > after", filtered by tenant. For a tenant that is a big
-   * share of the table the planner prefers it (it assumes the tenant's rows are
-   * spread evenly after `after`), and for a tenant that has been quiet while the
-   * others kept writing it walks every neighbour row written since (measured: a
-   * tenant with 40k items, idle while 270k rows were written, took 78 ms per
-   * poll). Bounding the range by the tenant's own highest cursor
-   * (`tenantHeadCursor`, one probe of `(tenantId, cursor)`) makes the range empty
-   * for a bot that is caught up and never wider than the tenant's own backlog
-   * otherwise. A row above the bound is not visible to this statement, so nothing
-   * is skipped.
+   * `(tenantId, cursor)` must answer this read, never the primary key.
+   * `cursor` is a global sequence, so the primary key is also an ordered path
+   * to "cursor > after" filtered by tenant, and a planner that takes it walks
+   * every other tenant's rows between `after` and this tenant's next item
+   * (measured: 78 ms and 21 852 buffers for a tenant idle behind 270 000
+   * foreign rows; a head-cursor bound only fixed the caught-up case, not a
+   * mid-share tenant after a gap). So the statement gives it no such path: the
+   * tenant is not compared with `=` (a constant would drop it from the
+   * ordering) and the range is a pair of row comparisons, ordered by
+   * `("tenantId", "cursor")`. Only the composite index can serve that without
+   * sorting the table, and `(t, c) > (t, after) AND (t, c) <= (t, MAX)` is
+   * exactly `tenantId = t AND cursor > after`.
    */
   readAfter(after: bigint, limit: number): Promise<FeedItemRow[]> {
     const tenantId = this.tenantId;
@@ -109,9 +113,9 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       SELECT "cursor", "deliveryId"::text AS "deliveryId", "type", "requestId",
              "conversationRef", "payload"
       FROM "chatbot_feed_items"
-      WHERE "tenantId" = ${tenantId} AND "cursor" > ${after}
-        AND "cursor" <= ${tenantHeadCursor(tenantId)}
-      ORDER BY "cursor" LIMIT ${limit}`);
+      WHERE ("tenantId", "cursor") > (${tenantId}, ${after})
+        AND ("tenantId", "cursor") <= (${tenantId}, ${MAX_CURSOR})
+      ORDER BY "tenantId", "cursor" LIMIT ${limit}`);
   }
 
   pendingDeferred(

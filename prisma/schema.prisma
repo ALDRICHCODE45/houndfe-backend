@@ -3929,9 +3929,10 @@ model ChatbotBotReceipt {
 // cursor. `cursor` is a global bigserial, so it only orders within a tenant;
 // enqueuers hold a per-tenant advisory lock from the insert to the commit, so
 // within a tenant cursor order is commit order and a reader never skips an
-// item. `ackedAt` is set only by a terminal outcome: DEFERRED_WINDOW_CLOSED
-// records `outcome` and leaves the item pending. `attemptId` + `evidenceHash`
-// are the idempotency identity of the last outcome. Retention: 30 days.
+// item. `ackedAt` is set only by a terminal outcome: DEFERRED_WINDOW_CLOSED and
+// DEFERRED_HUMAN_SESSION record `outcome` and leave the item pending.
+// `attemptId` + `evidenceHash` are the idempotency identity of the last
+// outcome. Retention: 30 days.
 model ChatbotFeedItem {
   cursor            BigInt    @id @default(autoincrement())
   tenantId          String

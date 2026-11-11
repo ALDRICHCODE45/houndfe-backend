@@ -280,6 +280,28 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
       });
     });
 
+    it('tolerates 5 s of clock skew: closed up to 5 s before updatedSince still comes back', async () => {
+      const b = await bot();
+      const since = at(10);
+      const justBefore = await closed(
+        b,
+        new Date(since.getTime() - 3_000),
+        'CANCELLED',
+      );
+      const tooOld = await closed(
+        b,
+        new Date(since.getTime() - 6_000),
+        'CANCELLED',
+      );
+      const response = await recover(
+        b,
+        `?status=open&updatedSince=${since.toISOString()}`,
+      ).expect(200);
+      const ids = response.body.items.map((i: any) => i.id);
+      expect(ids).toContain(justBefore.id);
+      expect(ids).not.toContain(tooOld.id);
+    });
+
     it('is the bot projection: ids, folio, subtype, conversation, window and times only', async () => {
       const b = await bot();
       const r = await open(b, at(1), { conversationRef: 'wa:5215512345678' });
@@ -299,6 +321,8 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
           updatedAt: at(1).toISOString(),
           closedAt: null,
           pendingDeliveries: [],
+          undeliveredTruncated: false,
+          undeliveredResumeAfter: null,
         },
       ]);
     });
@@ -547,6 +571,23 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
       expect(item.pendingDeliveries.map((d: any) => d.deliveryId)).toEqual(
         made.slice(2).map((m) => m.deliveryId),
       );
+      // Seven undelivered, five listed: say so, and where the feed serves the
+      // oldest one again (`after` = its cursor - 1).
+      expect(item.undeliveredTruncated).toBe(true);
+      expect(item.undeliveredResumeAfter).toBe(pad(made[0].cursor - 1n));
+    });
+
+    it('exactly 5 undelivered is not truncated; acknowledged items do not count', async () => {
+      const b = await bot();
+      const r = await open(b, at(1));
+      for (let i = 0; i < 5; i++) await enqueue(b, r.id);
+      for (let i = 0; i < 3; i++) {
+        await enqueue(b, r.id, { outcome: 'PROVIDER_ACCEPTED', acked: true });
+      }
+      const [item] = (await recover(b).expect(200)).body.items;
+      expect(item.pendingDeliveries).toHaveLength(5);
+      expect(item.undeliveredTruncated).toBe(false);
+      expect(item.undeliveredResumeAfter).toBeNull();
     });
   });
 

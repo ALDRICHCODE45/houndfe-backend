@@ -279,7 +279,7 @@ Scope `requests:read`, class `read`, tenant from the credential (`X-Branch-Id`, 
 | Param | Rule |
 | --- | --- |
 | `status` | Required, exactly `open`. |
-| `updatedSince` | Optional, canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`. Adds the requests **closed at or after** this instant (`RESOLVED` or `CANCELLED`), so you can drop them. Open requests are returned **all**, however old, with or without it. Send an instant **earlier** than your last sync (the last instant your pending state was complete), never later. |
+| `updatedSince` | Optional, canonical UTC `YYYY-MM-DDTHH:mm:ss.sssZ`. Adds the requests **closed at or after** this instant (`RESOLVED` or `CANCELLED`), so you can drop them. The backend reaches **5 s earlier** than the value you send, because `updatedAt` and `closedAt` are stamped by whichever backend replica writes, with its own clock: a request closed by a replica whose clock runs slightly behind is still returned. You may therefore see a closed request you already handled; dedupe by `id`. Open requests are returned **all**, however old, with or without it. Send an instant **earlier** than your last sync (the last instant your pending state was complete), never later. |
 | `cursor` | The `nextPage` of the previous page; omit for the first page. Opaque. |
 | `limit` | 1..50, default 50. |
 
@@ -298,7 +298,9 @@ Anything else (a missing or other `status`, an unknown key, a non-canonical `upd
       "createdAt": "2026-11-10T10:00:00.000Z", "updatedAt": "2026-11-10T16:00:00.000Z", "closedAt": "2026-11-10T16:00:00.000Z",
       "pendingDeliveries": [
         { "cursor": "000000001842", "deliveryId": "b1c0…", "type": "request.answered", "requestId": "9a7e…", "conversationRef": "wa:5215512345678", "payload": { "kind": "DECISION", "…": "…" }, "notBefore": null, "expiresAt": null, "deferredReason": null }
-      ]
+      ],
+      "undeliveredTruncated": false,
+      "undeliveredResumeAfter": null
     }
   ],
   "nextCursor": "000000001900",
@@ -306,8 +308,9 @@ Anything else (a missing or other `status`, an unknown key, a non-canonical `upd
 }
 ```
 
-- It is the bot's view: ids, folio, kind, subtype, status, `conversationRef`, `legacyId` (the id you track from the create answer, for wrapped subtypes), the window, `cancelReason` and times. **No customer, phone, assignee or staff data, and no free text.**
+- It is the bot's view: ids, folio, kind, subtype, status, `conversationRef` (the bot's own key, `wa:<wa_id>`: **it contains the customer's phone number**, so keep it out of logs and analytics like any phone),  `legacyId` (the id you track from the create answer, for wrapped subtypes), the window, `cancelReason` and times. **No customer name, assignee or staff data, and no free text.**
 - **`pendingDeliveries`**: the request's latest **5** feed items with no terminal outcome, oldest first, in the feed item shape plus `deferredReason` (`null` when no attempt was reported yet, else `WINDOW_CLOSED` or `HUMAN_SESSION`). Use `deliveryId` to deliver and ACK (or ACK `STALE`) the answers you never delivered. A closed request keeps showing its answer until it is acknowledged.
+- **`undeliveredTruncated` / `undeliveredResumeAfter`.** `pendingDeliveries` lists at most 5 items per request. When the request has more undelivered items than that, `undeliveredTruncated` is `true` and `undeliveredResumeAfter` is the feed `after` that serves its **oldest** undelivered item again (its cursor minus one); otherwise they are `false` and `null`. If any request in the walk is truncated, resume the feed from the **smallest** of those `undeliveredResumeAfter` values and the walk's `nextCursor` (all are fixed-width, zero-padded cursors, so compare them as strings; do no arithmetic), and dedupe by `deliveryId`: the feed then re-serves the older items. Do **not** use `pending-deliveries` for this: it serves deferred items only, not the ones that were never attempted.
 - **`nextCursor`** is the tenant's feed position when the **first page** was served (never below the retention watermark; `000000000000` for an empty feed). **Every page of one walk answers the same value** (the page cursor carries it).
 - **`nextPage`** is the `cursor` of the next page, `null` on the last one.
 
@@ -317,7 +320,7 @@ Procedure:
 2. Call the route with `status=open` and `updatedSince` = the last instant your state was complete. Omit it if you do not know: every open request is returned anyway, so a pending record of yours for a request the walk did not list as open is a closed one (you just do not get its final status or its unacknowledged answer).
 3. Walk every page with `cursor=<nextPage>` until `nextPage` is `null`. Keep the `nextCursor` of the first page.
 4. For each item, make your records match it: `NEW` or `IN_PROGRESS` → you must hold a pending record (create or refresh it from `conversationRef`, `legacyId`, the window); `RESOLVED` or `CANCELLED` → drop the pending record (and the same for any record the walk did not list as open). Then handle its `pendingDeliveries` as feed items (same type rules, dedupe by `deliveryId`, ACK each).
-5. Only after every page was processed and saved, store `nextCursor` as your feed position and resume `GET /chatbot-api/feed?after=<nextCursor>`. Everything that committed after the walk started is after that position; what the walk already showed may arrive again in the feed, which is safe (dedupe by `deliveryId`, ACKs are idempotent). `nextCursor` is accepted by the feed (it is never below the purge watermark), so it cannot answer `410` again right away.
+5. Only after every page was processed and saved, store as your feed position `nextCursor` (or, if a request came back truncated, the smaller `undeliveredResumeAfter`, see above) and resume `GET /chatbot-api/feed?after=<that>`. Everything that committed after the walk started is after that position; what the walk already showed may arrive again in the feed, which is safe (dedupe by `deliveryId`, ACKs are idempotent). `nextCursor` is accepted by the feed (it is never below the purge watermark), so it cannot answer `410` again right away.
 
 ### Shutdown and restarts
 

@@ -17,6 +17,13 @@ export const RECOVERY_LIMITS = {
   maxLimit: 50,
   /** Per request: the latest undelivered feed items sent along. */
   deliveriesPerRequest: 5,
+  /**
+   * `updatedAt` and `closedAt` are stamped by whichever replica writes (the ORM
+   * clock) and the bot's `updatedSince` comes from its own clock or a previous
+   * answer, so the closed branch reaches this far before `updatedSince`; the
+   * bot dedupes by request id.
+   */
+  clockSkewMs: 5_000,
 } as const;
 
 export interface RecoveryPage {

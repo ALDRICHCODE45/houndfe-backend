@@ -19,6 +19,7 @@ import { tenantHeadCursor } from './prisma-chatbot-feed.store';
 import type {
   ChatbotRecoveryStore,
   RecoveryRequestRow,
+  UndeliveredSummary,
 } from '../application/chatbot-recovery.service';
 
 const COLUMNS = Prisma.sql`"id", "folio", "kind", "subtype", "status",
@@ -96,5 +97,15 @@ export class PrismaChatbotRecoveryStore implements ChatbotRecoveryStore {
           AND f."ackedAt" IS NULL
         ORDER BY f."cursor" DESC LIMIT ${perRequest}) AS d
       ORDER BY d."cursor"`);
+  }
+
+  undeliveredSummary(requestIds: string[]): Promise<UndeliveredSummary[]> {
+    const tenantId = this.tenantId;
+    return this.db.$queryRaw<UndeliveredSummary[]>(Prisma.sql`
+      SELECT "requestId", count(*)::int AS "count", min("cursor") AS "oldestCursor"
+      FROM "chatbot_feed_items"
+      WHERE "tenantId" = ${tenantId} AND "requestId" = ANY(${requestIds}::text[])
+        AND "ackedAt" IS NULL
+      GROUP BY "requestId"`);
   }
 }
