@@ -64,6 +64,26 @@ describe('ReceiptReviewOutboxDispatcher', () => {
     });
   });
 
+  it('drops a legacy customerName from the Inngest event data (R10)', async () => {
+    const { dispatcher, send } = harness();
+
+    await dispatcher.dispatch(
+      claimed({
+        payload: {
+          tenantId: 'tenant-1',
+          receiptId: 'receipt-1',
+          customerName: 'Irene Domínguez',
+        },
+      }),
+    );
+
+    expect(send).toHaveBeenCalledWith(
+      'receipts/review.requested',
+      { tenantId: 'tenant-1', receiptId: 'receipt-1' },
+      'tenant-1:receipt-1',
+    );
+  });
+
   it('keeps the row PENDING with a backoff when the send rejects', async () => {
     const { dispatcher, send, lastWrite } = harness();
     send.mockRejectedValue(new Error('inngest down'));
