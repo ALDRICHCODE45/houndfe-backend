@@ -266,7 +266,9 @@ export type ChatbotRequestCommandErrorCode =
   | 'RATE_LIMITED'
   | 'CURSOR_EXPIRED'
   | 'OUTCOME_ALREADY_RECORDED'
-  | 'OUTCOME_NOT_ALLOWED';
+  | 'OUTCOME_NOT_ALLOWED'
+  // Staff reads (unit 4).
+  | 'RANGE_TOO_LARGE';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -295,7 +297,18 @@ export const formatFolio = (folio: number) =>
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
 
-export function toState(row: ChatbotRequestRow): ChatbotRequestState {
+export function toState(
+  row: Pick<
+    ChatbotRequestRow,
+    | 'kind'
+    | 'subtype'
+    | 'status'
+    | 'version'
+    | 'assigneeUserId'
+    | 'assigneeDisplayName'
+    | 'overdueAt'
+  >,
+): ChatbotRequestState {
   return {
     kind: row.kind,
     subtype: row.subtype,

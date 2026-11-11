@@ -1,6 +1,6 @@
 /**
- * Chatbot request inbox (human-intervention units 2, 3 and 5): staff commands
- * claim, release, reassign, cancel and resolve, and the bot's create, cancel
+ * Chatbot request inbox (human-intervention units 2, 3, 4 and 5): staff reads
+ * (groups, counts, detail, history) and commands claim, release, reassign, cancel and resolve, and the bot's create, cancel
  * and feed routes (feed, delivery outcome, pending deliveries, recovery). `AuthModule` provides `JwtAuthGuard` and `PermissionsGuard`;
  * `ActiveUserGuard` resolves `PrismaService` from the global `DatabaseModule`;
  * `ChatbotApiModule` supplies the bot guard's credential repository.
@@ -10,6 +10,7 @@
  * with the wrapper hook; `HumanDecisionsModule` still owns the old routes.
  */
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
@@ -39,6 +40,15 @@ import {
   BotRequestIntakeService,
   LEGACY_INTAKE,
 } from './application/bot-request-intake.service';
+import {
+  CHATBOT_REQUEST_READ_STORE,
+  ChatbotRequestReadsService,
+  CUSTOMER_KEY_SEALER,
+  INBOX_CLOCK,
+} from './application/chatbot-request-reads.service';
+import { CustomerKeySealer } from './domain/customer-key-sealer';
+import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-request-read.store';
+import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
 import { ChatbotRequestWrapperModule } from './chatbot-request-wrapper.module';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
@@ -65,6 +75,7 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
   ],
   controllers: [
     ChatbotRequestCommandsController,
+    ChatbotRequestReadsController,
     BotRequestsController,
     BotFeedController,
     BotRecoveryController,
@@ -73,6 +84,19 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
     ActiveUserGuard,
     ChatbotRequestHttpFilter,
     ChatbotRequestCommandsService,
+    ChatbotRequestReadsService,
+    {
+      provide: CHATBOT_REQUEST_READ_STORE,
+      useClass: PrismaChatbotRequestReadStore,
+    },
+    {
+      // R12: staff responses never carry the raw customerKey (it is the phone).
+      provide: CUSTOMER_KEY_SEALER,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
+        new CustomerKeySealer(config.getOrThrow<string>('JWT_SECRET')),
+    },
+    { provide: INBOX_CLOCK, useValue: () => new Date() },
     BotRequestIntakeService,
     ChatbotFeedService,
     ChatbotRecoveryService,

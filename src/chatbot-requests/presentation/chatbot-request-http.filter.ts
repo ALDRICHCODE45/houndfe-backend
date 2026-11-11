@@ -45,6 +45,7 @@ const MESSAGES: Record<string, string> = {
   OUTCOME_ALREADY_RECORDED:
     'A different terminal outcome was already recorded for this delivery',
   OUTCOME_NOT_ALLOWED: 'This outcome is not allowed for this delivery',
+  RANGE_TOO_LARGE: 'The date range is longer than 92 days',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',
 };

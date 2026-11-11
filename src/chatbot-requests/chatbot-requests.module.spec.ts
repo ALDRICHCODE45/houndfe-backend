@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { ClsService } from 'nestjs-cls';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
@@ -26,6 +27,8 @@ import { ChatbotRequestsModule } from './chatbot-requests.module';
 import { BotRequestsController } from './presentation/bot-requests.controller';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
+import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
+import { ChatbotRequestReadsService } from './application/chatbot-request-reads.service';
 
 @Module({
   providers: [
@@ -68,7 +71,15 @@ describe('ChatbotRequestsModule wiring', () => {
   it('resolves the controller and the service without database access', async () => {
     const pass = { canActivate: () => true };
     const module = await Test.createTestingModule({
-      imports: [ChatbotRequestsModule],
+      imports: [
+        // Global in the application; the customerKey sealer derives from JWT_SECRET.
+        ConfigModule.forRoot({
+          isGlobal: true,
+          ignoreEnvFile: true,
+          load: [() => ({ JWT_SECRET: 'wiring-spec-secret-of-some-length' })],
+        }),
+        ChatbotRequestsModule,
+      ],
     })
       .overrideModule(DatabaseModule)
       .useModule(IsolatedDatabaseModule)
@@ -92,6 +103,8 @@ describe('ChatbotRequestsModule wiring', () => {
     expect(module.get(ChatbotRequestCommandsService)).toBeDefined();
     expect(module.get(BotRequestsController)).toBeDefined();
     expect(module.get(BotRequestIntakeService)).toBeDefined();
+    expect(module.get(ChatbotRequestReadsController)).toBeDefined();
+    expect(module.get(ChatbotRequestReadsService)).toBeDefined();
   });
 
   // The flows take the wrapper as an optional dependency (so their own specs

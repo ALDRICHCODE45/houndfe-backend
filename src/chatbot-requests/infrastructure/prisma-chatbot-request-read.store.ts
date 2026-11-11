@@ -1,0 +1,451 @@
+/**
+ * Prisma adapter of `ChatbotRequestReadStore` (unit 4, contract §3.8, §10.1).
+ *
+ * Hot path, the grouped inbox: the page of groups comes from the denormalized
+ * `chatbot_customer_groups` through `(tenantId, mostUrgentAt, customerKey)`
+ * and each group's rows from `(tenantId, customerKey, status)` in one LATERAL
+ * join, so there is no GROUP BY at read time. The only aggregate is the
+ * resolved/cancelled tabs, which group the bounded 7-day window of closed rows
+ * (there is no group table for closed requests).
+ *
+ * Every statement names `tenantId` itself; the tenant comes from CLS. Dates go
+ * as `Date` parameters, like the writers do.
+ */
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type {
+  AuditRecord,
+  ChatbotRequestReadStore,
+  CustomerRecord,
+  DetailRecord,
+  GroupRecord,
+  HistoryQuery,
+  InboxCounts,
+  InboxFilters,
+  InboxTab,
+  OrderRecord,
+  RequestRecord,
+} from '../application/chatbot-request-reads.service';
+import { readDecision } from './chatbot-request-decision.reader';
+
+/** Requests inside one group of the grouped inbox (§3.8). */
+const GROUP_ROWS = 10;
+const MERGE_CANDIDATES = 20;
+const OTHER_OPEN = 20;
+/** Technical default of "ventana por cerrar" (§8) until unit 7 adds settings. */
+const WINDOW_WARNING_MS = 2 * 3_600_000;
+
+const OPEN = Prisma.sql`r."status" IN ('NEW', 'IN_PROGRESS')`;
+const URGENCY = Prisma.sql`(CASE WHEN r."status" = 'NEW' THEN r."claimDeadlineAt" ELSE r."resolveDeadlineAt" END)`;
+const COLUMNS = Prisma.sql`
+  r."id", r."folio", r."kind"::text AS "kind", r."subtype"::text AS "subtype",
+  r."status"::text AS "status", r."version", r."customerKey", r."customerId",
+  r."phoneCountryCode", r."phone", r."assigneeUserId", r."assigneeDisplayName",
+  r."claimedAt", r."claimDeadlineAt", r."resolveDeadlineAt", r."overdueAt",
+  r."whatsappWindowClosesAt", r."scheduledFor", r."requiresTemplateAtStart",
+  r."needsReschedule", r."summary", r."createdAt", r."closedAt",
+  r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt"`;
+const OPEN_ORDER = Prisma.sql`ORDER BY "urgencyAt" ASC NULLS LAST, r."createdAt" ASC, r."id" ASC`;
+const CLOSED_ORDER = Prisma.sql`ORDER BY r."closedAt" DESC, r."id" DESC`;
+
+const and = (parts: Prisma.Sql[]) => Prisma.join(parts, ' AND ');
+const asDate = (part: string | null) => new Date(part as string);
+
+/** Tab and filters as predicates on alias `r` (open tabs hit the partial indexes). */
+function inboxPredicates(
+  tab: InboxTab,
+  filters: InboxFilters,
+  userId: string,
+  now: Date,
+  cutoff: Date,
+): Prisma.Sql[] {
+  const parts: Prisma.Sql[] = [];
+  if (tab === 'open' || tab === 'scheduled') parts.push(OPEN);
+  else {
+    const status = tab === 'resolved' ? 'RESOLVED' : 'CANCELLED';
+    parts.push(
+      Prisma.sql`r."status" = ${status}::"ChatbotRequestStatus" AND r."closedAt" >= ${cutoff}`,
+    );
+  }
+  if (tab === 'scheduled') parts.push(Prisma.sql`r."scheduledFor" IS NOT NULL`);
+  if (filters.subtype) {
+    parts.push(
+      Prisma.sql`r."subtype" = ${filters.subtype}::"ChatbotRequestSubtype"`,
+    );
+  }
+  const { assignee } = filters;
+  if (assignee?.kind === 'me') {
+    parts.push(Prisma.sql`r."assigneeUserId" = ${userId}`);
+  } else if (assignee?.kind === 'user') {
+    parts.push(Prisma.sql`r."assigneeUserId" = ${assignee.id}`);
+  } else if (assignee?.kind === 'unassigned') {
+    parts.push(Prisma.sql`r."assigneeUserId" IS NULL`);
+  }
+  if (filters.overdue) parts.push(Prisma.sql`r."overdueAt" IS NOT NULL`);
+  if (filters.windowClosingSoon) {
+    parts.push(
+      Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + WINDOW_WARNING_MS)}`,
+    );
+  }
+  return parts;
+}
+
+/** Keyset predicate after `(urgency, createdAt, id)` with NULL urgency last. */
+function afterOpenCursor(cursor: Array<string | null>): Prisma.Sql {
+  const [urgency, createdAt, id] = cursor;
+  const tail = Prisma.sql`(r."createdAt", r."id") > (${asDate(createdAt)}, ${id})`;
+  return urgency === null
+    ? Prisma.sql`(${URGENCY} IS NULL AND ${tail})`
+    : Prisma.sql`(${URGENCY} > ${asDate(urgency)} OR ${URGENCY} IS NULL OR (${URGENCY} = ${asDate(urgency)} AND ${tail}))`;
+}
+
+const beforeClosedCursor = (cursor: Array<string | null>) =>
+  Prisma.sql`(r."closedAt", r."id") < (${asDate(cursor[0])}, ${cursor[1]})`;
+
+@Injectable()
+export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
+  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+
+  private get db() {
+    return this.tenantPrisma.getClient();
+  }
+
+  tenantId(): string {
+    return this.tenantPrisma.getTenantId();
+  }
+
+  async groups(q: {
+    tab: InboxTab;
+    filters: InboxFilters;
+    userId: string;
+    now: Date;
+    cutoff: Date;
+    limit: number;
+    cursor: Array<string | null> | null;
+  }): Promise<GroupRecord[]> {
+    const t = this.tenantId();
+    const preds = inboxPredicates(q.tab, q.filters, q.userId, q.now, q.cutoff);
+    const closed = q.tab === 'resolved' || q.tab === 'cancelled';
+    const rows = closed
+      ? await this.closedGroups(t, preds, q)
+      : await this.openGroups(t, preds, q);
+    const groups = new Map<string, GroupRecord>();
+    for (const {
+      total,
+      mostUrgentAt,
+      openCount,
+      lastClosedAt,
+      ...row
+    } of rows) {
+      // SAFETY: the LATERAL select lists exactly the `RequestRecord` columns.
+      const request = row as unknown as RequestRecord;
+      const group = groups.get(request.customerKey) ?? {
+        customerKey: request.customerKey,
+        mostUrgentAt,
+        openCount,
+        lastClosedAt,
+        moreRequests: 0,
+        requests: [],
+      };
+      group.requests.push(request);
+      group.moreRequests = total - group.requests.length;
+      groups.set(request.customerKey, group);
+    }
+    return [...groups.values()];
+  }
+
+  private openGroups(
+    t: string,
+    preds: Prisma.Sql[],
+    q: { limit: number; cursor: Array<string | null> | null; tab: InboxTab },
+  ) {
+    const filtered = preds.length > 1 || q.tab === 'scheduled';
+    const [at, key] = q.cursor ?? [];
+    const cursor = !q.cursor
+      ? Prisma.empty
+      : at === null
+        ? Prisma.sql`AND g."mostUrgentAt" IS NULL AND g."customerKey" > ${key}`
+        : Prisma.sql`AND ((g."mostUrgentAt", g."customerKey") > (${asDate(at)}, ${key}) OR g."mostUrgentAt" IS NULL)`;
+    const exists = filtered
+      ? Prisma.sql`AND EXISTS (SELECT 1 FROM "chatbot_requests" r
+          WHERE r."tenantId" = g."tenantId" AND r."customerKey" = g."customerKey"
+            AND ${and(preds)})`
+      : Prisma.empty;
+    return this.db.$queryRaw<GroupRow[]>(Prisma.sql`
+      WITH page AS (
+        SELECT g."customerKey", g."mostUrgentAt", g."openCount"
+        FROM "chatbot_customer_groups" g
+        WHERE g."tenantId" = ${t} ${cursor} ${exists}
+        ORDER BY g."mostUrgentAt" ASC NULLS LAST, g."customerKey" ASC
+        LIMIT ${q.limit + 1})
+      SELECT p."mostUrgentAt", p."openCount", NULL::timestamp AS "lastClosedAt", x.*
+      FROM page p
+      CROSS JOIN LATERAL (
+        SELECT ${COLUMNS}, (count(*) OVER ())::int AS "total"
+        FROM "chatbot_requests" r
+        WHERE r."tenantId" = ${t} AND r."customerKey" = p."customerKey" AND ${and(preds)}
+        ${OPEN_ORDER} LIMIT ${GROUP_ROWS}) x
+      ORDER BY p."mostUrgentAt" ASC NULLS LAST, p."customerKey" ASC,
+               x."urgencyAt" ASC NULLS LAST, x."createdAt" ASC, x."id" ASC`);
+  }
+
+  private closedGroups(
+    t: string,
+    preds: Prisma.Sql[],
+    q: { limit: number; cursor: Array<string | null> | null },
+  ) {
+    const [at, key] = q.cursor ?? [];
+    const having = q.cursor
+      ? Prisma.sql`HAVING (max(r."closedAt") < ${asDate(at as string)}
+          OR (max(r."closedAt") = ${asDate(at as string)} AND r."customerKey" > ${key}))`
+      : Prisma.empty;
+    return this.db.$queryRaw<GroupRow[]>(Prisma.sql`
+      WITH page AS (
+        SELECT r."customerKey", max(r."closedAt") AS "lastClosedAt"
+        FROM "chatbot_requests" r
+        WHERE r."tenantId" = ${t} AND ${and(preds)}
+        GROUP BY r."customerKey" ${having}
+        ORDER BY max(r."closedAt") DESC, r."customerKey" ASC
+        LIMIT ${q.limit + 1})
+      SELECT NULL::timestamp AS "mostUrgentAt", 0 AS "openCount", p."lastClosedAt", x.*
+      FROM page p
+      CROSS JOIN LATERAL (
+        SELECT ${COLUMNS}, (count(*) OVER ())::int AS "total"
+        FROM "chatbot_requests" r
+        WHERE r."tenantId" = ${t} AND r."customerKey" = p."customerKey" AND ${and(preds)}
+        ${CLOSED_ORDER} LIMIT ${GROUP_ROWS}) x
+      ORDER BY p."lastClosedAt" DESC, p."customerKey" ASC, x."closedAt" DESC, x."id" DESC`);
+  }
+
+  listByCustomer(q: {
+    customerKey: string;
+    tab: InboxTab;
+    userId: string;
+    now: Date;
+    cutoff: Date;
+    limit: number;
+    cursor: Array<string | null> | null;
+  }): Promise<RequestRecord[]> {
+    const closed = q.tab === 'resolved' || q.tab === 'cancelled';
+    const preds = [
+      Prisma.sql`r."customerKey" = ${q.customerKey}`,
+      ...inboxPredicates(q.tab, {}, q.userId, q.now, q.cutoff),
+    ];
+    if (q.cursor) {
+      preds.push(
+        closed ? beforeClosedCursor(q.cursor) : afterOpenCursor(q.cursor),
+      );
+    }
+    return this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+      SELECT ${COLUMNS} FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${this.tenantId()} AND ${and(preds)}
+      ${closed ? CLOSED_ORDER : OPEN_ORDER} LIMIT ${q.limit + 1}`);
+  }
+
+  async counts(userId: string, now: Date): Promise<InboxCounts> {
+    const t = this.tenantId();
+    const open = (extra: Prisma.Sql) => Prisma.sql`(
+      SELECT count(*)::int FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${t} AND ${OPEN} AND ${extra})`;
+    const [row] = await this.db.$queryRaw<InboxCounts[]>(Prisma.sql`
+      SELECT
+        (SELECT count(*)::int FROM "chatbot_requests" r
+          WHERE r."tenantId" = ${t} AND r."status" = 'NEW') AS "new",
+        (SELECT count(*)::int FROM "chatbot_requests" r
+          WHERE r."tenantId" = ${t} AND r."status" = 'IN_PROGRESS') AS "inProgress",
+        (SELECT count(*)::int FROM "chatbot_requests" r
+          WHERE r."tenantId" = ${t} AND r."status" = 'IN_PROGRESS'
+            AND r."assigneeUserId" = ${userId}) AS "mine",
+        ${open(Prisma.sql`r."overdueAt" IS NOT NULL`)} AS "overdue",
+        ${open(
+          Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + WINDOW_WARNING_MS)}`,
+        )} AS "windowClosingSoon",
+        ${open(Prisma.sql`r."scheduledFor" IS NOT NULL`)} AS "scheduled",
+        ${open(Prisma.sql`r."needsReschedule"`)} AS "needsReschedule"`);
+    return row;
+  }
+
+  history(q: HistoryQuery): Promise<RequestRecord[]> {
+    const preds = [
+      Prisma.sql`r."status" IN ('RESOLVED', 'CANCELLED')`,
+      Prisma.sql`r."closedAt" < ${q.cutoff}`,
+    ];
+    if (q.subtype) {
+      preds.push(
+        Prisma.sql`r."subtype" = ${q.subtype}::"ChatbotRequestSubtype"`,
+      );
+    }
+    if (q.resolvedBy)
+      preds.push(Prisma.sql`r."resolvedByActorId" = ${q.resolvedBy}`);
+    if (q.customerKey)
+      preds.push(Prisma.sql`r."customerKey" = ${q.customerKey}`);
+    if (q.from && q.to) {
+      preds.push(
+        Prisma.sql`r."closedAt" >= ${q.from} AND r."closedAt" < ${q.to}`,
+      );
+    }
+    if (q.cursor) preds.push(beforeClosedCursor(q.cursor));
+    return this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+      SELECT ${COLUMNS} FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${this.tenantId()} AND ${and(preds)}
+      ${CLOSED_ORDER} LIMIT ${q.limit + 1}`);
+  }
+
+  async findDetail(id: string, now: Date): Promise<DetailRecord | null> {
+    void now;
+    const tenantId = this.tenantId();
+    const [request] = await this.db.$queryRaw<DetailRecord['request'][]>(
+      Prisma.sql`
+      SELECT ${COLUMNS}, r."needs", r."context", r."resolution", r."resolvedAt",
+             r."humanDecisionId", r."deliveryZoneRequestId", r."receiptEvidenceId"
+      FROM "chatbot_requests" r WHERE r."tenantId" = ${tenantId} AND r."id" = ${id}`,
+    );
+    if (!request) return null;
+    // SAFETY: the detail select adds exactly these three link columns.
+    const links = request as unknown as {
+      humanDecisionId: string | null;
+      deliveryZoneRequestId: string | null;
+      receiptEvidenceId: string | null;
+    };
+    const customerId = request.customerId;
+    const [customer, recentOrders, otherOpen, audit, deliveries, decision] =
+      await Promise.all([
+        customerId ? this.customers([customerId]) : Promise.resolve([]),
+        customerId
+          ? this.db.$queryRaw<OrderRecord[]>(Prisma.sql`
+              SELECT s."id" AS "saleId", s."folio", s."createdAt", s."totalCents",
+                     s."status"::text AS "status",
+                     s."paymentStatus"::text AS "paymentStatus"
+              FROM "sales" s
+              WHERE s."tenantId" = ${tenantId} AND s."customerId" = ${customerId}
+                AND s."status" <> 'DRAFT'
+              ORDER BY s."createdAt" DESC LIMIT 5`)
+          : Promise.resolve([]),
+        this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+          SELECT ${COLUMNS} FROM "chatbot_requests" r
+          WHERE r."tenantId" = ${tenantId} AND r."customerKey" = ${request.customerKey}
+            AND ${OPEN} AND r."id" <> ${id}
+          ${OPEN_ORDER} LIMIT ${OTHER_OPEN}`),
+        this.auditPage(id, null, 21),
+        this.db.chatbotFeedItem.findMany({
+          where: { tenantId, requestId: id },
+          orderBy: { cursor: 'desc' },
+          take: 50,
+          select: {
+            deliveryId: true,
+            type: true,
+            createdAt: true,
+            outcome: true,
+            attemptedAt: true,
+          },
+        }),
+        readDecision(this.db, tenantId, request.subtype, links),
+      ]);
+    return {
+      request,
+      customer: customer[0] ?? null,
+      recentOrders,
+      otherOpen,
+      decision: decision.decision,
+      zoneImpact: decision.zoneImpact,
+      audit,
+      deliveries: deliveries.map((d) => ({ ...d })),
+    };
+  }
+
+  async mergeCandidates(id: string): Promise<RequestRecord[] | null> {
+    const tenantId = this.tenantId();
+    const [source] = await this.db.$queryRaw<
+      { customerKey: string; subtype: string; open: boolean }[]
+    >(Prisma.sql`
+      SELECT r."customerKey", r."subtype"::text AS "subtype", (${OPEN}) AS "open"
+      FROM "chatbot_requests" r WHERE r."tenantId" = ${tenantId} AND r."id" = ${id}`);
+    if (!source) return null;
+    // §12.11: only subtypes without a wrapped table, both requests open.
+    if (
+      !source.open ||
+      !['UNKNOWN_QUESTION', 'TALK_TO_HUMAN', 'COMPLAINT'].includes(
+        source.subtype,
+      )
+    ) {
+      return [];
+    }
+    return this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+      SELECT ${COLUMNS} FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${tenantId} AND r."customerKey" = ${source.customerKey}
+        AND ${OPEN} AND r."id" <> ${id}
+        AND r."subtype" = ${source.subtype}::"ChatbotRequestSubtype"
+      ${OPEN_ORDER} LIMIT ${MERGE_CANDIDATES}`);
+  }
+
+  async audit(
+    id: string,
+    cursor: Array<string | null> | null,
+    limit: number,
+  ): Promise<AuditRecord[] | null> {
+    const exists = await this.db.chatbotRequest.count({
+      where: { tenantId: this.tenantId(), id },
+    });
+    return exists ? this.auditPage(id, cursor, limit + 1) : null;
+  }
+
+  private async auditPage(
+    requestId: string,
+    cursor: Array<string | null> | null,
+    take: number,
+  ): Promise<AuditRecord[]> {
+    const after = cursor
+      ? {
+          OR: [
+            { createdAt: { lt: asDate(cursor[0]) } },
+            { createdAt: asDate(cursor[0]), id: { lt: cursor[1] as string } },
+          ],
+        }
+      : {};
+    const events = await this.db.chatbotRequestEvent.findMany({
+      where: { tenantId: this.tenantId(), requestId, ...after },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take,
+    });
+    return events.map((e) => ({
+      id: e.id,
+      type: e.type,
+      actorKind: e.actorKind,
+      actorId: e.actorId,
+      actorDisplayName: e.actorDisplayName,
+      fromStatus: e.fromStatus,
+      toStatus: e.toStatus,
+      version: e.version,
+      data: e.data,
+      createdAt: e.createdAt,
+    }));
+  }
+
+  async customers(ids: string[]): Promise<CustomerRecord[]> {
+    const rows = await this.db.customer.findMany({
+      where: { tenantId: this.tenantId(), id: { in: ids } },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        phoneCountryCode: true,
+        phone: true,
+        isTrusted: true,
+        createdAt: true,
+        globalPriceList: { select: { id: true, name: true } },
+      },
+    });
+    return rows.map(({ globalPriceList, ...customer }) => ({
+      ...customer,
+      priceList: globalPriceList,
+    }));
+  }
+}
+
+type GroupRow = RequestRecord & {
+  total: number;
+  mostUrgentAt: Date | null;
+  openCount: number;
+  lastClosedAt: Date | null;
+};
