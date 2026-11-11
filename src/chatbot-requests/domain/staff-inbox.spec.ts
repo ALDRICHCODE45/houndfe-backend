@@ -229,3 +229,77 @@ describe('closedWindowCutoff', () => {
     );
   });
 });
+
+describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
+  const question = state({
+    kind: 'CLARIFICATION',
+    subtype: 'UNKNOWN_QUESTION',
+  });
+  const unlinked = { customerId: null, customerKey: '525512345678' };
+
+  it('offers MERGE only with update, a mergeable open request and a candidate', () => {
+    const withCandidate = { hasMergeCandidate: true };
+    expect(computeAllowedActions(question, CASHIER, ME, withCandidate)).toEqual(
+      ['CLAIM', 'MERGE', 'CANCEL'],
+    );
+    expect(computeAllowedActions(question, CASHIER, ME)).not.toContain('MERGE');
+    expect(
+      computeAllowedActions(question, READ_ONLY, ME, withCandidate),
+    ).toEqual([]);
+    // wrapped decisions never merge, even when the store reports a candidate
+    expect(
+      computeAllowedActions(state(), MANAGER, ME, withCandidate),
+    ).not.toContain('MERGE');
+    expect(
+      computeAllowedActions(
+        state({ ...question, status: 'RESOLVED' }),
+        MANAGER,
+        ME,
+        withCandidate,
+      ),
+    ).toEqual([]);
+  });
+
+  it('offers MERGE on a request held by someone else, like the route', () => {
+    const other = state({
+      ...question,
+      status: 'IN_PROGRESS',
+      assignee: heldBy('user-ana'),
+    });
+    expect(
+      computeAllowedActions(other, CASHIER, ME, { hasMergeCandidate: true }),
+    ).toEqual(['MERGE']);
+  });
+
+  it('offers LINK_CUSTOMER for an open request with a phone key and no customer', () => {
+    expect(
+      computeAllowedActions(question, CASHIER, ME, { customer: unlinked }),
+    ).toEqual(['CLAIM', 'LINK_CUSTOMER', 'CANCEL']);
+    expect(
+      computeAllowedActions(question, READ_ONLY, ME, { customer: unlinked }),
+    ).toEqual([]);
+  });
+
+  it('hides LINK_CUSTOMER when linked, for an unknown: key and when closed', () => {
+    const none = (customer: {
+      customerId: string | null;
+      customerKey: string;
+    }) => computeAllowedActions(question, CASHIER, ME, { customer });
+    expect(none({ ...unlinked, customerId: 'c-1' })).not.toContain(
+      'LINK_CUSTOMER',
+    );
+    expect(none({ ...unlinked, customerKey: 'unknown:abc' })).not.toContain(
+      'LINK_CUSTOMER',
+    );
+    expect(
+      computeAllowedActions(
+        state({ ...question, status: 'CANCELLED' }),
+        MANAGER,
+        ME,
+        {
+          customer: unlinked,
+        },
+      ),
+    ).toEqual([]);
+  });
+});

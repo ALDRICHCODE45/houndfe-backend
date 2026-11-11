@@ -178,6 +178,34 @@ export async function lockRequestRow(
   return rows[0] ?? null;
 }
 
+/** Unlocked read of several tenant requests (immutable facts, error bodies). */
+export function peekRequestRows(
+  tx: TenantClient,
+  tenantId: string,
+  ids: string[],
+): Promise<ChatbotRequestRow[]> {
+  return tx.$queryRaw<ChatbotRequestRow[]>(Prisma.sql`
+    ${REQUEST_ROW}
+    WHERE cr."tenantId" = ${tenantId} AND cr."id" IN (${Prisma.join(ids)})
+    ORDER BY cr."id"`);
+}
+
+/**
+ * Locks several tenant requests in `id` order (§12.11, lock-order rule 3). One
+ * statement, so the order is the sort order and two callers can never cross.
+ */
+export function lockRequestRows(
+  tx: TenantClient,
+  tenantId: string,
+  ids: string[],
+): Promise<ChatbotRequestRow[]> {
+  return tx.$queryRaw<ChatbotRequestRow[]>(Prisma.sql`
+    ${REQUEST_ROW}
+    WHERE cr."tenantId" = ${tenantId} AND cr."id" IN (${Prisma.join(ids)})
+    ORDER BY cr."id"
+    FOR UPDATE OF cr`);
+}
+
 export type WrappedLink =
   | { humanDecisionId: string }
   | { receiptEvidenceId: string }

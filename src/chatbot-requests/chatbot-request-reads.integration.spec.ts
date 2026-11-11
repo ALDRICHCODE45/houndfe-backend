@@ -39,6 +39,12 @@ import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import {
+  CHATBOT_REQUEST_RELATION_STORE,
+  ChatbotRequestRelationsService,
+} from './application/chatbot-request-relations.service';
+import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
+import { ChatbotRequestRelationsController } from './presentation/chatbot-request-relations.controller';
+import {
   CHATBOT_REQUEST_COMMAND_STORE,
   CHATBOT_REQUEST_RESOLVER,
   ChatbotRequestCommandsService,
@@ -174,10 +180,16 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       controllers: [
         ChatbotRequestReadsController,
         ChatbotRequestCommandsController,
+        ChatbotRequestRelationsController,
       ],
       providers: [
         ChatbotRequestHttpFilter,
         ChatbotRequestCommandsService,
+        ChatbotRequestRelationsService,
+        {
+          provide: CHATBOT_REQUEST_RELATION_STORE,
+          useClass: PrismaChatbotRequestRelationStore,
+        },
         ChatbotRequestReadsService,
         {
           provide: CHATBOT_REQUEST_COMMAND_STORE,
@@ -633,7 +645,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
           .status,
       ).toBe(400);
       expect(
-        (await get('/chatbot-requests/groups?q=juan', 'manager', t)).status,
+        (await get('/chatbot-requests/history?q=juan', 'manager', t)).status,
       ).toBe(400);
 
       const counts = await get('/chatbot-requests/counts', 'manager', t);
@@ -785,9 +797,14 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       const { id } = await restockRequest();
       const actions = async (role: string) =>
         (await get(`/chatbot-requests/${id}`, role)).body.allowedActions;
-      expect(await actions('manager')).toEqual(['CLAIM', 'RESOLVE']);
-      expect(await actions('cashier')).toEqual(['CLAIM']);
-      expect(await actions('updateOnly')).toEqual(['CLAIM']);
+      // unlinked, with a phone key: linking a customer is offered too (R1)
+      expect(await actions('manager')).toEqual([
+        'CLAIM',
+        'RESOLVE',
+        'LINK_CUSTOMER',
+      ]);
+      expect(await actions('cashier')).toEqual(['CLAIM', 'LINK_CUSTOMER']);
+      expect(await actions('updateOnly')).toEqual(['CLAIM', 'LINK_CUSTOMER']);
       expect(await actions('readOnly')).toEqual([]);
 
       const claimed = await post(
@@ -801,6 +818,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         'RELEASE',
         'REASSIGN',
         'RESOLVE',
+        'LINK_CUSTOMER',
       ]);
       expect(mine.body.assignee.displayName).toBeTruthy();
       expect(mine.body.audit.map((e: any) => e.type)).toEqual(['CLAIMED']);
@@ -811,14 +829,19 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         tenantA,
         users.luis,
       );
-      expect(other.body.allowedActions).toEqual([]);
+      // linking a customer is a data fix, open to anyone with update (R1)
+      expect(other.body.allowedActions).toEqual(['LINK_CUSTOMER']);
       const reassigner = await get(
         `/chatbot-requests/${id}`,
         'manager',
         tenantA,
         users.luis,
       );
-      expect(reassigner.body.allowedActions).toEqual(['RELEASE', 'REASSIGN']);
+      expect(reassigner.body.allowedActions).toEqual([
+        'RELEASE',
+        'REASSIGN',
+        'LINK_CUSTOMER',
+      ]);
     });
 
     it('builds the customer card, decision, other open requests, deliveries and audit', async () => {
@@ -995,7 +1018,11 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect(route.body).toEqual(detail.body.zoneImpact);
       // the wrapped row's customer phone and conversation never come out
       expect(JSON.stringify(detail.body)).not.toContain('wa:');
-      expect(detail.body.allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+      expect(detail.body.allowedActions).toEqual([
+        'CLAIM',
+        'RESOLVE',
+        'LINK_CUSTOMER',
+      ]);
     });
 
     it('DELIVERY_ZONE: requesterCount counts every requester like the legacy projection, also after resolution', async () => {
@@ -1086,7 +1113,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         validationId: null,
         requesterCount: 1,
       });
-      expect(detail.body.allowedActions).toEqual(['CLAIM']);
+      expect(detail.body.allowedActions).toEqual(['CLAIM', 'LINK_CUSTOMER']);
       expect((await get(`/chatbot-requests/${id}/zone-impact`)).status).toBe(
         422,
       );
@@ -1188,7 +1215,11 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         },
         resolution: null,
       });
-      expect(detail.body.allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+      expect(detail.body.allowedActions).toEqual([
+        'CLAIM',
+        'RESOLVE',
+        'LINK_CUSTOMER',
+      ]);
 
       const variantId = randomUUID();
       const variant = await expirationRequest({
@@ -1281,6 +1312,9 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
     let walkRole = 'managerNoPhone';
     let ids: {
       question: string;
+      ambiguous: string;
+      linkCandidate: string;
+      mergeInto: string;
       restock: string;
       zone: string;
       /** The detail of every subtype and of a zone, a receipt and an expiry. */
@@ -1329,11 +1363,34 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
           ...closed('RESOLVED', new Date(NOW.getTime() - (10 + i) * DAY)),
         });
       }
+      // R1: two customers share a phone; the ambiguous request's detail lists
+      // them as link candidates, which must stay masked too.
+      const AMBIGUOUS_KEY = '525598765432';
+      const ambiguousPhone = { phoneCountryCode: '52', phone: '5598765432' };
+      for (const firstName of ['Ana', 'Ani']) {
+        await prisma.customer.create({
+          data: { tenantId: tenantA, firstName, ...ambiguousPhone },
+        });
+      }
+      const ambiguous = await create({
+        customerKey: AMBIGUOUS_KEY,
+        ambiguousCustomer: true,
+        ...ambiguousPhone,
+      });
+      const linkCandidate = await prisma.customer.findFirstOrThrow({
+        where: { tenantId: tenantA, ...ambiguousPhone },
+      });
+      // a pair of the walk's customer for merge
+      const mergeInto = await create(mine);
       ids = {
+        ambiguous: ambiguous.id,
+        linkCandidate: linkCandidate.id,
+        mergeInto: mergeInto.id,
         question: question.id,
         restock: restock.id,
         zone: zone.requests[0].id,
         details: [
+          ambiguous.id,
           question.id,
           restock.id,
           zone.requests[0].id,
@@ -1369,6 +1426,30 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       );
       R('GET', ':id/merge-candidates', () =>
         call('get', `/chatbot-requests/${id()}/merge-candidates`),
+      );
+      R('GET', 'assignable-users', () =>
+        call('get', '/chatbot-requests/assignable-users'),
+      );
+      R('POST', ':id/merge', () =>
+        call('post', `/chatbot-requests/${id()}/merge`, {
+          expectedVersion: 1,
+          intoRequestId: ids.mergeInto,
+          intoExpectedVersion: 1,
+        }),
+      );
+      R('POST', ':id/link-customer', () =>
+        // a candidate of the ambiguous request: phone-mismatch errors and the
+        // success body must not leak either
+        Promise.all([
+          call('post', `/chatbot-requests/${ids.ambiguous}/link-customer`, {
+            expectedVersion: 1,
+            customerId: ids.linkCandidate,
+          }),
+          call('post', `/chatbot-requests/${id()}/link-customer`, {
+            expectedVersion: 1,
+            customerId: ids.linkCandidate,
+          }),
+        ]),
       );
       R('GET', ':id/zone-impact', () =>
         call('get', `/chatbot-requests/${ids.zone}/zone-impact`),
@@ -1418,10 +1499,11 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       const discovered = [
         ChatbotRequestReadsController,
         ChatbotRequestCommandsController,
+        ChatbotRequestRelationsController,
       ]
         .flatMap(routesOf)
         .sort();
-      expect(discovered.length).toBeGreaterThanOrEqual(13);
+      expect(discovered.length).toBeGreaterThanOrEqual(16);
       expect([...walk.keys()].sort()).toEqual(discovered);
     });
 
@@ -1487,6 +1569,7 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
             (res.body.decision as { subtype?: string } | null)?.subtype ?? null,
         ),
       ).toEqual([
+        null,
         null,
         'RESTOCK',
         'DELIVERY_ZONE',

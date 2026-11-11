@@ -28,6 +28,11 @@ import type {
   RequestRecord,
 } from '../application/chatbot-request-reads.service';
 import { readDecision } from './chatbot-request-decision.reader';
+import { assignableUserWhere } from './assignable-users';
+import { customerHasKey, phoneLookupVariants } from '../domain/canonical-phone';
+import { actorDisplayName } from '../domain/actor-display-name';
+import { MERGEABLE_SUBTYPES } from '../domain/chatbot-request.commands';
+import type { CandidateRecord } from '../application/chatbot-request-reads.service';
 
 /** Requests inside one group of the grouped inbox (§3.8). */
 const GROUP_ROWS = 10;
@@ -48,6 +53,50 @@ const COLUMNS = Prisma.sql`
   r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt"`;
 const OPEN_ORDER = Prisma.sql`ORDER BY "urgencyAt" ASC NULLS LAST, r."createdAt" ASC, r."id" ASC`;
 const CLOSED_ORDER = Prisma.sql`ORDER BY r."closedAt" DESC, r."id" DESC`;
+
+/**
+ * Accent and case folding of a customer name in SQL. Built-in and immutable
+ * (no extension: pg_trgm and unaccent are not installed here); it mirrors
+ * `foldText` for the accents Spanish names use.
+ */
+const FOLD_FROM = 'áàäâãéèëêíìïîóòöôõúùüûñçýÿ';
+const FOLD_TO = 'aaaaaeeeeiiiiooooouuuuncyy';
+const FOLDED_NAME = Prisma.sql`lower(translate(c."firstName" || ' ' || coalesce(c."lastName", ''),
+  ${FOLD_FROM + FOLD_FROM.toUpperCase()}, ${FOLD_TO + FOLD_TO}))`;
+
+/** `q` as a predicate on alias `r` (§3.8): folio, phone digits or customer name. */
+function searchPredicate(
+  search: NonNullable<InboxFilters['search']>,
+  tenantId: string,
+): Prisma.Sql {
+  switch (search.kind) {
+    case 'folio':
+      return Prisma.sql`r."folio" = ${search.folio}`;
+    case 'phone':
+      // `unknown:<id>` keys hold a row id, never a phone.
+      return Prisma.sql`r."customerKey" LIKE ${`%${search.digits}%`} AND r."customerKey" NOT LIKE 'unknown:%'`;
+    case 'name':
+      return Prisma.sql`r."customerId" IN (
+        SELECT c."id" FROM "customers" c
+        WHERE c."tenantId" = ${tenantId}
+          AND ${Prisma.join(
+            search.tokens.map(
+              (token) => Prisma.sql`${FOLDED_NAME} LIKE ${`%${token}%`}`,
+            ),
+            ' AND ',
+          )})`;
+  }
+}
+
+/** Same customer, same subtype, open, not itself: the merge-candidate rule. */
+const mergeCandidateWhere = (
+  tenantId: string,
+  id: string,
+  customerKey: string,
+  subtype: string,
+) => Prisma.sql`r."tenantId" = ${tenantId} AND r."customerKey" = ${customerKey}
+  AND ${OPEN} AND r."id" <> ${id}
+  AND r."subtype" = ${subtype}::"ChatbotRequestSubtype"`;
 
 const and = (parts: Prisma.Sql[]) => Prisma.join(parts, ' AND ');
 const asDate = (part: string | null) => new Date(part as string);
@@ -126,6 +175,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
   }): Promise<GroupRecord[]> {
     const t = this.tenantId();
     const preds = inboxPredicates(q.tab, q.filters, q.userId, q.now, q.cutoff);
+    if (q.filters.search) preds.push(searchPredicate(q.filters.search, t));
     const closed = q.tab === 'resolved' || q.tab === 'cancelled';
     const rows = closed
       ? await this.closedGroups(t, preds, q)
@@ -298,7 +348,8 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     const [request] = await this.db.$queryRaw<DetailRecord['request'][]>(
       Prisma.sql`
       SELECT ${COLUMNS}, r."needs", r."context", r."resolution", r."resolvedAt",
-             r."humanDecisionId", r."deliveryZoneRequestId", r."receiptEvidenceId"
+             r."ambiguousCustomer", r."humanDecisionId", r."deliveryZoneRequestId",
+             r."receiptEvidenceId"
       FROM "chatbot_requests" r WHERE r."tenantId" = ${tenantId} AND r."id" = ${id}`,
     );
     if (!request) return null;
@@ -309,11 +360,19 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       receiptEvidenceId: string | null;
     };
     const customerId = request.customerId;
-    const [customer, recentOrders, otherOpen, audit, deliveries, decision] =
-      await Promise.all([
-        customerId ? this.customers([customerId]) : Promise.resolve([]),
-        customerId
-          ? this.db.$queryRaw<OrderRecord[]>(Prisma.sql`
+    const [
+      customer,
+      recentOrders,
+      otherOpen,
+      audit,
+      deliveries,
+      decision,
+      candidates,
+      hasMergeCandidate,
+    ] = await Promise.all([
+      customerId ? this.customers([customerId]) : Promise.resolve([]),
+      customerId
+        ? this.db.$queryRaw<OrderRecord[]>(Prisma.sql`
               SELECT s."id" AS "saleId", s."folio", s."createdAt", s."totalCents",
                      s."status"::text AS "status",
                      s."paymentStatus"::text AS "paymentStatus"
@@ -321,29 +380,33 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
               WHERE s."tenantId" = ${tenantId} AND s."customerId" = ${customerId}
                 AND s."status" <> 'DRAFT'
               ORDER BY s."createdAt" DESC LIMIT 5`)
-          : Promise.resolve([]),
-        this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+        : Promise.resolve([]),
+      this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
           SELECT ${COLUMNS} FROM "chatbot_requests" r
           WHERE r."tenantId" = ${tenantId} AND r."customerKey" = ${request.customerKey}
             AND ${OPEN} AND r."id" <> ${id}
           ${OPEN_ORDER} LIMIT ${OTHER_OPEN}`),
-        this.auditPage(id, null, 21),
-        this.db.chatbotFeedItem.findMany({
-          where: { tenantId, requestId: id },
-          orderBy: { cursor: 'desc' },
-          take: 50,
-          select: {
-            deliveryId: true,
-            type: true,
-            createdAt: true,
-            outcome: true,
-            attemptedAt: true,
-          },
-        }),
-        readDecision(this.db, tenantId, request.subtype, links),
-      ]);
+      this.auditPage(id, null, 21),
+      this.db.chatbotFeedItem.findMany({
+        where: { tenantId, requestId: id },
+        orderBy: { cursor: 'desc' },
+        take: 50,
+        select: {
+          deliveryId: true,
+          type: true,
+          createdAt: true,
+          outcome: true,
+          attemptedAt: true,
+        },
+      }),
+      readDecision(this.db, tenantId, request.subtype, links),
+      customerId === null ? this.linkCandidates(request) : Promise.resolve([]),
+      this.hasMergeCandidate(request),
+    ]);
     return {
       request,
+      candidates,
+      hasMergeCandidate,
       customer: customer[0] ?? null,
       recentOrders,
       otherOpen,
@@ -352,6 +415,81 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       audit,
       deliveries: deliveries.map((d) => ({ ...d })),
     };
+  }
+
+  /**
+   * R1 `link-customer` choices: the tenant's customers whose canonical phone is
+   * the request's key. The indexed `(tenantId, cc, phone)` lookup is loose on
+   * purpose (`521…` variants); `customerHasKey` keeps only exact matches.
+   */
+  private async linkCandidates(
+    request: Pick<
+      RequestRecord,
+      'customerKey' | 'phoneCountryCode' | 'phone' | 'status'
+    >,
+  ): Promise<CandidateRecord[]> {
+    const open = request.status === 'NEW' || request.status === 'IN_PROGRESS';
+    if (!open || !request.phone || !request.phoneCountryCode) return [];
+    const variants = phoneLookupVariants(
+      request.phoneCountryCode,
+      request.phone,
+    );
+    if (variants.phones.length === 0) return [];
+    const tenantId = this.tenantId();
+    const found = await this.db.customer.findMany({
+      where: {
+        tenantId,
+        phoneCountryCode: { in: variants.countryCodes },
+        phone: { in: variants.phones },
+      },
+      select: { id: true },
+      take: 30,
+    });
+    const exact = (await this.customers(found.map((c) => c.id))).filter((c) =>
+      customerHasKey(c, request.customerKey),
+    );
+    if (exact.length === 0) return [];
+    const orders = await this.db.$queryRaw<
+      { customerId: string; lastOrderAt: Date }[]
+    >(Prisma.sql`
+      SELECT s."customerId", max(s."createdAt") AS "lastOrderAt"
+      FROM "sales" s
+      WHERE s."tenantId" = ${tenantId}
+        AND s."customerId" IN (${Prisma.join(exact.map((c) => c.id))})
+        AND s."status" <> 'DRAFT'
+      GROUP BY s."customerId"`);
+    const lastOrder = new Map(orders.map((o) => [o.customerId, o.lastOrderAt]));
+    return exact
+      .map((c) => ({ ...c, lastOrderAt: lastOrder.get(c.id) ?? null }))
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .slice(0, 10);
+  }
+
+  /** `MERGE` in `allowedActions` needs at least one candidate (§12.11). */
+  private async hasMergeCandidate(
+    request: Pick<RequestRecord, 'id' | 'customerKey' | 'subtype' | 'status'>,
+  ): Promise<boolean> {
+    const open = request.status === 'NEW' || request.status === 'IN_PROGRESS';
+    if (!open || !MERGEABLE_SUBTYPES.includes(request.subtype)) return false;
+    const [row] = await this.db.$queryRaw<{ found: boolean }[]>(Prisma.sql`
+      SELECT EXISTS (
+        SELECT 1 FROM "chatbot_requests" r
+        WHERE ${mergeCandidateWhere(this.tenantId(), request.id, request.customerKey, request.subtype)}
+      ) AS "found"`);
+    return row.found;
+  }
+
+  async assignableUsers() {
+    const users = await this.db.user.findMany({
+      where: assignableUserWhere(this.tenantId()),
+      select: { id: true, name: true, email: true },
+    });
+    // Sorted by the name people see (the fallback for an empty name included).
+    return users.sort(
+      (a, b) =>
+        actorDisplayName(a).localeCompare(actorDisplayName(b), 'es') ||
+        a.id.localeCompare(b.id),
+    );
   }
 
   async mergeCandidates(id: string): Promise<RequestRecord[] | null> {
@@ -373,9 +511,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     }
     return this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
       SELECT ${COLUMNS} FROM "chatbot_requests" r
-      WHERE r."tenantId" = ${tenantId} AND r."customerKey" = ${source.customerKey}
-        AND ${OPEN} AND r."id" <> ${id}
-        AND r."subtype" = ${source.subtype}::"ChatbotRequestSubtype"
+      WHERE ${mergeCandidateWhere(tenantId, id, source.customerKey, source.subtype)}
       ${OPEN_ORDER} LIMIT ${MERGE_CANDIDATES}`);
   }
 

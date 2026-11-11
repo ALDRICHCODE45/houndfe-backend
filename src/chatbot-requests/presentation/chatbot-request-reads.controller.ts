@@ -10,6 +10,7 @@
  *   GET /chatbot-requests?customerKey=
  *   GET /chatbot-requests/counts
  *   GET /chatbot-requests/history
+ *   GET /chatbot-requests/assignable-users   update:ChatbotRequestAssignment
  *   GET /chatbot-requests/:id
  *   GET /chatbot-requests/:id/audit
  *   GET /chatbot-requests/:id/merge-candidates
@@ -80,6 +81,7 @@ export class ChatbotRequestReadsController {
         overdue: query.overdue,
         windowClosingSoon: query.windowClosingSoon,
       },
+      q: query.q,
       cursor: query.cursor,
       limit: query.limit,
     });
@@ -112,6 +114,14 @@ export class ChatbotRequestReadsController {
       cursor: query.cursor,
       limit: query.limit,
     });
+  }
+
+  /** The `reassign` picker: `{id, displayName}` only (§3.10). */
+  @Get('assignable-users')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['update', 'ChatbotRequestAssignment'])
+  assignableUsers() {
+    return this.reads.assignableUsers();
   }
 
   @Get(':id')

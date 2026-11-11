@@ -8,11 +8,15 @@ import {
   claim,
   closeWrapped,
   displayStatus,
+  linkCustomer,
+  merge,
   reassign,
   release,
   resolve,
   type ChatbotRequestState,
   type CommandResult,
+  type MergeResult,
+  type MergeSide,
 } from './chatbot-request.commands';
 
 const now = new Date('2026-11-10T16:00:00Z');
@@ -58,6 +62,8 @@ const REQUEST_COLUMNS = new Set([
   'closedAt',
   'nextSlaCheckAt',
   'resolution',
+  'customerId',
+  'ambiguousCustomer',
 ]);
 
 describe('claim', () => {
@@ -595,5 +601,241 @@ describe('displayStatus (§2.2)', () => {
     expect(displayStatus(request({ status: 'RESOLVED', overdueAt: now }))).toBe(
       'RESOLVED',
     );
+  });
+});
+
+const side = (
+  id: string,
+  over: Partial<ChatbotRequestState> = {},
+  extra: Partial<MergeSide> = {},
+): MergeSide => ({
+  id,
+  folio: id === 'a' ? 10 : 11,
+  customerKey: '525512345678',
+  state: request({
+    kind: 'CLARIFICATION',
+    subtype: 'UNKNOWN_QUESTION',
+    version: 2,
+    ...over,
+  }),
+  ...extra,
+});
+const mergeCmd = {
+  actor: ana,
+  expectedVersion: 2,
+  intoExpectedVersion: 2,
+  now,
+};
+
+function mergeOk(result: MergeResult) {
+  if (!result.ok) throw new Error(`expected ok, got ${result.error.code}`);
+  return result;
+}
+function mergeFail(result: MergeResult) {
+  if (result.ok) throw new Error('expected an error');
+  return result;
+}
+
+describe('merge (§12.11)', () => {
+  it('closes the source as SUPERSEDED and records an event on both requests', () => {
+    const result = mergeOk(merge(side('a'), side('b'), mergeCmd));
+    expect(result.source.patch).toEqual({
+      status: 'CANCELLED',
+      version: 3,
+      cancelledAt: now,
+      cancelReason: 'SUPERSEDED',
+      closedAt: now,
+      nextSlaCheckAt: null,
+    });
+    expect(result.source.event).toMatchObject({
+      type: 'MERGED',
+      actorKind: 'USER',
+      actorId: ana.userId,
+      fromStatus: 'NEW',
+      toStatus: 'CANCELLED',
+      version: 3,
+      data: { role: 'SOURCE', intoRequestId: 'b', intoFolio: 11 },
+    });
+    // the target keeps its version: a merge must not fail someone's claim
+    expect(result.target.event).toMatchObject({
+      type: 'MERGED',
+      fromStatus: 'NEW',
+      toStatus: 'NEW',
+      version: 2,
+      data: { role: 'TARGET', sourceRequestId: 'a', sourceFolio: 10 },
+    });
+  });
+
+  it.each(['UNKNOWN_QUESTION', 'TALK_TO_HUMAN', 'COMPLAINT'] as const)(
+    'allows %s into the same subtype',
+    (subtype) => {
+      const kind =
+        subtype === 'UNKNOWN_QUESTION' ? 'CLARIFICATION' : 'CONVERSATION';
+      expect(
+        merge(
+          side('a', { subtype, kind }),
+          side('b', { subtype, kind }),
+          mergeCmd,
+        ).ok,
+      ).toBe(true);
+    },
+  );
+
+  it('merges a request held by someone else (the assignee is notified, not blocked)', () => {
+    const held = side('a', { status: 'IN_PROGRESS', assignee: juan });
+    expect(merge(held, side('b'), mergeCmd).ok).toBe(true);
+  });
+
+  it.each([
+    'RESTOCK',
+    'EXPIRATION',
+    'DELIVERY_ZONE',
+    'TRANSFER_RECEIPT',
+    'DISCOUNT',
+  ] as const)(
+    'refuses the wrapped or decision subtype %s with 422 MERGE_NOT_ALLOWED',
+    (subtype) => {
+      const result = mergeFail(
+        merge(side('a', { subtype }), side('b', { subtype }), mergeCmd),
+      );
+      expect(result.error).toMatchObject({
+        code: 'MERGE_NOT_ALLOWED',
+        httpStatus: 422,
+      });
+      expect(result.on).toBe('SOURCE');
+    },
+  );
+
+  it('refuses another subtype, another customer, a closed target and itself', () => {
+    const different = side('b', {
+      subtype: 'TALK_TO_HUMAN',
+      kind: 'CONVERSATION',
+    });
+    expect(mergeFail(merge(side('a'), different, mergeCmd)).error.code).toBe(
+      'MERGE_NOT_ALLOWED',
+    );
+    const other = side('b', {}, { customerKey: '525599999999' });
+    expect(mergeFail(merge(side('a'), other, mergeCmd)).error.code).toBe(
+      'MERGE_NOT_ALLOWED',
+    );
+    const closedTarget = mergeFail(
+      merge(side('a'), side('b', { status: 'RESOLVED' }), mergeCmd),
+    );
+    expect(closedTarget.error.code).toBe('MERGE_NOT_ALLOWED');
+    expect(closedTarget.on).toBe('TARGET');
+    expect(mergeFail(merge(side('a'), side('a'), mergeCmd)).error.code).toBe(
+      'MERGE_NOT_ALLOWED',
+    );
+  });
+
+  it('refuses when either side already has a started session', () => {
+    const live = { kind: 'CONVERSATION', subtype: 'TALK_TO_HUMAN' } as const;
+    expect(
+      mergeFail(
+        merge(
+          side('a', { ...live, liveSessionState: 'ACTIVE' }),
+          side('b', live),
+          mergeCmd,
+        ),
+      ).error.code,
+    ).toBe('MERGE_NOT_ALLOWED');
+    const target = mergeFail(
+      merge(
+        side('a', live),
+        side('b', { ...live, liveSessionState: 'STARTING' }),
+        mergeCmd,
+      ),
+    );
+    expect(target.error.code).toBe('MERGE_NOT_ALLOWED');
+    expect(target.on).toBe('TARGET');
+    // a WAITING session has not started
+    expect(
+      merge(
+        side('a', { ...live, liveSessionState: 'WAITING' }),
+        side('b', { ...live, liveSessionState: 'WAITING' }),
+        mergeCmd,
+      ).ok,
+    ).toBe(true);
+  });
+
+  it('answers REQUEST_CLOSED for a closed source and VERSION_CONFLICT per side', () => {
+    expect(
+      mergeFail(merge(side('a', { status: 'CANCELLED' }), side('b'), mergeCmd))
+        .error,
+    ).toMatchObject({ code: 'REQUEST_CLOSED', httpStatus: 409 });
+    const stale = mergeFail(
+      merge(side('a'), side('b'), { ...mergeCmd, expectedVersion: 1 }),
+    );
+    expect(stale).toMatchObject({
+      on: 'SOURCE',
+      error: { code: 'VERSION_CONFLICT', current: { version: 2 } },
+    });
+    const staleTarget = mergeFail(
+      merge(side('a'), side('b', { version: 5 }), mergeCmd),
+    );
+    expect(staleTarget).toMatchObject({
+      on: 'TARGET',
+      error: {
+        code: 'VERSION_CONFLICT',
+        httpStatus: 409,
+        current: { version: 5 },
+      },
+    });
+  });
+});
+
+describe('linkCustomer (R1, §3.8)', () => {
+  const cmd = {
+    actor: ana,
+    expectedVersion: 3,
+    customerId: 'cus-1',
+    current: { customerId: null, customerKey: '525512345678' },
+  };
+
+  it('sets the customer, clears the ambiguity and bumps the version', () => {
+    const { patch, event } = ok(linkCustomer(request(), cmd));
+    expect(patch).toEqual({
+      version: 4,
+      customerId: 'cus-1',
+      ambiguousCustomer: false,
+    });
+    expect(event).toMatchObject({
+      type: 'CUSTOMER_LINKED',
+      fromStatus: 'NEW',
+      toStatus: 'NEW',
+      version: 4,
+      data: { customerId: 'cus-1' },
+    });
+  });
+
+  it('links an open request held by someone else', () => {
+    expect(linkCustomer(taken({ assignee: juan }), cmd).ok).toBe(true);
+  });
+
+  it('refuses a closed request, a stale version, a linked request and an unknown: key', () => {
+    expect(fail(linkCustomer(request({ status: 'RESOLVED' }), cmd)).code).toBe(
+      'REQUEST_CLOSED',
+    );
+    expect(
+      fail(linkCustomer(request(), { ...cmd, expectedVersion: 2 })).code,
+    ).toBe('VERSION_CONFLICT');
+    const linked = fail(
+      linkCustomer(request(), {
+        ...cmd,
+        current: { ...cmd.current, customerId: 'cus-9' },
+      }),
+    );
+    expect(linked).toMatchObject({
+      code: 'ACTION_NOT_ALLOWED',
+      httpStatus: 422,
+    });
+    expect(
+      fail(
+        linkCustomer(request(), {
+          ...cmd,
+          current: { customerId: null, customerKey: 'unknown:abc' },
+        }),
+      ).code,
+    ).toBe('ACTION_NOT_ALLOWED');
   });
 });

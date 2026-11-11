@@ -49,6 +49,8 @@ const SIZE = {
   closed: int('PERF_CLOSED', 20_000),
   noiseOpen: int('PERF_NOISE_OPEN', 2_500),
   noiseClosed: int('PERF_NOISE_CLOSED', 10_000),
+  /** Customers per tenant: the first `2 × customers` own a phone (the requests' key). */
+  tenantCustomers: int('PERF_TENANT_CUSTOMERS', 20_000),
   samples: int('PERF_SAMPLES', 200),
 };
 const TARGETS = { groupsPageP95Ms: 200 };
@@ -114,6 +116,13 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
   );
   const ME = 'perf-user-1';
   const reader = { userId: ME, ability: { can: () => false } };
+  const phoneReader = {
+    userId: ME,
+    ability: {
+      can: (action: string, subject: string) =>
+        action === 'read' && subject === 'CustomerPhone',
+    },
+  };
   const inTenant = <T>(tenantId: string, work: () => Promise<T>) =>
     cls.runWith({ tenantId, userId: ME, isSuperAdmin: false }, work);
 
@@ -174,6 +183,30 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
       FROM (SELECT g, ((g * 104729) % ${SIZE.customers * 2}::int) + 1 AS c,
                    now() - ((${closed}::int - g) * (interval '40 days' / ${closed}::int)) AS closed_at
             FROM generate_series(1, ${closed}::int) AS g) s`);
+    // Customers with Spanish names (accents on purpose, for the `q` name
+    // search); the first `2 × customers` own the phone the requests use, and
+    // the requests are linked to them like the intake does (R1).
+    await adminPrisma.$executeRaw(Prisma.sql`
+      INSERT INTO "customers"
+        ("id", "tenantId", "firstName", "lastName", "phoneCountryCode", "phone",
+         "isTrusted", "createdAt", "updatedAt")
+      SELECT gen_random_uuid()::text, ${tenantId},
+        (ARRAY['María','José','Ángel','Lucía','Martín','Sofía','Andrés','Inés',
+               'Raúl','Ximena','Jesús','Mónica','Héctor','Beatriz','Iván','Daniela'])[1 + g % 16],
+        (ARRAY['García','Hernández','López','Martínez','González','Pérez','Rodríguez',
+               'Sánchez','Ramírez','Cruz','Flores','Gómez','Díaz','Reyes','Muñoz',
+               'Núñez'])[1 + (g / 7) % 16]
+          || ' ' || (ARRAY['Torres','Vázquez','Jiménez','Ruiz','Mendoza','Aguilar',
+               'Castillo','Ortiz'])[1 + (g / 3) % 8],
+        CASE WHEN g <= ${SIZE.customers * 2}::int THEN '52' END,
+        CASE WHEN g <= ${SIZE.customers * 2}::int THEN '55' || lpad(g::text, 8, '0') END,
+        false, now(), now()
+      FROM generate_series(1, ${SIZE.tenantCustomers}::int) AS g`);
+    await adminPrisma.$executeRaw(Prisma.sql`
+      UPDATE "chatbot_requests" r SET "customerId" = c."id"
+      FROM "customers" c
+      WHERE r."tenantId" = ${tenantId} AND c."tenantId" = ${tenantId}
+        AND r."customerKey" = '52' || c."phone"`);
     // Same definition as `refreshCustomerGroup`, in one statement for the seed.
     await adminPrisma.$executeRaw(Prisma.sql`
       INSERT INTO "chatbot_customer_groups"
@@ -200,6 +233,7 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
       await seed(id, open, closed);
     }
     A = tenants[0];
+    await adminPrisma.$executeRawUnsafe('ANALYZE "customers"');
     await adminPrisma.$executeRawUnsafe('ANALYZE "chatbot_requests"');
     await adminPrisma.$executeRawUnsafe('ANALYZE "chatbot_customer_groups"');
     await adminPrisma.$executeRawUnsafe('ANALYZE "chatbot_request_events"');
@@ -283,6 +317,44 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
       scheduled: await sample(100, () => read({ tab: 'scheduled' })),
     };
 
+    // (a2) q (§3.8): folio, name prefix / contains / two words, phone digits.
+    const folios = await adminPrisma.$queryRaw<{ folio: number }[]>(Prisma.sql`
+      SELECT "folio" FROM "chatbot_requests"
+      WHERE "tenantId" = ${A} AND "status" IN ('NEW', 'IN_PROGRESS')
+      ORDER BY "folio" LIMIT 500`);
+    const search = (
+      q: string,
+      who: {
+        userId: string;
+        ability: { can: (action: string, subject: string) => boolean };
+      } = reader,
+    ) => reads.groups(who, { tab: 'open', filters: {}, limit: 25, q } as never);
+    report.groupsSearch = {
+      folio: await sample(100, (i) =>
+        search(`S-${String(folios[i % folios.length].folio).padStart(6, '0')}`),
+      ),
+      namePrefix: await sample(100, () => search('mar')),
+      nameContains: await sample(100, () => search('rtín')),
+      nameTwoWords: await sample(100, () => search('lucia perez')),
+      nameAccentFold: await sample(100, () => search('ANGEL gomez')),
+      phoneFull: await sample(100, (i) =>
+        search(`55${String((i % 1000) + 1).padStart(8, '0')}`, phoneReader),
+      ),
+      phoneSuffix: await sample(100, () => search('0042', phoneReader)),
+      phoneNoPermission: await sample(100, () => search('5500000042')),
+      miss: await sample(100, () => search('zzzzzz')),
+    };
+    report.groupsSearchHits = {
+      folio: (await inTenant(A, () => search('S-000100'))).items.length,
+      namePrefix: (await inTenant(A, () => search('mar'))).items.length,
+      nameTwoWords: (await inTenant(A, () => search('lucia perez'))).items
+        .length,
+      phoneFull: (await inTenant(A, () => search('5500000042', phoneReader)))
+        .items.length,
+      phoneNoPermission: (await inTenant(A, () => search('5500000042'))).items
+        .length,
+    };
+
     // (b) counts, detail, customer list.
     report.counts = await sample(SIZE.samples, () => reads.counts(reader));
     const ids = await adminPrisma.$queryRaw<
@@ -337,6 +409,14 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
     );
     plans['groups: later-page cursor'] = await explain('groups-later', () =>
       read({ cursor: midCursor ?? undefined }),
+    );
+    plans['q: folio'] = await explain('q-folio', () => search('S-000100'));
+    plans['q: name prefix'] = await explain('q-name', () => search('mar'));
+    plans['q: name two words'] = await explain('q-name2', () =>
+      search('lucia perez'),
+    );
+    plans['q: phone'] = await explain('q-phone', () =>
+      search('5500000042', phoneReader),
     );
     plans['counts'] = await explain('counts', () => reads.counts(reader));
     plans['customer list'] = await explain('list', () =>
@@ -427,6 +507,24 @@ describePerf('chatbot inbox load test (PostgreSQL, PERF=1)', () => {
       /chatbot_requests_history_idx/.test(
         plans['history: first page'].plan.join('\n'),
       ) && !/\bSort\b/.test(plans['history: first page'].plan.join('\n')),
+    );
+    const slowestSearch = Math.max(
+      ...Object.values(
+        report.groupsSearch as Record<string, { p95: number }>,
+      ).map((x) => x.p95),
+    );
+    verdict(
+      'q search p95 (folio, name, phone, miss)',
+      `< ${TARGETS.groupsPageP95Ms} ms`,
+      `${slowestSearch} ms (slowest mode)`,
+      slowestSearch < TARGETS.groupsPageP95Ms,
+    );
+    verdict(
+      'q without read:CustomerPhone finds nothing by phone',
+      '0 groups',
+      `${report.groupsSearchHits.phoneNoPermission} groups`,
+      report.groupsSearchHits.phoneNoPermission === 0 &&
+        report.groupsSearchHits.phoneFull > 0,
     );
     report.verdicts = verdicts;
 

@@ -82,3 +82,15 @@ export function phoneLookupVariants(
         : [national];
   return { countryCodes, phones };
 }
+
+/** Whether a stored `Customer` phone is the canonical `customerKey` (R1). */
+export function customerHasKey(
+  customer: { phoneCountryCode: string | null; phone: string | null },
+  customerKey: string,
+): boolean {
+  return (
+    customer.phoneCountryCode !== null &&
+    customer.phone !== null &&
+    canonicalPhone(customer.phoneCountryCode, customer.phone) === customerKey
+  );
+}

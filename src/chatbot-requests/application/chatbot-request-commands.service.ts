@@ -255,6 +255,7 @@ export type ChatbotRequestCommandErrorCode =
   | 'UNAUTHORIZED'
   | 'IDEMPOTENCY_CONFLICT'
   | 'USER_NOT_ASSIGNABLE'
+  | 'CUSTOMER_PHONE_MISMATCH'
   | 'FORBIDDEN'
   | 'INSUFFICIENT_PERMISSIONS'
   | 'ZONE_SET_CHANGED'
@@ -362,6 +363,40 @@ function commandHash(input: StaffCommandInput): string {
     .digest('hex');
 }
 
+/**
+ * One transaction per staff command (§6.5, §12.12): the advisory lock on the
+ * Idempotency-Key, then the receipt (same hash replays the stored response,
+ * another hash is 409), then `work`, whose response is stored as the receipt.
+ * A throw rolls everything back and stores no receipt. Shared by every staff
+ * command service.
+ */
+export function withStaffReceipt(
+  store: Pick<
+    ChatbotRequestCommandStore,
+    'transaction' | 'lockIdempotencyKey' | 'findReceipt' | 'saveReceipt'
+  >,
+  actorId: string,
+  key: string,
+  hash: string,
+  work: () => Promise<ChatbotRequestView>,
+): Promise<ChatbotRequestView> {
+  return store.transaction(async () => {
+    await store.lockIdempotencyKey(actorId, key);
+    const receipt = await store.findReceipt(actorId, key);
+    if (receipt) {
+      if (receipt.commandHash !== hash) {
+        throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
+      }
+      return receipt.responseSnapshot as ChatbotRequestView;
+    }
+    const response = await work();
+    await store.saveReceipt(actorId, key, hash, response);
+    return response;
+  });
+}
+
+export const toRequestView = toView;
+
 @Injectable()
 export class ChatbotRequestCommandsService {
   constructor(
@@ -374,16 +409,7 @@ export class ChatbotRequestCommandsService {
   execute(input: StaffCommandInput): Promise<ChatbotRequestView> {
     const hash = commandHash(input);
     const { actorUserId: actorId, idempotencyKey: key } = input;
-    return this.store.transaction(async () => {
-      await this.store.lockIdempotencyKey(actorId, key);
-      const receipt = await this.store.findReceipt(actorId, key);
-      if (receipt) {
-        if (receipt.commandHash !== hash) {
-          throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
-        }
-        return receipt.responseSnapshot as ChatbotRequestView;
-      }
-
+    return withStaffReceipt(this.store, actorId, key, hash, async () => {
       const actor = await this.store.findActor(actorId);
       if (!actor) throw new ChatbotRequestCommandError('UNAUTHORIZED', 401);
       const toUser =
@@ -438,9 +464,7 @@ export class ChatbotRequestCommandsService {
       } else {
         await this.store.apply(row, result.patch, result.event);
       }
-      const response = toView({ ...row, ...result.patch } as ChatbotRequestRow);
-      await this.store.saveReceipt(actorId, key, hash, response);
-      return response;
+      return toView({ ...row, ...result.patch } as ChatbotRequestRow);
     });
   }
 

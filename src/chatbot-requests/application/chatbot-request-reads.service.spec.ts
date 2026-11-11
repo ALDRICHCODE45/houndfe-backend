@@ -269,7 +269,10 @@ describe('ChatbotRequestReadsService', () => {
         context: null,
         resolution: null,
         resolvedAt: null,
+        ambiguousCustomer: false,
       },
+      candidates: [],
+      hasMergeCandidate: false,
       customer: null,
       recentOrders: [],
       otherOpen: [],
@@ -282,14 +285,22 @@ describe('ChatbotRequestReadsService', () => {
       build({
         findDetail: jest.fn().mockResolvedValue(detail(zoneImpact)),
       }).detail({ userId: 'u', ability }, 'r-1');
-    expect((await view(null)).allowedActions).toEqual(['CLAIM']);
+    // the fixture has no customer, so linking one is offered too
+    expect((await view(null)).allowedActions).toEqual([
+      'CLAIM',
+      'LINK_CUSTOMER',
+    ]);
     const impact = {
       validationId: 'v-1',
       requests: 2,
       customers: 2,
       setVersion: 2,
     };
-    expect((await view(impact)).allowedActions).toEqual(['CLAIM', 'RESOLVE']);
+    expect((await view(impact)).allowedActions).toEqual([
+      'CLAIM',
+      'RESOLVE',
+      'LINK_CUSTOMER',
+    ]);
     expect((await view(impact)).zoneImpact).toEqual(impact);
   });
 
@@ -313,7 +324,10 @@ describe('ChatbotRequestReadsService', () => {
         context: null,
         resolution: null,
         resolvedAt: null,
+        ambiguousCustomer: false,
       },
+      candidates: [],
+      hasMergeCandidate: false,
       customer: null,
       recentOrders: [],
       otherOpen: [],
@@ -348,5 +362,156 @@ describe('ChatbotRequestReadsService', () => {
       providerStatus: null,
     });
     expect(view.allowedActions).toEqual([]);
+  });
+
+  describe('q (§3.8)', () => {
+    const NO_PHONE = { can: () => false };
+    const WITH_PHONE = {
+      can: (action: string, subject: string) =>
+        `${action}:${subject}` === 'read:CustomerPhone',
+    };
+    const searched = async (q: string, ability: { can: () => boolean }) => {
+      const groups = jest.fn().mockResolvedValue([]);
+      const page = await build({ groups }).groups(
+        { userId: 'u', ability: ability as never },
+        { tab: 'open', filters: { subtype: 'UNKNOWN_QUESTION' }, q },
+      );
+      return { groups, page };
+    };
+
+    it('does not even query for digits without read:CustomerPhone (no phone oracle)', async () => {
+      const { groups, page } = await searched('5512345678', NO_PHONE);
+      expect(groups).not.toHaveBeenCalled();
+      expect(page).toEqual({ items: [], nextCursor: null });
+    });
+
+    it('hands the parsed search to the store, keeping the other filters', async () => {
+      const phone = await searched('55 1234', WITH_PHONE as never);
+      expect(
+        (phone.groups.mock.calls[0] as [{ filters: unknown }])[0].filters,
+      ).toEqual({
+        subtype: 'UNKNOWN_QUESTION',
+        search: { kind: 'phone', digits: '551234' },
+      });
+      const folio = await searched('S-000123', NO_PHONE);
+      expect(
+        (folio.groups.mock.calls[0] as [{ filters: unknown }])[0].filters,
+      ).toMatchObject({ search: { kind: 'folio', folio: 123 } });
+      const name = await searched('María', NO_PHONE);
+      expect(
+        (name.groups.mock.calls[0] as [{ filters: unknown }])[0].filters,
+      ).toMatchObject({ search: { kind: 'name', tokens: ['maria'] } });
+    });
+
+    it('an empty q is no search', async () => {
+      const blank = await searched('  ', NO_PHONE);
+      expect(
+        (blank.groups.mock.calls[0] as [{ filters: unknown }])[0].filters,
+      ).toEqual({ subtype: 'UNKNOWN_QUESTION' });
+    });
+  });
+
+  it('assignableUsers returns only id and displayName (name, else email local part)', async () => {
+    const out = await build({
+      assignableUsers: jest.fn().mockResolvedValue([
+        { id: 'u-1', name: 'Ana', email: 'ana@shop.test' },
+        { id: 'u-2', name: ' ', email: 'luis@shop.test' },
+      ]),
+    }).assignableUsers();
+    expect(out).toEqual({
+      items: [
+        { id: 'u-1', displayName: 'Ana' },
+        { id: 'u-2', displayName: 'luis' },
+      ],
+    });
+  });
+
+  describe('detail: R1 candidates and MERGE / LINK_CUSTOMER', () => {
+    const candidate = (id: string) => ({
+      id,
+      firstName: 'Rosa',
+      lastName: 'Gómez',
+      phoneCountryCode: '52',
+      phone: '5512345678',
+      isTrusted: false,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      priceList: null,
+      lastOrderAt: new Date('2026-10-01T00:00:00.000Z'),
+    });
+    const detail = (over: Partial<DetailRecord> = {}): DetailRecord => ({
+      request: {
+        ...record(),
+        needs: null,
+        context: null,
+        resolution: null,
+        resolvedAt: null,
+        ambiguousCustomer: true,
+      },
+      candidates: [candidate('c-1'), candidate('c-2')],
+      hasMergeCandidate: true,
+      customer: null,
+      recentOrders: [],
+      otherOpen: [],
+      decision: null,
+      zoneImpact: null,
+      audit: [],
+      deliveries: [],
+      ...over,
+    });
+    const UPDATE = {
+      can: (action: string, subject: string) =>
+        `${action}:${subject}` === 'update:ChatbotRequest',
+    };
+    const view = (ability: { can: (a: string, s: string) => boolean }) =>
+      build({
+        findDetail: jest.fn().mockResolvedValue(detail()),
+      }).detail({ userId: 'u', ability: ability as never }, 'r-1');
+
+    it('lists the candidates with the phone masked unless read:CustomerPhone', async () => {
+      const masked = await view(UPDATE);
+      expect(masked.customer.ambiguous).toBe(true);
+      expect(masked.customer.candidates).toEqual([
+        expect.objectContaining({
+          id: 'c-1',
+          displayName: 'Rosa Gómez',
+          phone: '55 **** 5678',
+          lastOrderAt: '2026-10-01T00:00:00.000Z',
+        }),
+        expect.objectContaining({ id: 'c-2', phone: '55 **** 5678' }),
+      ]);
+      expect(JSON.stringify(masked)).not.toContain('5512345678');
+      const full = await view({
+        can: (action, subject) =>
+          UPDATE.can(action, subject) ||
+          `${action}:${subject}` === 'read:CustomerPhone',
+      });
+      expect(full.customer.candidates[0].phone).toBe('+525512345678');
+    });
+
+    it('offers MERGE and LINK_CUSTOMER with update:ChatbotRequest, never without it', async () => {
+      expect((await view(UPDATE)).allowedActions).toEqual([
+        'CLAIM',
+        'MERGE',
+        'LINK_CUSTOMER',
+        'CANCEL',
+      ]);
+      expect((await view({ can: () => false })).allowedActions).toEqual([]);
+    });
+
+    it('hides both when there is no candidate request and the customer is linked', async () => {
+      const linked = detail({
+        hasMergeCandidate: false,
+        candidates: [],
+        request: {
+          ...detail().request,
+          customerId: 'c-1',
+          ambiguousCustomer: false,
+        },
+      });
+      const out = await build({
+        findDetail: jest.fn().mockResolvedValue(linked),
+      }).detail({ userId: 'u', ability: UPDATE as never }, 'r-1');
+      expect(out.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    });
   });
 });

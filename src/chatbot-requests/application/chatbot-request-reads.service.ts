@@ -19,6 +19,8 @@ import {
   type ChatbotRequestSubtype,
 } from '../domain/chatbot-request.commands';
 import type { CustomerKeySealer } from '../domain/customer-key-sealer';
+import { parseInboxSearch, type InboxSearch } from '../domain/inbox-search';
+import { actorDisplayName } from '../domain/actor-display-name';
 import type { PermissionCheck } from '../domain/resolve-permissions';
 import {
   closedWindowCutoff,
@@ -53,6 +55,8 @@ export interface InboxFilters {
   assignee?: AssigneeFilter;
   overdue?: boolean;
   windowClosingSoon?: boolean;
+  /** The parsed `q` (§3.8); never `none`/`absent`: the service short-circuits those. */
+  search?: Exclude<InboxSearch, { kind: 'none' | 'absent' }>;
 }
 
 /** Columns every list row needs; `urgencyAt` only orders and pages. */
@@ -135,14 +139,24 @@ export interface OrderRecord {
   paymentStatus: string | null;
 }
 
+/** A customer whose canonical phone is the request's `customerKey` (R1). */
+export interface CandidateRecord extends CustomerRecord {
+  lastOrderAt: Date | null;
+}
+
 export interface DetailRecord {
   request: RequestRecord & {
     needs: string | null;
     context: unknown;
     resolution: unknown;
     resolvedAt: Date | null;
+    ambiguousCustomer: boolean;
   };
   customer: CustomerRecord | null;
+  /** `link-customer` choices; empty unless the request has no customer. */
+  candidates: CandidateRecord[];
+  /** Another open request could take this one (§12.11 candidate rule). */
+  hasMergeCandidate: boolean;
   recentOrders: OrderRecord[];
   otherOpen: RequestRecord[];
   /** The wrapped table's projection (§12.6), `null` for other kinds. */
@@ -206,6 +220,10 @@ export interface ChatbotRequestReadStore {
     limit: number,
   ): Promise<AuditRecord[] | null>;
   customers(ids: string[]): Promise<CustomerRecord[]>;
+  /** Active members holding read + update:ChatbotRequest, by name. */
+  assignableUsers(): Promise<
+    Array<{ id: string; name: string; email: string }>
+  >;
 }
 
 /** Who is asking: the JWT user and the guard-built CASL ability. */
@@ -237,19 +255,28 @@ export class ChatbotRequestReadsService {
     input: {
       tab: InboxTab;
       filters: InboxFilters;
+      /** Free-text search (§3.8): folio, customer name, or phone digits. */
+      q?: string;
       cursor?: string;
       limit?: number;
     },
   ) {
     const now = this.clock();
     const limit = input.limit ?? DEFAULT_PAGE;
+    // Phone search needs `read:CustomerPhone`; without it a digits-only q
+    // matches nothing, so the route is no oracle for phone numbers (R12).
+    const search = parseInboxSearch(input.q, {
+      canSearchPhone: reader.ability.can('read', 'CustomerPhone'),
+    });
+    if (search.kind === 'none') return { items: [], nextCursor: null };
     const records = await this.store.groups({
       userId: reader.userId,
       now,
       cutoff: closedWindowCutoff(now),
       limit,
       tab: input.tab,
-      filters: input.filters,
+      filters:
+        search.kind === 'absent' ? input.filters : { ...input.filters, search },
       cursor: this.openCursor(
         input.cursor,
         input.tab === 'resolved' || input.tab === 'cancelled'
@@ -435,6 +462,19 @@ export class ChatbotRequestReadsService {
         customerSince: iso(customer?.createdAt ?? null),
         isTrusted: customer?.isTrusted ?? false,
         priceList: customer?.priceList ?? null,
+        // R1: several customers share the phone; staff picks one (link-customer).
+        ambiguous: request.ambiguousCustomer,
+        candidates: record.candidates.map((c) => ({
+          id: c.id,
+          displayName: customerName(c),
+          phone: toStaffPhone(
+            { countryCode: c.phoneCountryCode, phone: c.phone },
+            reader.ability,
+          ),
+          isTrusted: c.isTrusted,
+          customerSince: c.createdAt.toISOString(),
+          lastOrderAt: iso(c.lastOrderAt),
+        })),
         recentOrders: record.recentOrders.map((o) => ({
           saleId: o.saleId,
           folio: o.folio,
@@ -470,6 +510,11 @@ export class ChatbotRequestReadsService {
           // validation to settle, so it is not offered.
           resolveTargetMissing:
             request.subtype === 'DELIVERY_ZONE' && !record.zoneImpact,
+          hasMergeCandidate: record.hasMergeCandidate,
+          customer: {
+            customerId: request.customerId,
+            customerKey: request.customerKey,
+          },
         },
       ),
     };
@@ -492,6 +537,20 @@ export class ChatbotRequestReadsService {
         records.length > limit && last
           ? encodeCursor([iso(last.createdAt), last.id])
           : null,
+    };
+  }
+
+  /**
+   * `GET /chatbot-requests/assignable-users` (§3.10): the `reassign` picker.
+   * Only `{id, displayName}`: no email, no phone.
+   */
+  async assignableUsers() {
+    const users = await this.store.assignableUsers();
+    return {
+      items: users.map((user) => ({
+        id: user.id,
+        displayName: actorDisplayName(user),
+      })),
     };
   }
 

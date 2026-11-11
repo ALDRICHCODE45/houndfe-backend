@@ -10,6 +10,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   MaxLength,
   Min,
@@ -76,4 +77,20 @@ export class CancelDto extends ExpectedVersionDto {
   @IsString()
   @Length(1, 500)
   customerNote?: string;
+}
+
+/** §12.11: the target is the request that stays; both versions are checked. */
+export class MergeDto extends ExpectedVersionDto {
+  @IsUUID()
+  intoRequestId!: string;
+
+  @IsInt()
+  @Min(1)
+  intoExpectedVersion!: number;
+}
+
+/** R1 (§3.8): one of the candidates the detail lists. */
+export class LinkCustomerDto extends ExpectedVersionDto {
+  @IsUUID()
+  customerId!: string;
 }

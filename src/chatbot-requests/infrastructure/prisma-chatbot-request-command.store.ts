@@ -24,6 +24,7 @@ import {
   enqueueNotice,
 } from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import { enqueueAnswered, enqueueCancelled } from './chatbot-feed-writes';
+import { assignableUserWhere } from './assignable-users';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
   applyRequestPatch,
@@ -40,6 +41,7 @@ function closedCause(
   status: 'RESOLVED' | 'CANCELLED',
   event: ChatbotRequestEventDraft,
 ): ClosedCause {
+  if (event.type === 'MERGED') return 'MERGED';
   if (status === 'CANCELLED') return 'CANCELLED_BY_OTHER';
   return event.data.action === 'SIBLING_RESOLVED' ||
     event.data.viaRequestId !== undefined
@@ -109,35 +111,13 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     return user ? { userId, displayName: actorDisplayName(user) } : null;
   }
 
-  /**
-   * An active member whose role grants both `read` and `update` on
-   * `ChatbotRequest` (§2.5: update needs read). As in `CaslAbilityFactory`,
-   * `manage` and subject `all` grants count too.
-   */
+  /** Same rule as `GET /chatbot-requests/assignable-users` (`assignable-users.ts`). */
   async findAssignableUser(userId: string): Promise<StaffActor | null> {
-    const grants = (action: string) => ({
-      permissions: {
-        some: {
-          permission: {
-            action: { in: [action, 'manage'] },
-            subject: { in: ['ChatbotRequest', 'all'] },
-          },
-        },
-      },
+    const user = await this.tx.user.findFirst({
+      where: assignableUserWhere(this.tenantId, userId),
+      select: { name: true, email: true },
     });
-    const membership = await this.tx.tenantMembership.findFirst({
-      where: {
-        userId,
-        tenantId: this.tenantId,
-        user: { isActive: true },
-        // A user can hold several memberships; each grant may come from any.
-        AND: [{ role: grants('read') }, { role: grants('update') }],
-      },
-      select: { user: { select: { name: true, email: true } } },
-    });
-    return membership
-      ? { userId, displayName: actorDisplayName(membership.user) }
-      : null;
+    return user ? { userId, displayName: actorDisplayName(user) } : null;
   }
 
   lockRequest(id: string): Promise<ChatbotRequestRow | null> {

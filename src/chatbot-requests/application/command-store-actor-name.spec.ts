@@ -8,8 +8,7 @@ import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.serv
 import { PrismaChatbotRequestCommandStore } from '../infrastructure/prisma-chatbot-request-command.store';
 
 function storeWith(db: {
-  user?: { findUnique: jest.Mock };
-  tenantMembership?: { findFirst: jest.Mock };
+  user?: { findUnique?: jest.Mock; findFirst?: jest.Mock };
 }) {
   const tenantPrisma = {
     getClient: () => db,
@@ -44,15 +43,20 @@ describe('PrismaChatbotRequestCommandStore actor names', () => {
   it('findAssignableUser copies the fallback for a target with an empty name', async () => {
     const findFirst = jest
       .fn()
-      .mockResolvedValue({ user: { name: '', email: 'turno.tarde@x.mx' } });
+      .mockResolvedValue({ name: '', email: 'turno.tarde@x.mx' });
     const target = await storeWith({
-      tenantMembership: { findFirst },
+      user: { findFirst },
     }).findAssignableUser('u-2');
     expect(target).toEqual({ userId: 'u-2', displayName: 'turno.tarde' });
     expect(findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({
-        select: { user: { select: { name: true, email: true } } },
-      }),
+      expect.objectContaining({ select: { name: true, email: true } }),
     );
+  });
+
+  it('findAssignableUser answers null when the user is not assignable', async () => {
+    const findFirst = jest.fn().mockResolvedValue(null);
+    await expect(
+      storeWith({ user: { findFirst } }).findAssignableUser('u-3'),
+    ).resolves.toBeNull();
   });
 });

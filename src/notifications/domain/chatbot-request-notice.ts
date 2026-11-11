@@ -76,6 +76,7 @@ export const CLOSED_CAUSES = [
   'RESOLVED_BY_OTHER',
   'CANCELLED_BY_OTHER',
   'SIBLING_RESOLVED',
+  'MERGED',
 ] as const;
 export type ClosedCause = (typeof CLOSED_CAUSES)[number];
 
@@ -183,6 +184,7 @@ const CLOSED_TITLE: Record<ClosedCause, string> = {
   RESOLVED_BY_OTHER: 'Otra persona resolvió la solicitud',
   CANCELLED_BY_OTHER: 'Otra persona canceló la solicitud',
   SIBLING_RESOLVED: 'Se resolvió junto con otras de su zona',
+  MERGED: 'Otra persona la unió con otra solicitud del cliente',
 };
 
 /** §5.2 `title` (<=120) and `body` (<=200), built from type and payload. */

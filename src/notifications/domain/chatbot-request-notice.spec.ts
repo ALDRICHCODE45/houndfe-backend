@@ -80,6 +80,7 @@ describe('text and links', () => {
     ['RESOLVED_BY_OTHER', 'Otra persona resolvió la solicitud'],
     ['CANCELLED_BY_OTHER', 'Otra persona canceló la solicitud'],
     ['SIBLING_RESOLVED', 'Se resolvió junto con otras de su zona'],
+    ['MERGED', 'Otra persona la unió con otra solicitud del cliente'],
   ] as const)('words a closed notice by its cause (%s)', (cause, title) => {
     expect(
       noticeText('REQUEST_CANCELLED', {

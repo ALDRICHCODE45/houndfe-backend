@@ -34,6 +34,9 @@ const MESSAGES: Record<string, string> = {
   CANCEL_NOT_ALLOWED: 'This request cannot be cancelled now',
   IDEMPOTENCY_CONFLICT: 'Idempotency-Key was already used with another body',
   USER_NOT_ASSIGNABLE: 'The user cannot be assigned to chatbot requests',
+  MERGE_NOT_ALLOWED: 'These requests cannot be merged',
+  CUSTOMER_PHONE_MISMATCH:
+    'The customer phone does not match the request phone',
   ZONE_SET_CHANGED: 'The customers waiting on this zone changed; review again',
   ALREADY_RESOLVED: 'The request was already resolved',
   CUSTOMER_OPEN_LIMIT: 'The customer has too many open requests',

@@ -1,6 +1,6 @@
-# Chatbot request inbox — the read routes (groups, counts, detail, history)
+# Chatbot request inbox — the read routes (groups, counts, detail, history, assignable users)
 
-**Status:** implemented on `feat/human-intervention` (human-intervention unit 4, slice 4a), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §3.8, §3.10, §6.3, §12.3, §12.4, §12.6, §12.11, R12.
+**Status:** implemented on `feat/human-intervention` (human-intervention unit 4, slices 4a and 4b), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §3.8, §3.10, §6.3, §12.3, §12.4, §12.6, §12.11, R12.
 
 Shapes in this document come from the controller, the DTOs, the service and the PostgreSQL integration spec `chatbot-request-reads.integration.spec.ts` (`src/chatbot-requests/**`). Nothing was sent to the dev API. Commands (claim, release, reassign, cancel, resolve) are in handoffs 11 and 12; this document is only the reads.
 
@@ -15,8 +15,8 @@ Shapes in this document come from the controller, the DTOs, the service and the 
 | `scheduledFor`, `requiresTemplateAtStart`, `needsReschedule` | `null`/`false` (scheduling is unit 14) |
 | `templateCostText` in the detail | not sent (it only comes with `SEND_TEMPLATE`, unit 11) |
 | `GET /chatbot-requests/:id/conversation`, media | unit 9 |
-| `assignable-users`, `reply`, `messages`, `template`, `finish`, `reschedule`, `merge`, `link-customer` | not built yet |
-| `q` (free-text search) on `groups` and `history` | not supported: it answers `400` like any unknown parameter |
+| `reply`, `messages`, `template`, `finish`, `reschedule` | not built yet (`merge` and `link-customer` are in handoff 11, `assignable-users` in section 13 below) |
+| `q` (free-text search) on `history` | not supported: it answers `400` like any unknown parameter (`groups` supports it, section 4) |
 | The `200 {request}` of the commands (handoffs 11 and 12) | still the small shape (no phone, no `customerKey`); the full row arrives with the SSE unit |
 
 ## 1. Who can do what
@@ -32,6 +32,7 @@ Same guards as the commands: `JWT → tenant → active user → CASL`, so the c
 | `GET /chatbot-requests/:id` | `read:ChatbotRequest` |
 | `GET /chatbot-requests/:id/audit` | `read:ChatbotRequest` |
 | `GET /chatbot-requests/:id/merge-candidates` | `read:ChatbotRequest` + `update:ChatbotRequest` |
+| `GET /chatbot-requests/assignable-users` | `update:ChatbotRequestAssignment` (section 13) |
 | `GET /chatbot-requests/:id/zone-impact` | `read:ChatbotRequest` (handoff 12) |
 
 A request of another sucursal answers `404`, the same as a missing one.
@@ -84,6 +85,7 @@ Query (all optional; unknown parameters are `400`):
 | `assignee` | `me`, `unassigned` (alias `none`), or a user id (UUID) | all |
 | `overdue` | `true` / `false` | not filtered |
 | `windowClosingSoon` | `true` / `false` (WhatsApp window closes within the next 2 hours) | not filtered |
+| `q` | free text, at most 100 characters: a folio, a customer name, or phone digits (see below) | no search |
 | `cursor` | the `nextCursor` of the previous page | first page |
 | `limit` | 1–50 | 25 |
 
@@ -103,6 +105,11 @@ Query (all optional; unknown parameters are `400`):
 }
 ```
 
+- **`q` (search).** One box, three modes, picked from what was typed. It combines with `status` and the filters, and keeps the same ordering and cursor.
+  - **Folio** — `S-000123`, any case and any zero padding (`s-123` works). It is exact: `S-0001` finds only folio 1, never a prefix. Works for every role.
+  - **Customer name** — case and accent insensitive (`maria` finds `María`, `nandu` finds `Ñandú`); each word must be contained in `firstName lastName`, in any order, at most 4 words (`perez maria`). A prefix is just a short word. Only requests **linked to a customer** can match by name (an unlinked request has no name). `%` and `_` are literal.
+  - **Phone digits** — digits with optional spaces, dashes, parentheses or `+` (`55 1234-5678`, `1234`), matched as a *contains* over the customer's full number. **Only for callers with `read:CustomerPhone`.** Without it a digits-only `q` finds **nothing at all** (`{"items": [], "nextCursor": null}`, exactly like a miss), so the box cannot be used to find out whether a number is a customer. Text that mixes letters and digits (`maria 0001`) is a name search and never matches a phone.
+  - An empty or blank `q` is ignored. A `q` over 100 characters is `400`. The matching group shows only the requests that match (like any filter); `openCount` stays the customer's open total.
 - **Order of the groups:** `mostUrgentAt` ascending (overdue first, because their deadline is in the past), groups with no deadline last, then by customer. The order is stable for the cursor, so pages never repeat a group.
 - **Inside a group:** the nearest deadline first (`NULL` last), then `createdAt`, then `id`. Up to 10 rows; `moreRequests` is how many matching rows are left. Page the rest with `GET /chatbot-requests?customerKey=` (section 5).
 - With a filter (`subtype`, `assignee`, `overdue`, `windowClosingSoon`, or the `scheduled` tab), a group appears only if it has a matching open request, and `requests` and `moreRequests` count only the matching ones. `openCount` is always the customer's open total.
@@ -159,6 +166,8 @@ The row (section 3) plus:
     "id": "…", "displayName": "Juan Pérez", "phone": "55 **** 5678",
     "customerSince": "2025-03-02T10:00:00.000Z", "isTrusted": true,
     "priceList": { "id": "…", "name": "Mayoreo" },
+    "ambiguous": false,
+    "candidates": [],
     "recentOrders": [
       { "saleId": "…", "folio": "V-1", "createdAt": "…", "totalCents": 12300, "status": "CONFIRMED", "paymentStatus": "PAID" }
     ]
@@ -176,12 +185,13 @@ The row (section 3) plus:
       "fromStatus": "NEW", "toStatus": "IN_PROGRESS", "version": 2, "data": {} }
   ],
   "auditNextCursor": null,
-  "allowedActions": ["CLAIM", "RESOLVE"]
+  "allowedActions": ["CLAIM", "RESOLVE", "LINK_CUSTOMER"]
 }
 ```
 
 - `needs` and `context` are bot-untrusted text/JSON: show as text.
 - `customer.id = null` and `displayName = null` when no customer is linked; `recentOrders` is then `[]`, `priceList` `null`, `isTrusted` `false`. `recentOrders` are the last five confirmed or canceled sales of the customer, newest first (drafts are not shown).
+- **`customer.candidates[]`** (R1, for `LINK_CUSTOMER`): only while the request is open and has **no** customer. The tenant's customers whose canonical phone is this request's phone (`521…` and `52…` count as the same number), at most 10, oldest first: `{id, displayName, phone, isTrusted, customerSince, lastOrderAt}`. `phone` follows the same mask as everywhere (full only with `read:CustomerPhone`). **`customer.ambiguous`** is `true` when the bot found several customers with that phone and left the request unlinked: the user picks one and sends it to `POST …/link-customer` (handoff 11). It can also hold one customer that was created after the request. It is `[]` once linked, for a closed request and for a legacy request with no phone.
 - **`decision`** is `null` for `CLARIFICATION` and `CONVERSATION`. For decisions it is discriminated by `subtype`:
 
   | `subtype` | Shape |
@@ -195,7 +205,7 @@ The row (section 3) plus:
 - **`zoneImpact`** exists only on `DELIVERY_ZONE` that has a validation (same value as `GET …/zone-impact`, including `validationId`; send its `setVersion` as `expectedZoneSetVersion` when resolving). `requests` and `customers` count only the **open** requesters (what resolving would settle), while `decision.requesterCount` counts **every** requester of the validation, whatever its state, like the old zone screen.
 - **`deliveries[]`** are the answers queued for the bot, newest first (at most 50): `outcome` is `PENDING` until the bot reports, then `PROVIDER_ACCEPTED | DELIVERY_UNKNOWN | DEFERRED_WINDOW_CLOSED | DEFERRED_HUMAN_SESSION | STALE`. `needsReconciliation` is true for `DELIVERY_UNKNOWN` (the "entrega dudosa"). `providerStatus` is `null` until the statuses unit.
 - **`audit[]`** is the 20 most recent events, newest first. `actor.kind` is `USER | SERVICE | SYSTEM` (for `SYSTEM`, `id` and `displayName` are `null`). `data` is small and never customer text (except the `customerNote` that staff wrote on a cancel). More: `GET …/audit?cursor=` with `auditNextCursor`.
-- **`allowedActions`** is computed by the server from the state machine, the caller's permissions and whether the caller is the assignee. Offer a button only if its action is in the list; the command can still answer `409` if the request changed meanwhile. Today it can contain `CLAIM`, `RELEASE`, `REASSIGN`, `RESOLVE`, `CANCEL`:
+- **`allowedActions`** is computed by the server from the state machine, the caller's permissions and whether the caller is the assignee. Offer a button only if its action is in the list; the command can still answer `409` if the request changed meanwhile. Today it can contain `CLAIM`, `RELEASE`, `REASSIGN`, `RESOLVE`, `MERGE`, `LINK_CUSTOMER`, `CANCEL` (in this order):
 
   | Action | Offered when |
   | --- | --- |
@@ -203,9 +213,11 @@ The row (section 3) plus:
   | `RELEASE` | `update:ChatbotRequest`, request `IN_PROGRESS`, and it is yours or you also have `update:ChatbotRequestAssignment`; not for a live conversation |
   | `REASSIGN` | `update:ChatbotRequestAssignment`, request `IN_PROGRESS` |
   | `RESOLVE` | `update:ChatbotRequest` **and** the legacy permission of the subtype (`update:HumanDecision` for stock and expiry, `validate:DeliveryZone`, `update:ReceiptEvidence`), `kind = DECISION`, open and not held by someone else; for `DELIVERY_ZONE` also only when it has a validation (without one the resolve route answers `404`) |
+  | `MERGE` | `update:ChatbotRequest`, request open, subtype `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` or `COMPLAINT` with no started session, **and** at least one merge candidate (section 10). Held by someone else does not hide it |
+  | `LINK_CUSTOMER` | `update:ChatbotRequest`, request open, no customer linked yet, and a phone identity (not a legacy `unknown:` request). Held by someone else does not hide it |
   | `CANCEL` | `update:ChatbotRequest`, open, not a `DECISION`, and (if held by someone else) you have `update:ChatbotRequestAssignment` |
 
-  `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH`, `FINISH_IDLE`, `MERGE` and `LINK_CUSTOMER` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request gets `["CLAIM","RESOLVE"]`; a Cashier gets `["CLAIM"]`; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","CANCEL"]`.
+  `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request of an unlinked phone gets `["CLAIM","RESOLVE","LINK_CUSTOMER"]`; a Cashier gets `["CLAIM","LINK_CUSTOMER"]`; the Cashier who claimed an `UNKNOWN_QUESTION` of a linked customer gets `["RELEASE","CANCEL"]`, plus `MERGE` when that customer has another open question.
 
 ## 9. `GET /chatbot-requests/:id/audit`
 
@@ -213,7 +225,7 @@ The row (section 3) plus:
 
 ## 10. `GET /chatbot-requests/:id/merge-candidates`
 
-`{ "items": [ /* rows */ ] }`: up to 20 open requests of the same customer and the same subtype, nearest deadline first, only for `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never for decisions). Empty when the request is closed or not mergeable: hide "Unir con…". The merge command is not built yet.
+`{ "items": [ /* rows */ ] }`: up to 20 open requests of the same customer and the same subtype, nearest deadline first, only for `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never for decisions). Empty when the request is closed or not mergeable: hide "Unir con…". The command is `POST /chatbot-requests/:id/merge` (handoff 11); each row's `id` and `version` are the `intoRequestId` and `intoExpectedVersion` it needs.
 
 ## 11. Errors
 
@@ -225,9 +237,23 @@ Same envelope as handoff 11: `{statusCode, code, message}`.
 | `400` | `RANGE_TOO_LARGE` | `from`/`to` span more than 92 days |
 | `401` | `UNAUTHORIZED` | No JWT, or the user is inactive |
 | `403` | `FORBIDDEN` | No membership in the sucursal |
-| `403` | `INSUFFICIENT_PERMISSIONS` | Missing `read:ChatbotRequest` (or `update:ChatbotRequest` on merge candidates) |
+| `403` | `INSUFFICIENT_PERMISSIONS` | Missing `read:ChatbotRequest` (or `update:ChatbotRequest` on merge candidates, or `update:ChatbotRequestAssignment` on `assignable-users`) |
 | `404` | `NOT_FOUND` | The request does not exist or belongs to another sucursal |
+
+## 13. `GET /chatbot-requests/assignable-users`
+
+The picker for `reassign`. Needs only `update:ChatbotRequestAssignment`.
+
+```json
+{ "items": [ { "id": "8d6f…", "displayName": "Ana López" } ] }
+```
+
+- Only `{id, displayName}`: **no email, no phone.** `displayName` is the user's name (the email's local part if the name is empty). Sorted by `displayName`.
+- Who is in the list is exactly who `POST …/reassign` accepts, because both use one rule: an **active** user with a membership in this sucursal whose roles grant `read` **and** `update` on `ChatbotRequest`. `manage` counts. The two grants may come from different roles of the same person (read from one, update from another). Inactive users, members of other sucursales and users with only `read` or only `update` are not listed, and `reassign` answers `422 USER_NOT_ASSIGNABLE` for them.
+- The list does not exclude the caller or the current assignee (`reassign` to the current assignee answers `422 ACTION_NOT_ALLOWED`; filter it in the UI). Tenant-wide, one page (the people who attend requests are few).
 
 ## 12. Performance (for the record)
 
 Measured with 5,000 open requests over ~2,000 customers plus 20,000 closed and two noise sucursales: a page of 25 groups p95 **6.9 ms** (target < 200 ms), every page of a full walk p95 9.4 ms, counts 2 ms, detail 4.2 ms, history 1.7 ms. See `docs/perf/chatbot-inbox-load-results.md`.
+
+**`q` (slice 4b)**, same data plus 20,000 customers per sucursal (accented Spanish names), p95: folio **1.6 ms**, phone **4–6 ms**, a digits-only `q` without `read:CustomerPhone` **0 ms** (nothing is searched), customer name **89–123 ms** (a short prefix such as `mar` with ~3,700 matching customers is the slowest; a miss 80 ms). The name search has no index: PostgreSQL cannot index a *contains* match without the `pg_trgm` extension, which this database does not use, so it folds accents and case in SQL over the sucursal's customers (~4 µs per customer). Cost grows with the number of customers of one sucursal; measure again past ~100,000 customers.

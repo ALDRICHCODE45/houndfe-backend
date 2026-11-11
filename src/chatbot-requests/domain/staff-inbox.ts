@@ -8,7 +8,9 @@
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   cancelByStaff,
+  canMergeSource,
   claim,
+  linkCustomer,
   reassign,
   release,
   resolve,
@@ -30,14 +32,16 @@ export function closedWindowCutoff(now: Date): Date {
 
 /**
  * Commands the caller can run right now. `RESCHEDULE` is never offered (the
- * route arrives with unit 14), nor are the reply, message, template, finish,
- * merge and link-customer actions: their routes do not exist yet.
+ * route arrives with unit 14), nor are the reply, message, template and
+ * finish actions: their routes do not exist yet.
  */
 export type AllowedAction =
   | 'CLAIM'
   | 'RELEASE'
   | 'REASSIGN'
   | 'RESOLVE'
+  | 'MERGE'
+  | 'LINK_CUSTOMER'
   | 'CANCEL';
 
 export interface AllowedActionsOptions {
@@ -46,6 +50,13 @@ export interface AllowedActionsOptions {
    * validation): the route answers 404, so `RESOLVE` is not offered.
    */
   resolveTargetMissing?: boolean;
+  /**
+   * At least one open request of the same customer and subtype could take this
+   * one (§12.11, the `merge-candidates` rule). `MERGE` needs it.
+   */
+  hasMergeCandidate?: boolean;
+  /** The request's customer link; `LINK_CUSTOMER` needs it to be offered. */
+  customer?: { customerId: string | null; customerKey: string };
 }
 
 export function computeAllowedActions(
@@ -86,6 +97,21 @@ export function computeAllowedActions(
         !options.resolveTargetMissing &&
         canResolveSubtype(ability, state.subtype) &&
         resolve(state, { actor, expectedVersion, action: 'RESOLVE', now }).ok,
+    ],
+    [
+      'MERGE',
+      canUpdate && options.hasMergeCandidate === true && canMergeSource(state),
+    ],
+    [
+      'LINK_CUSTOMER',
+      canUpdate &&
+        options.customer !== undefined &&
+        linkCustomer(state, {
+          actor,
+          expectedVersion,
+          customerId: 'candidate',
+          current: options.customer,
+        }).ok,
     ],
     [
       'CANCEL',

@@ -1,13 +1,13 @@
-# Chatbot request inbox — staff commands: claim, release, reassign, cancel
+# Chatbot request inbox — staff commands: claim, release, reassign, cancel, merge, link-customer
 
-**Status:** implemented on `feat/human-intervention` (human-intervention unit 2, slice 2b), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §2.5, §3.8, §3.10, §6.5, §12.11, §12.12, §12.14.
+**Status:** implemented on `feat/human-intervention` (human-intervention unit 2, slice 2b; `merge` and `link-customer` in unit 4, slice 4b), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §2.5, §3.8, §3.10, §6.5, §12.11, §12.12, §12.14.
 
 Shapes in this document come from the controller, DTOs, scoped filter and their specs (`src/chatbot-requests/**`). Nothing was sent to the dev API.
 
 **Not in this slice:**
-- The read routes (`GET /chatbot-requests/groups`, `/counts`, `/:id`, `/history`, `/assignable-users`) arrive with unit 4. Until then the FE has no `version` to send unless it comes from a command response.
+- The read routes (`GET /chatbot-requests/groups`, `/counts`, `/:id`, `/history`, `/assignable-users`) are documented in `14-chatbot-request-inbox.md`; the `version` to send comes from there.
 - `resolve` is documented in `12-chatbot-request-resolve.md` (unit 3). It needs one more permission per subtype on top of `read`/`update:ChatbotRequest`.
-- `reply`, `messages`, `template`, `finish`, `merge`, `link-customer` and `reschedule` arrive in later units.
+- `reply`, `messages`, `template`, `finish` and `reschedule` arrive in later units.
 - Phone masking (`toStaffPhone`) arrives with unit 4. The command response carries no phone and no `customerKey`.
 
 ## 1. Who can do what
@@ -20,6 +20,8 @@ Every route uses `JWT → tenant context → active user → CASL`. The tenant a
 | `POST /chatbot-requests/:id/release` | `read:ChatbotRequest` + `update:ChatbotRequest` | Releasing **someone else's** request also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
 | `POST /chatbot-requests/:id/cancel` | `read:ChatbotRequest` + `update:ChatbotRequest` | Cancelling a request **held by someone else** also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
 | `POST /chatbot-requests/:id/reassign` | `read:ChatbotRequest` + `update:ChatbotRequestAssignment` | `toUserId` must be an active member of this sucursal with `read:ChatbotRequest` and `update:ChatbotRequest` |
+
+`merge` and `link-customer` are in sections 3.5 and 3.6 (both `read:ChatbotRequest` + `update:ChatbotRequest`; no extra permission, §3.10).
 
 Initial grants (task log L2): Manager has all four; Cashier has `read`/`update:ChatbotRequest` only (claim, release own, cancel, no reassign). Super Admin acts through its tenant membership.
 
@@ -90,6 +92,8 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 422 | `ACTION_NOT_ALLOWED` | Release of a `NEW` request; reassign of a `NEW` request or to the current assignee | ✓ |
 | 422 | `CANCEL_NOT_ALLOWED` | Cancel of a `DECISION` (stock, expiry, zone, receipt: close it with its negative action instead), or of a conversation that already ended | ✓ |
 | 422 | `USER_NOT_ASSIGNABLE` | `toUserId` is not an active member with `read:ChatbotRequest` and `update:ChatbotRequest` (an update-only user is refused) | — |
+| 422 | `MERGE_NOT_ALLOWED` | `merge` rule not met (section 3.5) | ✓ |
+| 422 | `CUSTOMER_PHONE_MISMATCH` | `link-customer` to a customer whose phone is not the request's (section 3.6) | ✓ |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
 **Order of checks.** The first failing check answers; later ones are not evaluated. A stale tab that tries to claim someone else's request therefore sees who has it, not a bare version conflict.
@@ -100,6 +104,8 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | `release` | `404` → `REQUEST_CLOSED` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`) → `CANCEL`-style live-session refusal (from unit 11) |
 | `reassign` | `422 USER_NOT_ASSIGNABLE` (checked first, before the request is even looked up) → `404` → `REQUEST_CLOSED` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`, or `toUserId` is already the assignee) |
 | `cancel` | `404` → `REQUEST_CLOSED` → `422 CANCEL_NOT_ALLOWED` for a `DECISION` → `400 VALIDATION_ERROR` for `OTHER` without `note` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → live-session `CANCEL_NOT_ALLOWED` (409 while it runs, 422 once ended; from unit 11) |
+
+`merge` and `link-customer` list their own order of checks in sections 3.5 and 3.6; a target-side `409` of `merge` carries `current` of the target plus `intoRequestId`.
 
 **Failed commands store nothing.** Retrying the same key after a `409`/`422` evaluates the command again against the current request.
 
@@ -123,7 +129,7 @@ Body: `{ "expectedVersion": 2 }`. `IN_PROGRESS` → `NEW`, assignee cleared, `ve
 
 - `toUserId`: string, 1..100 chars. Only an `IN_PROGRESS` request can be reassigned; the status stays `IN_PROGRESS`, the assignee changes, `claimedAt` restarts.
 - `note`: optional, 1..500 chars; it is kept in the audit only.
-- Candidates will come from `GET /chatbot-requests/assignable-users` (unit 4).
+- Candidates come from `GET /chatbot-requests/assignable-users` (handoff 14, section 13): the list is exactly the set this route accepts.
 
 ### 3.4 `POST /chatbot-requests/:id/cancel`
 
@@ -139,6 +145,54 @@ Body: `{ "expectedVersion": 2 }`. `IN_PROGRESS` → `NEW`, assignee cleared, `ve
 
 - Allowed for `CLARIFICATION`, and for `TALK_TO_HUMAN`/`COMPLAINT` while the conversation has not started. Never for `DECISION` (`422 CANCEL_NOT_ALLOWED`).
 - Result: `status: CANCELLED`, `closedAt` set, `version` + 1. The request leaves the open inbox.
+
+### 3.5 `POST /chatbot-requests/:id/merge`
+
+```json
+{ "expectedVersion": 2, "intoRequestId": "9d1e…", "intoExpectedVersion": 4 }
+```
+
+`:id` is the request that **disappears** (the source); `intoRequestId` is the one that stays. Candidates, with their `id` and `version`, come from `GET /chatbot-requests/:id/merge-candidates` (handoff 14, section 10); `MERGE` is in `allowedActions` only when there is at least one.
+
+- Rules (§12.11): same customer, same subtype, both open, only `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` and `COMPLAINT` (never a decision), and neither with a started live session. Who holds either request does **not** matter.
+- Result `200 {request}` is the **source**: `status: CANCELLED`, `closedAt` set, `version` + 1 (the cancel reason is `SUPERSEDED`, not a staff reason). Both requests get a `MERGED` audit event (`data.role` is `SOURCE` or `TARGET`, with the other request's id and folio). **The target's `version` does not change** (reload it only if you show it): so two sources merged into one target at once both succeed.
+- If the source was held by someone **else**, that person gets an in-app notice "Otra persona la unió con otra solicitud del cliente". Nobody is notified when you merge your own.
+- The bot is **not** told at merge time (no feed item): see the open question in `docs/chatbot-requests-model.md`.
+- Errors, in the order they are checked (the first failure answers):
+
+  | Status | `code` | When | `current` |
+  | --- | --- | --- | --- |
+  | `404` | `NOT_FOUND` | `:id` or `intoRequestId` does not exist in this sucursal (the other sucursal's id answers the same) | — |
+  | `422` | `MERGE_NOT_ALLOWED` | A wrapped subtype (stock, expiry, zone, receipt, discount), checked first and before anything is locked | the failing request |
+  | `409` | `REQUEST_CLOSED` | The source is already closed | source |
+  | `409` | `VERSION_CONFLICT` | `expectedVersion` is stale | source |
+  | `422` | `MERGE_NOT_ALLOWED` | Merged into itself, another subtype, another customer, a closed target or a started session on either | source (or target) |
+  | `409` | `VERSION_CONFLICT` | `intoExpectedVersion` is stale | **the target**, and the body adds `intoRequestId` so you can tell which side moved |
+
+- A pair merged in both directions at the same time: exactly one wins (`200`), the other answers `422 MERGE_NOT_ALLOWED` (its target is now closed). No deadlock.
+
+### 3.6 `POST /chatbot-requests/:id/link-customer`
+
+```json
+{ "expectedVersion": 1, "customerId": "0c1d…" }
+```
+
+R1: when several customers share the request's phone, the bot leaves it unlinked (`customer.ambiguous: true` in the detail) and staff picks one of `customer.candidates[]` (handoff 14, section 8). `LINK_CUSTOMER` in `allowedActions` says the button applies.
+
+- The server checks that the customer belongs to this sucursal **and** that its canonical phone is the request's phone (`521…` and `52…` are the same number). The user does **not** need `read:CustomerPhone`: the candidates come masked and the server proves the match.
+- Result `200 {request}`: the request, `version` + 1 and a `CUSTOMER_LINKED` audit event. It also links **every other request of the same phone that has no customer** (open or closed) and clears their ambiguity, with a `CUSTOMER_LINKED` event each; those other requests keep their `version`. The phone does not change, so inbox groups do not move: reload the detail to show the customer card.
+- Allowed on an open request whoever holds it. Not for a request that already has a customer, nor a legacy `unknown:` request (no phone to match): `422 ACTION_NOT_ALLOWED`.
+- Errors, in order:
+
+  | Status | `code` | When | `current` |
+  | --- | --- | --- | --- |
+  | `404` | `NOT_FOUND` | The request does not exist here, or the `customerId` does not exist **in this sucursal** (a customer of another sucursal answers the same, even with the same phone) | — |
+  | `409` | `REQUEST_CLOSED` | The request is closed | ✓ |
+  | `409` | `VERSION_CONFLICT` | `expectedVersion` is stale (also when a claim got there first) | ✓ |
+  | `422` | `ACTION_NOT_ALLOWED` | Already linked, or an `unknown:` request | ✓ |
+  | `422` | `CUSTOMER_PHONE_MISMATCH` | The customer's phone is not the request's phone (or the customer has none) | ✓ |
+
+- Two people linking the same phone at once: one wins; the other gets `422 ACTION_NOT_ALLOWED` (already linked). A claim of another request of the same phone at the same moment succeeds and keeps its claim.
 
 ## 4. Retry recipe
 

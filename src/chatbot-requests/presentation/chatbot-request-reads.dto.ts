@@ -1,7 +1,7 @@
 /**
  * Query strings of the staff read routes (§3.8, §12.3). The global
- * ValidationPipe rejects unknown parameters, so `q` (free-text search) is a 400
- * until it ships.
+ * ValidationPipe rejects unknown parameters. `q` (free-text search) is only
+ * accepted by `groups` for now; `history` answers 400 until it ships.
  */
 import { Transform, Type } from 'class-transformer';
 import {
@@ -24,6 +24,7 @@ import type {
 } from '../application/chatbot-request-reads.service';
 import { MAX_PAGE } from '../application/chatbot-request-reads.service';
 import type { ChatbotRequestSubtype } from '../domain/chatbot-request.commands';
+import { MAX_SEARCH_LENGTH } from '../domain/inbox-search';
 
 const TABS: readonly InboxTab[] = [
   'open',
@@ -90,6 +91,12 @@ export class GroupsQueryDto extends PageDto {
   @Transform(toBoolean)
   @IsBoolean()
   windowClosingSoon?: boolean;
+
+  /** Folio, customer name or phone digits (`domain/inbox-search.ts`). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_SEARCH_LENGTH)
+  q?: string;
 }
 
 export class CustomerListQueryDto extends PageDto {

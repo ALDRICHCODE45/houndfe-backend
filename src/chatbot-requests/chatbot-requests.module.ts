@@ -1,6 +1,6 @@
 /**
  * Chatbot request inbox (human-intervention units 2, 3, 4 and 5): staff reads
- * (groups, counts, detail, history) and commands claim, release, reassign, cancel and resolve, and the bot's create, cancel
+ * (groups, counts, detail, history, assignable users) and commands claim, release, reassign, cancel, resolve, merge and link-customer, and the bot's create, cancel
  * and feed routes (feed, delivery outcome, pending deliveries, recovery). `AuthModule` provides `JwtAuthGuard` and `PermissionsGuard`;
  * `ActiveUserGuard` resolves `PrismaService` from the global `DatabaseModule`;
  * `ChatbotApiModule` supplies the bot guard's credential repository.
@@ -36,6 +36,10 @@ import {
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
 import {
+  CHATBOT_REQUEST_RELATION_STORE,
+  ChatbotRequestRelationsService,
+} from './application/chatbot-request-relations.service';
+import {
   BOT_INTAKE_STORE,
   BotRequestIntakeService,
   LEGACY_INTAKE,
@@ -57,11 +61,13 @@ import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-reco
 import { LegacyIntakeAdapter } from './infrastructure/legacy-intake.adapter';
 import { PrismaBotIntakeStore } from './infrastructure/prisma-bot-intake.store';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
+import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
+import { ChatbotRequestRelationsController } from './presentation/chatbot-request-relations.controller';
 
 @Module({
   imports: [
@@ -75,6 +81,7 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
   ],
   controllers: [
     ChatbotRequestCommandsController,
+    ChatbotRequestRelationsController,
     ChatbotRequestReadsController,
     BotRequestsController,
     BotFeedController,
@@ -84,6 +91,11 @@ import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.fi
     ActiveUserGuard,
     ChatbotRequestHttpFilter,
     ChatbotRequestCommandsService,
+    ChatbotRequestRelationsService,
+    {
+      provide: CHATBOT_REQUEST_RELATION_STORE,
+      useClass: PrismaChatbotRequestRelationStore,
+    },
     ChatbotRequestReadsService,
     {
       provide: CHATBOT_REQUEST_READ_STORE,

@@ -53,6 +53,7 @@ describe('ChatbotRequestReadsController', () => {
     detail: jest.fn(),
     audit: jest.fn(),
     mergeCandidates: jest.fn(),
+    assignableUsers: jest.fn(),
   };
 
   beforeAll(async () => {
@@ -111,6 +112,14 @@ describe('ChatbotRequestReadsController', () => {
   it('requires read:ChatbotRequest everywhere, plus update on merge candidates, and sends no-store', () => {
     for (const { name, fn } of handlers()) {
       const required = Reflect.getMetadata(PERMISSIONS_KEY, fn) as string[][];
+      if (name === 'assignableUsers') {
+        // §3.10: the reassign picker needs only the reassign permission
+        expect(required).toEqual([['update', 'ChatbotRequestAssignment']]);
+        expect(Reflect.getMetadata(HEADERS_METADATA, fn)).toEqual([
+          { name: 'Cache-Control', value: 'no-store' },
+        ]);
+        continue;
+      }
       expect(required[0]).toEqual(['read', 'ChatbotRequest']);
       expect(required.length).toBe(name === 'mergeCandidates' ? 2 : 1);
       if (name === 'mergeCandidates') {
@@ -127,7 +136,7 @@ describe('ChatbotRequestReadsController', () => {
       String(Reflect.getMetadata(PATH_METADATA, fn)),
     );
     const idAt = paths.indexOf(':id');
-    for (const fixed of ['groups', 'counts', 'history']) {
+    for (const fixed of ['groups', 'counts', 'history', 'assignable-users']) {
       expect(paths.indexOf(fixed)).toBeLessThan(idAt);
     }
   });
@@ -147,10 +156,22 @@ describe('ChatbotRequestReadsController', () => {
           overdue: true,
           windowClosingSoon: false,
         },
+        q: undefined,
         cursor: 'abc',
         limit: 10,
       },
     );
+  });
+
+  it('passes q to the service and routes assignable-users', async () => {
+    await get('/chatbot-requests/groups?q=S-000123');
+    expect(service.groups).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ q: 'S-000123' }),
+    );
+    expect((await get('/chatbot-requests/assignable-users')).status).toBe(200);
+    expect(service.assignableUsers).toHaveBeenCalledTimes(1);
+    expect(service.detail).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -159,7 +180,8 @@ describe('ChatbotRequestReadsController', () => {
     ['/chatbot-requests/groups?overdue=maybe'],
     ['/chatbot-requests/groups?limit=51'],
     ['/chatbot-requests/groups?limit=0'],
-    ['/chatbot-requests/groups?q=juan'],
+    [`/chatbot-requests/groups?q=${'x'.repeat(101)}`],
+    ['/chatbot-requests/history?q=juan'],
     ['/chatbot-requests'],
     [`/chatbot-requests?customerKey=`],
     ['/chatbot-requests/history?resolvedBy=not-a-uuid'],
@@ -170,8 +192,8 @@ describe('ChatbotRequestReadsController', () => {
     expect((await get(path)).status).toBe(400);
   });
 
-  it('does not read groups, counts or history as an id', async () => {
-    for (const path of ['groups', 'counts', 'history']) {
+  it('does not read groups, counts, history or assignable-users as an id', async () => {
+    for (const path of ['groups', 'counts', 'history', 'assignable-users']) {
       expect((await get(`/chatbot-requests/${path}`)).status).toBe(200);
     }
     expect(service.detail).not.toHaveBeenCalled();
