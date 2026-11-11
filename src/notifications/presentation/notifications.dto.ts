@@ -11,6 +11,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { MAX_PAGE_SIZE } from '../application/notifications.service';
 
@@ -35,11 +36,13 @@ export class ListNotificationsQuery {
 
 /** At least one flag; the service keeps the other as stored. */
 export class NotificationPreferencesDto {
-  @IsOptional()
+  // ValidateIf instead of IsOptional: an absent flag is fine, but null must
+  // fail here (400) rather than reach a non-null Prisma column.
+  @ValidateIf((_, value) => value !== undefined)
   @IsBoolean()
   emailEnabled?: boolean;
 
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
   @IsBoolean()
   soundEnabled?: boolean;
 }
