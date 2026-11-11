@@ -95,7 +95,7 @@ Recorded in proposal §5.1 and §5.2 as well.
 
 ## Known limits
 
-- Retention (90 days, §5.2) is not scheduled yet; it joins the daily cron of §3.6.
+- Retention (90 days, §5.2) is scheduled (unit 7b): hourly, batch 1000, at most 20 batches per tick, `FOR UPDATE SKIP LOCKED`, served by the `notifications_createdAt_idx` index. The chatbot feed keeps 30 days; notifications keep 90.
 - `FAILED` rows are only visible in `outbox_events`; the "failed notices" screen is later.
 - The email shows no age or time remaining (needs request deadlines; unit 7).
 - Both `@Interval` ticks run on every replica; `FOR UPDATE SKIP LOCKED` keeps them disjoint. If two replicas claim at the same instant, a person's group can still split between them (rare; at most two emails).

@@ -55,6 +55,7 @@ import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-r
 import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
 import { ChatbotRequestWrapperModule } from './chatbot-request-wrapper.module';
 import { WrappedRequestResolutionModule } from './wrapped-request-resolution.module';
+import { ChatbotFeedPurgeScheduler } from './infrastructure/chatbot-feed-purge.scheduler';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
 import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
@@ -113,6 +114,7 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     ChatbotFeedService,
     ChatbotRecoveryService,
     PgFeedWakeup,
+    ChatbotFeedPurgeScheduler,
     { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
     { provide: CHATBOT_FEED_STORE, useClass: PrismaChatbotFeedStore },
     { provide: CHATBOT_RECOVERY_STORE, useClass: PrismaChatbotRecoveryStore },

@@ -29,6 +29,7 @@ import { WrappedRequestResolutionModule } from './wrapped-request-resolution.mod
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
 import { ChatbotRequestReadsService } from './application/chatbot-request-reads.service';
+import { ChatbotFeedPurgeScheduler } from './infrastructure/chatbot-feed-purge.scheduler';
 
 @Module({
   providers: [
@@ -105,6 +106,8 @@ describe('ChatbotRequestsModule wiring', () => {
     expect(module.get(BotRequestIntakeService)).toBeDefined();
     expect(module.get(ChatbotRequestReadsController)).toBeDefined();
     expect(module.get(ChatbotRequestReadsService)).toBeDefined();
+    // Unit 7b: the feed retention purge is scheduled, not just implemented.
+    expect(module.get(ChatbotFeedPurgeScheduler)).toBeDefined();
   });
 
   // The flows take the wrapper as an optional dependency (so their own specs
