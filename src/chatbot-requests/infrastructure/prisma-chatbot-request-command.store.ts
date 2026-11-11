@@ -6,6 +6,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import type { ClosedCause } from '../../notifications/domain/chatbot-request-notice';
 import { actorDisplayName } from '../domain/actor-display-name';
 import type {
   ChatbotRequestEventDraft,
@@ -18,7 +19,10 @@ import type {
   ChatbotRequestRow,
   ChatbotRequestView,
 } from '../application/chatbot-request-commands.service';
-import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
+import {
+  enqueueClosedNotice,
+  enqueueNotice,
+} from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import { enqueueAnswered, enqueueCancelled } from './chatbot-feed-writes';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
@@ -30,6 +34,18 @@ import {
   refreshCustomerGroup,
   refreshCustomerGroups,
 } from './chatbot-request-writes';
+
+/** Why a staff command closed a request (the wording of the notice). */
+function closedCause(
+  status: 'RESOLVED' | 'CANCELLED',
+  event: ChatbotRequestEventDraft,
+): ClosedCause {
+  if (status === 'CANCELLED') return 'CANCELLED_BY_OTHER';
+  return event.data.action === 'SIBLING_RESOLVED' ||
+    event.data.viaRequestId !== undefined
+    ? 'SIBLING_RESOLVED'
+    : 'RESOLVED_BY_OTHER';
+}
 
 @Injectable()
 export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandStore {
@@ -150,12 +166,24 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     await refreshCustomerGroup(this.tx, this.tenantId, row.customerKey);
   }
 
-  applyPatch(
+  async applyPatch(
     row: ChatbotRequestRow,
     patch: ChatbotRequestPatch,
     event: ChatbotRequestEventDraft,
   ): Promise<void> {
-    return applyRequestPatch(this.tx, this.tenantId, row, patch, event);
+    await applyRequestPatch(this.tx, this.tenantId, row, patch, event);
+    // Unit 6 (§5.1): a request that closes under the person attending it, by
+    // someone else's hand, tells them. One hook for every staff close: the
+    // resolve, its zone siblings and the staff cancel all come through here.
+    if (patch.status === 'RESOLVED' || patch.status === 'CANCELLED') {
+      await enqueueClosedNotice(
+        this.tx,
+        this.tenantId,
+        row,
+        closedCause(patch.status, event),
+        event.actorId,
+      );
+    }
   }
 
   refreshGroups(customerKeys: string[]): Promise<void> {

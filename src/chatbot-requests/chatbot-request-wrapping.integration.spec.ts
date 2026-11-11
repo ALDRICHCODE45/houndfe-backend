@@ -955,27 +955,28 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
     });
   });
 
+  // Shared by the zone fan-out and the closed-notice specs.
+  const impactOf = (tenantId: string, requestId: string) =>
+    inTenant(tenantId, () => service.zoneImpact(requestId));
+
+  const approve = (setVersion: number): ResolveAction => ({
+    type: 'APPROVE_DELIVERY_ZONE',
+    settings: { type: 'SURCHARGE', surchargeCents: 5000, etaDays: 3 },
+    expectedZoneSetVersion: setVersion,
+  });
+
+  async function openZone(tenantId: string, phones: string[]) {
+    const requests: Awaited<ReturnType<typeof requestOf>>[] = [];
+    for (const phone of phones) {
+      const record = await submitZone(tenantId, { cc: '52', phone });
+      requests.push(await requestOf({ deliveryZoneRequestId: record.id }));
+    }
+    return requests;
+  }
+
   // ------------------------------------------------------------ zone fan-out
 
   describe('zone fan-out (R9, D15)', () => {
-    const impactOf = (tenantId: string, requestId: string) =>
-      inTenant(tenantId, () => service.zoneImpact(requestId));
-
-    const approve = (setVersion: number): ResolveAction => ({
-      type: 'APPROVE_DELIVERY_ZONE',
-      settings: { type: 'SURCHARGE', surchargeCents: 5000, etaDays: 3 },
-      expectedZoneSetVersion: setVersion,
-    });
-
-    async function openZone(tenantId: string, phones: string[]) {
-      const requests: Awaited<ReturnType<typeof requestOf>>[] = [];
-      for (const phone of phones) {
-        const record = await submitZone(tenantId, { cc: '52', phone });
-        requests.push(await requestOf({ deliveryZoneRequestId: record.id }));
-      }
-      return requests;
-    }
-
     it('resolves every request of the postal code, refreshes each group, and keeps the others open', async () => {
       const tenantId = await newTenant();
       const [a, b, c] = await openZone(tenantId, [
@@ -1246,6 +1247,157 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
       });
       expect(await group(tenantId, request.customerKey)).toMatchObject({
         openCount: 1,
+      });
+    });
+
+    // Unit 6 (§5.1): «el cliente canceló o se resolvió solo → quien la atendía».
+    describe('closed without the assignee: notice to who was attending it', () => {
+      const closedNotices = async (tenantId: string) =>
+        (
+          await prisma.outboxEvent.findMany({
+            where: {
+              tenantId,
+              eventType: 'chatbot_request.notify',
+              payload: { path: ['type'], equals: 'REQUEST_CANCELLED' },
+            },
+            orderBy: { createdAt: 'asc' },
+          })
+        ).map(
+          (row) =>
+            row.payload as {
+              recipientUserId: string;
+              actorUserId?: string;
+              cause: string;
+              requestId: string;
+            },
+        );
+
+      const claim = async (
+        tenantId: string,
+        requestId: string,
+        actor: string,
+      ) => {
+        const row = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: requestId },
+        });
+        return inTenant(tenantId, () =>
+          service.execute({
+            requestId,
+            actorUserId: actor,
+            actorCanReassign: true,
+            idempotencyKey: randomUUID(),
+            expectedVersion: row.version,
+            command: { kind: 'claim' },
+          }),
+        );
+      };
+
+      it('a sibling closed by the zone fan-out tells its assignee (SIBLING_RESOLVED), not the actor', async () => {
+        const tenantId = await newTenant();
+        const [a, b, c] = await openZone(tenantId, [
+          '5511111111',
+          '5522222222',
+          '5533333333',
+        ]);
+        await claim(tenantId, a.id, users.luis);
+        await claim(tenantId, c.id, users.rev);
+
+        const impact = await impactOf(tenantId, b.id);
+        await resolveNew(tenantId, b.id, approve(impact.setVersion), users.ana);
+
+        const notices = await closedNotices(tenantId);
+        expect(
+          notices.map((n) => [n.recipientUserId, n.cause, n.requestId]).sort(),
+        ).toEqual(
+          [
+            [users.luis, 'SIBLING_RESOLVED', a.id],
+            [users.rev, 'SIBLING_RESOLVED', c.id],
+          ].sort(),
+        );
+        // b was nobody's: ana's own resolve tells nobody.
+        expect(notices.some((n) => n.recipientUserId === users.ana)).toBe(
+          false,
+        );
+      });
+
+      it('a staff resolve of a request someone else holds is refused, so nobody is told', async () => {
+        const tenantId = await newTenant();
+        const decisionId = await submitRestock(tenantId);
+        const request = await requestOf({ humanDecisionId: decisionId });
+        await claim(tenantId, request.id, users.luis);
+
+        // The state machine never lets the common resolve take over someone
+        // else's request (REQUEST_CLAIMED_BY_OTHER); only the legacy routes
+        // and the zone fan-out close a request under its assignee.
+        await expect(
+          outcome(
+            inTenant(tenantId, () =>
+              service.execute({
+                requestId: request.id,
+                actorUserId: users.ana,
+                actorCanReassign: true,
+                actorCanResolveSubtype: () => true,
+                idempotencyKey: randomUUID(),
+                expectedVersion: 2,
+                command: { kind: 'resolve', action: restockAction },
+              }),
+            ),
+          ),
+        ).resolves.toBe('REQUEST_CLAIMED_BY_OTHER');
+        expect(await closedNotices(tenantId)).toHaveLength(0);
+      });
+
+      it('a legacy-route resolve by someone else tells the assignee; by the assignee, nobody', async () => {
+        const tenantId = await newTenant();
+        const first = await submitRestock(tenantId);
+        const second = await submitRestock(tenantId);
+        const held = await requestOf({ humanDecisionId: first });
+        const own = await requestOf({ humanDecisionId: second });
+        await claim(tenantId, held.id, users.luis);
+        await claim(tenantId, own.id, users.rev);
+
+        await legacyRestock(tenantId, first); // resolved by rev, held by luis
+        await legacyRestock(tenantId, second); // resolved by rev, held by rev
+
+        expect(await closedNotices(tenantId)).toMatchObject([
+          {
+            recipientUserId: users.luis,
+            actorUserId: users.rev,
+            cause: 'RESOLVED_BY_OTHER',
+            requestId: held.id,
+          },
+        ]);
+      });
+
+      it('a legacy zone resolve tells each assigned wrapper except the resolver', async () => {
+        const tenantId = await newTenant();
+        const record = await submitZone(tenantId, {
+          cc: '52',
+          phone: '5511111111',
+        });
+        await submitZone(tenantId, { cc: '52', phone: '5522222222' });
+        const rows = await prisma.chatbotRequest.findMany({
+          where: { tenantId },
+        });
+        await claim(tenantId, rows[0].id, users.luis);
+        await claim(tenantId, rows[1].id, users.rev);
+
+        await inTenant(tenantId, () =>
+          validations.resolve({
+            validationId: record.validationId as string,
+            expectedVersion: 1,
+            resolutionRequestId: randomUUID(),
+            action: APPROVE_DELIVERY_ZONE,
+            settings: { type: 'FREE', surchargeCents: null, etaDays: 2 },
+            actorUserId: users.rev,
+            actorIsSuperAdmin: false,
+          }),
+        );
+
+        // rev resolved it, so only luis is told.
+        expect(await closedNotices(tenantId)).toMatchObject([
+          { recipientUserId: users.luis, cause: 'RESOLVED_BY_OTHER' },
+        ]);
       });
     });
 

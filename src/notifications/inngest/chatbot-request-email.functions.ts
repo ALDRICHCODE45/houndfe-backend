@@ -1,7 +1,7 @@
 /**
  * Inngest function: chatbot request notice email (unit 6; contract §5.1, §6.3).
- * One email per event (a batch event carries several notifications), three
- * checkpointed steps like `receipt-review-notification.functions.ts`:
+ * One email per event (a batch event carries several notifications), two
+ * checkpointed steps, in the style of `receipt-review-notification.functions.ts`:
  *
  *   1. `load`  — the person's address and preference, the branch name and the
  *      notices (type, request id, folio, subtype). Re-checked here because the

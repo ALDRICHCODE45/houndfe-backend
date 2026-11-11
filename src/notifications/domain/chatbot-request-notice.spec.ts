@@ -75,6 +75,27 @@ describe('text and links', () => {
     ).toEqual({ title: 'Nueva solicitud', body: 'Queja · S-000007' });
   });
 
+  it.each([
+    ['CUSTOMER', 'El cliente canceló la solicitud'],
+    ['RESOLVED_BY_OTHER', 'Otra persona resolvió la solicitud'],
+    ['CANCELLED_BY_OTHER', 'Otra persona canceló la solicitud'],
+    ['SIBLING_RESOLVED', 'Se resolvió junto con otras de su zona'],
+  ] as const)('words a closed notice by its cause (%s)', (cause, title) => {
+    expect(
+      noticeText('REQUEST_CANCELLED', {
+        folio: 7,
+        subtype: 'DELIVERY_ZONE',
+        cause,
+      }),
+    ).toEqual({ title, body: 'Zona de entrega · S-000007' });
+  });
+
+  it('keeps the customer wording for a closed notice written before causes existed', () => {
+    expect(
+      noticeText('REQUEST_CANCELLED', { folio: 7, subtype: 'RESTOCK' }).title,
+    ).toBe('El cliente canceló la solicitud');
+  });
+
   it('falls back for an unknown type or an empty payload', () => {
     expect(noticeText('SOMETHING_NEW', null)).toEqual({
       title: 'Aviso',

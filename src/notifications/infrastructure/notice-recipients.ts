@@ -14,7 +14,7 @@ import {
 
 type RecipientClient = Pick<
   Prisma.TransactionClient,
-  'tenantMembership' | 'notificationPreference'
+  'tenantMembership' | 'notificationPreference' | 'user'
 >;
 
 const roleGrants = (action: string, subject: string) => ({
@@ -30,32 +30,47 @@ const roleGrants = (action: string, subject: string) => ({
   },
 });
 
-/** Distinct user ids to notify, excluding the actor of the event. */
+/**
+ * Distinct user ids to notify, excluding the actor of the event.
+ *
+ * Grants are merged across ALL of a person's memberships in the tenant, as
+ * `CaslAbilityFactory` does (it flattens every membership's role): someone
+ * with `read` from one role and `update` from another qualifies. So each
+ * grant is its own condition over the user's memberships, not one condition
+ * that a single role must satisfy.
+ */
 export async function resolveRecipientIds(
   tx: RecipientClient,
   tenantId: string,
   notice: ChatbotRequestNotice,
 ): Promise<string[]> {
   const audience = audienceOf(notice.type);
-  const memberships = await tx.tenantMembership.findMany({
+  if (audience === 'USER') {
+    const membership = await tx.tenantMembership.findFirst({
+      where: {
+        tenantId,
+        userId: notice.recipientUserId ?? '',
+        user: { isActive: true },
+      },
+      select: { userId: true },
+    });
+    return membership && membership.userId !== notice.actorUserId
+      ? [membership.userId]
+      : [];
+  }
+  const users = await tx.user.findMany({
     where: {
-      tenantId,
-      user: { isActive: true },
-      ...(audience === 'USER'
-        ? { userId: notice.recipientUserId ?? '' }
-        : {
-            // A user may hold several memberships; each grant may come from
-            // any of them.
-            AND: AUDIENCE_GRANTS[audience].map(([action, subject]) =>
-              roleGrants(action, subject),
-            ),
-          }),
+      isActive: true,
+      AND: AUDIENCE_GRANTS[audience].map(([action, subject]) => ({
+        tenantMemberships: {
+          some: { tenantId, ...roleGrants(action, subject) },
+        },
+      })),
     },
-    select: { userId: true },
-    distinct: ['userId'],
+    select: { id: true },
   });
-  return memberships
-    .map((membership) => membership.userId)
+  return users
+    .map((user) => user.id)
     .filter((userId) => userId !== notice.actorUserId);
 }
 

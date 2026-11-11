@@ -11,6 +11,7 @@ import {
   NOTICE_NOTIFY_EVENT_TYPE,
   audienceOf,
   type ChatbotRequestNotice,
+  type ClosedCause,
 } from '../domain/chatbot-request-notice';
 
 /** The tenant-extended transaction client every inbox producer holds. */
@@ -44,4 +45,35 @@ export async function enqueueNotice(
     },
   });
   return true;
+}
+
+/**
+ * §5.1 «el cliente canceló o se resolvió solo → quien la atendía»: tells the
+ * assignee that their request closed. Nothing is written for a request nobody
+ * held, or when the assignee is the person who closed it (`actorUserId`).
+ * One close per request, so the dedup key is per request.
+ */
+export function enqueueClosedNotice(
+  tx: OutboxClient,
+  tenantId: string,
+  closed: {
+    id: string;
+    folio: number;
+    subtype: string;
+    assigneeUserId: string | null;
+  },
+  cause: ClosedCause,
+  actorUserId?: string,
+): Promise<boolean> {
+  if (!closed.assigneeUserId) return Promise.resolve(false);
+  return enqueueNotice(tx, tenantId, {
+    type: 'REQUEST_CANCELLED',
+    requestId: closed.id,
+    folio: closed.folio,
+    subtype: closed.subtype,
+    dedupKey: `closed:${closed.id}`,
+    recipientUserId: closed.assigneeUserId,
+    cause,
+    ...(actorUserId ? { actorUserId } : {}),
+  });
 }

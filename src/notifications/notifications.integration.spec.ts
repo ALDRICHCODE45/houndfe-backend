@@ -42,6 +42,7 @@ import {
   NOTICE_EMAIL_EVENT_TYPE,
   NOTICE_NOTIFY_EVENT_TYPE,
   batchWindowEnd,
+  noticeText,
 } from './domain/chatbot-request-notice';
 import type { NotificationEventsPort } from './domain/notification-events.port';
 import type { SendMailInput } from './email/mailer.port';
@@ -371,7 +372,9 @@ describeIfDb('notifications (PostgreSQL)', () => {
       );
       expect(ids(reassigned)).toEqual([f.luis]);
 
-      // Reassigning to oneself is nobody's news.
+      // A second reassign (luis -> ana) tells ana, the new assignee; luis, who
+      // made it, is never told. The notice to oneself is dropped by the writer
+      // (writer spec): the state machine rejects a reassign to the same person.
       await expect(
         run(f.luis, 3, { kind: 'reassign', toUserId: f.ana } as never),
       ).resolves.toBeDefined();
@@ -402,6 +405,124 @@ describeIfDb('notifications (PostgreSQL)', () => {
           (j) =>
             (j.payload as { notificationId: string }).notificationId ===
             cancelled[0].id,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('qualifies a user whose read and update come from different roles (CASL merges grants)', async () => {
+      const f = await fixture();
+      const [read, update] = await Promise.all([
+        grant('ChatbotRequest', 'read'),
+        grant('ChatbotRequest', 'update'),
+      ]);
+      const roleWith = (name: string, permissionId: string) =>
+        prisma.role.create({
+          data: {
+            tenantId: f.tenantId,
+            name: `${name} ${f.tenantId}`,
+            permissions: { create: { permissionId } },
+          },
+        });
+      const reads = await roleWith('Solo lee', read.id);
+      const updates = await roleWith('Solo actualiza', update.id);
+      const split = randomUUID();
+      const readOnly = randomUUID();
+      const updateOnly = randomUUID();
+      for (const [name, id] of [
+        ['split', split],
+        ['readOnly', readOnly],
+        ['updateOnly', updateOnly],
+      ]) {
+        userIds.push(id);
+        await prisma.user.create({
+          data: {
+            id,
+            email: `${name}-${id}@nt.test`,
+            hashedPassword: 'x',
+            name,
+          },
+        });
+      }
+      await prisma.tenantMembership.createMany({
+        data: [
+          // read from one role and update from another, same tenant
+          { userId: split, tenantId: f.tenantId, roleId: reads.id },
+          { userId: split, tenantId: f.tenantId, roleId: updates.id },
+          { userId: readOnly, tenantId: f.tenantId, roleId: reads.id },
+          { userId: updateOnly, tenantId: f.tenantId, roleId: updates.id },
+        ],
+      });
+
+      await create(f.tenantId, direct());
+      await drain();
+
+      const notified = new Set(
+        (await notificationsOf(f.tenantId)).map((r) => r.userId),
+      );
+      expect(notified.has(split)).toBe(true);
+      expect(notified.has(readOnly)).toBe(false);
+      expect(notified.has(updateOnly)).toBe(false);
+    });
+
+    it('a request closed by someone else tells the assignee, with the cause; never the actor', async () => {
+      const f = await fixture();
+      const made = await create(f.tenantId, direct());
+      await drain();
+      const run = (actor: string, expectedVersion: number, command: never) =>
+        inTenant(f.tenantId, () =>
+          commands.execute({
+            requestId: reqId(made),
+            actorUserId: actor,
+            actorCanReassign: true,
+            idempotencyKey: randomUUID(),
+            expectedVersion,
+            command,
+          }),
+        );
+      await run(f.ana, 1, { kind: 'claim' } as never);
+      // luis cancels the request ana was attending.
+      await run(f.luis, 2, { kind: 'cancel', reason: 'DUPLICATE' } as never);
+      await drain();
+
+      const closed = (await notificationsOf(f.tenantId)).filter(
+        (r) => r.type === 'REQUEST_CANCELLED',
+      );
+      expect(ids(closed)).toEqual([f.ana]);
+      expect(closed[0].payload).toMatchObject({ cause: 'CANCELLED_BY_OTHER' });
+      expect(
+        noticeText('REQUEST_CANCELLED', closed[0].payload as never).title,
+      ).toBe('Otra persona canceló la solicitud');
+      // In-app only: no email job for a close.
+      expect(
+        (await emailJobs(f.tenantId)).filter(
+          (j) =>
+            (j.payload as { notificationId: string }).notificationId ===
+            closed[0].id,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('cancelling a request you hold yourself tells nobody', async () => {
+      const f = await fixture();
+      const made = await create(f.tenantId, direct());
+      await drain();
+      const run = (expectedVersion: number, command: never) =>
+        inTenant(f.tenantId, () =>
+          commands.execute({
+            requestId: reqId(made),
+            actorUserId: f.ana,
+            actorCanReassign: true,
+            idempotencyKey: randomUUID(),
+            expectedVersion,
+            command,
+          }),
+        );
+      await run(1, { kind: 'claim' } as never);
+      await run(2, { kind: 'cancel', reason: 'DUPLICATE' } as never);
+      await drain();
+      expect(
+        (await notificationsOf(f.tenantId)).filter(
+          (r) => r.type === 'REQUEST_CANCELLED',
         ),
       ).toHaveLength(0);
     });
@@ -544,6 +665,48 @@ describeIfDb('notifications (PostgreSQL)', () => {
           },
         }),
       ).toBe(9);
+    });
+
+    it("claims a person's due batch whole even when it is larger than the claim size", async () => {
+      const f = await fixture();
+      const job = (userId: string, n: number, at: string) =>
+        prisma.outboxEvent.create({
+          data: {
+            tenantId: f.tenantId,
+            aggregateType: 'Notification',
+            aggregateId: randomUUID(),
+            eventType: NOTICE_EMAIL_EVENT_TYPE,
+            payload: {
+              notificationId: `n-${userId}-${n}`,
+              userId,
+              mode: 'BATCH',
+            },
+            // Year 2000 sorts ahead of any leftover row of another test.
+            nextAttemptAt: new Date(at),
+          },
+        });
+      for (let i = 0; i < 5; i++) await job(f.ana, i, '2000-01-01T00:00:00Z');
+      for (let i = 0; i < 3; i++) await job(f.luis, i, '2000-01-01T00:00:01Z');
+
+      // Claim size 2: ana has 5 due jobs, luis 3.
+      const small = new ChatbotRequestEmailDispatcher(
+        root,
+        { send: inngestSend } as never,
+        () => new Date(),
+        2,
+        60_000,
+        3,
+      );
+      const first = (await small.claimDue()).filter(
+        (e) => e.tenantId === f.tenantId,
+      );
+      expect(first).toHaveLength(5);
+      expect(groupJobs(first)).toHaveLength(1);
+      const second = (await small.claimDue()).filter(
+        (e) => e.tenantId === f.tenantId,
+      );
+      expect(second).toHaveLength(3);
+      expect(groupJobs(second)).toHaveLength(1);
     });
 
     it('TALK_TO_HUMAN and COMPLAINT are due now and leave alone', async () => {

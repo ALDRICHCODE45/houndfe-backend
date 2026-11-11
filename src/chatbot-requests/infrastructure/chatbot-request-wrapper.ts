@@ -47,7 +47,10 @@ import {
   lockCustomerIntake,
   type IntakeLimits,
 } from './chatbot-request-intake-writes';
-import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
+import {
+  enqueueClosedNotice,
+  enqueueNotice,
+} from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import { enqueueAnswered } from './chatbot-feed-writes';
 import {
   allocateFolio,
@@ -616,6 +619,14 @@ export class ChatbotRequestWrapper {
       });
       if (!closed.ok) continue;
       await applyRequestPatch(tx, tenantId, row, closed.patch, closed.event);
+      // Unit 6 (§5.1): whoever was attending it hears it closed without them.
+      await enqueueClosedNotice(
+        tx,
+        tenantId,
+        row,
+        'RESOLVED_BY_OTHER',
+        actor.userId,
+      );
       closedIds.push(row.id);
     }
     // The legacy routes feed the bot too (one state, §2.1): same item as the

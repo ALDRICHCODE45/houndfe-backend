@@ -9,11 +9,12 @@ import { AuthModule } from '../auth/auth.module';
 import { ActiveUserGuard } from '../auth/guards/active-user.guard';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { NotificationsService } from './application/notifications.service';
+import { NotificationPreferencesController } from './presentation/notification-preferences.controller';
 import { NotificationsController } from './presentation/notifications.controller';
 
 @Module({
   imports: [DatabaseModule, AuthModule],
-  controllers: [NotificationsController],
+  controllers: [NotificationsController, NotificationPreferencesController],
   providers: [ActiveUserGuard, NotificationsService],
 })
 export class NotificationsModule {}

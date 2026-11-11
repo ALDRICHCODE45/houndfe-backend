@@ -125,6 +125,7 @@ export class ChatbotRequestNotifyConsumer {
       const payload: NoticePayload = {
         folio: notice.folio,
         subtype: notice.subtype,
+        ...(notice.cause ? { cause: notice.cause } : {}),
       };
       // `skipDuplicates` is ON CONFLICT DO NOTHING on (tenant, user, dedupKey):
       // only rows inserted now are returned, so a re-run never mails twice.
@@ -134,7 +135,7 @@ export class ChatbotRequestNotifyConsumer {
           userId,
           type: notice.type,
           requestId: notice.requestId,
-          // SAFETY: NoticePayload holds only a number and a string.
+          // SAFETY: NoticePayload holds only numbers and strings.
           payload: payload as unknown as Prisma.InputJsonObject,
           dedupKey: notice.dedupKey,
         })),

@@ -628,6 +628,13 @@ NotificationEmail     id, notificationId, status (vía OutboxEvent, eventType pr
 - **Link directo:** `${APP_WEB_URL}/chatbot/solicitudes/:id`. Es la ruta de detalle del frontend; si la sesión venció, el login vuelve a esa ruta. El link no lleva datos del cliente ni tokens.
 - **Asunto:** `[HoundFe] Nueva solicitud: <tipo> (<sucursal>) · S-000123`. El cuerpo lleva tipo, antigüedad, tiempo restante y el botón (§6.3).
 - Los avisos dentro del sistema siguen siendo uno por evento.
+- **[v1.2, 2026-11-11] Lo que se construyó en la unidad 6 y se apartó del texto de arriba** (detalle y razones en `docs/notifications-model.md`):
+  - **Sin tablas `NotificationEmail` ni `NotificationEmailBatch`.** Cada correo es una fila de `outbox_events` del tipo `chatbot_request.email`, y el lote es una **ventana fija de 2 min del reloj** (`batchWindowEnd`), no un `windowStartsAt` por persona: todas las filas de una ventana vencen en el mismo instante y salen en un solo correo por persona. La reclamación entrega siempre completo el lote de cada persona.
+  - **Preferencia por persona, sin `tenantId`** (`NotificationPreference(userId, emailEnabled, soundEnabled)`): sigue a la persona entre sucursales.
+  - **`title` y `body` no se guardan:** se calculan al leer desde el tipo y el `payload` (`{folio, subtype, cause?}`), sin datos del cliente.
+  - **Clave idempotente de Inngest:** `chatbot-email:<sha256 hex>` de `"<tenantId>:<userId>:<ids de notificación ordenados, separados por ','>"`, porque un evento lleva un lote entero. Datos del evento: `{tenantId, userId, mode, notificationIds}`.
+  - **Destinatarios:** los permisos se **suman entre todas las membresías** de la persona en el tenant, como `CaslAbilityFactory` (`read` de un rol y `update` de otro cuentan). `REQUEST_CANCELLED` avisa a quien la atendía cuando la solicitud se cierra sin su acción (el cliente canceló, otra persona la canceló o la resolvió, o se resolvió junto con las demás de su código postal); nunca a quien la cerró. El correo no existe para ese tipo.
+  - Tipos con prefijo reservado `chatbot_request.` (R3): `chatbot_request.notify` y `chatbot_request.email`.
 
 ### 5.2 API de notificaciones (frontend)
 
@@ -636,6 +643,11 @@ NotificationEmail     id, notificationId, status (vía OutboxEvent, eventType pr
 - `POST /notifications/:id/read`, `POST /notifications/read-all` (idempotentes; avisan a las otras pestañas y equipos con SSE `notification.read`, §12.8)
 - `GET /me/notification-preferences` → `{emailEnabled, soundEnabled}` y `PATCH` con el mismo shape. **Decisión del dueño: "El sonido viene activado por defecto y cada persona lo puede apagar."** `soundEnabled` se guarda en el servidor junto al correo, para que siga a la persona entre equipos; el frontend lo usa y lo respeta entre pestañas. **Los avisos dentro del sistema no se pueden apagar** (diseño §3). El permiso de notificaciones del navegador sigue siendo local.
 - **Retención** de `Notification`: 90 días (decisión técnica), con el cron diario de §3.6.
+- **[v1.2, 2026-11-11] Formas que se fijaron en la unidad 6** (`docs/frontend-handoff/13-notifications.md`):
+  - `POST /notifications/:id/read` → `{id, readAt}` (repetirlo devuelve el primer `readAt`; `404` si no es de la persona, de su sucursal o no existe); `POST /notifications/read-all` → `{updated}`.
+  - `limit`: por defecto 20, **máximo 50**; `cursor` opaco, uno malformado es `400`.
+  - Preferencias: `GET` y `PATCH /me/notification-preferences` con `{emailEnabled, soundEnabled}`; el `PATCH` es parcial y un cuerpo vacío es `400`.
+  - Los eventos SSE `notification.created` / `notification.read` llegan con la unidad 8; mientras tanto el frontend consulta `unread-count`.
 
 ### 5.3 Tiempo real: SSE sobre `fetch` (aceptado por el frontend)
 

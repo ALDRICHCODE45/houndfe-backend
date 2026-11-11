@@ -72,8 +72,9 @@ export class ChatbotRequestEmailDispatcher {
   }
 
   /**
-   * Public seam for specs: claims the due jobs under a lease. The tagged
-   * templates below are Prisma bound parameters, not string interpolation.
+   * Public seam for specs: claims the due jobs under a lease, whole per
+   * person (see below). The tagged templates are Prisma bound parameters, not
+   * string interpolation.
    */
   claimDue(): Promise<DispatchableOutboxEvent[]> {
     const lockToken = randomUUID();
@@ -87,11 +88,27 @@ export class ChatbotRequestEmailDispatcher {
         LIMIT ${this.batchSize}
         FOR UPDATE SKIP LOCKED`;
       if (rows.length === 0) return [];
+      // Fair per person: the claim size must never cut one person's batch in
+      // two (two emails for one window). Every other due BATCH job of a person
+      // already selected travels with it, so a group is whole or not claimed.
+      const picked = rows.map((row) => row.id);
+      const rest = await tx.$queryRaw<{ id: string }[]>`
+        SELECT e.id FROM outbox_events e
+        WHERE e.status = 'PENDING' AND e."eventType" = ${NOTICE_EMAIL_EVENT_TYPE}
+          AND e."nextAttemptAt" <= NOW()
+          AND (e."lockedUntil" IS NULL OR e."lockedUntil" < NOW())
+          AND e.payload->>'mode' = 'BATCH'
+          AND e.id <> ALL(${picked}::text[])
+          AND (e."tenantId", e.payload->>'userId') IN (
+            SELECT o."tenantId", o.payload->>'userId' FROM outbox_events o
+            WHERE o.id = ANY(${picked}::text[]) AND o.payload->>'mode' = 'BATCH')
+        FOR UPDATE OF e SKIP LOCKED`;
+      const ids = [...picked, ...rest.map((row) => row.id)];
       return tx.$queryRaw<DispatchableOutboxEvent[]>`
         UPDATE outbox_events
         SET "lockToken" = ${lockToken},
             "lockedUntil" = NOW() + (${this.lockMs / 1000} * INTERVAL '1 second')
-        WHERE id = ANY(${rows.map((row) => row.id)}::text[])
+        WHERE id = ANY(${ids}::text[])
         RETURNING id, "tenantId", "aggregateType", "aggregateId", "eventType",
                   payload, status, "retryCount", "nextAttemptAt", "lastError",
                   "lockToken", "lockedUntil", "createdAt", "publishedAt"`;

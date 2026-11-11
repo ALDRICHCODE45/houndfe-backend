@@ -23,9 +23,18 @@ Shapes in this document come from the controller, DTOs, service and their specs 
 | --- | --- | --- |
 | `REQUEST_CREATED` | Active members with `read` + `update:ChatbotRequest` | A request is created (bot, or a legacy restock/expiration/zone/receipt flow) |
 | `REQUEST_REASSIGNED` | The new assignee only | A request is reassigned (not when you reassign to yourself) |
-| `REQUEST_CANCELLED` | The assignee, if the request had one | The **customer** cancelled |
+| `REQUEST_CANCELLED` | The assignee, if the request had one | The request **closed under you without your action** (see below) |
 
-A staff cancellation does not notify. A notice appears within about a second of the change, not in the same response.
+`REQUEST_CANCELLED` covers every close that was not the assignee's own, and the `title` says which (§5.1: «el cliente canceló o se resolvió solo»):
+
+| Cause | `title` |
+| --- | --- |
+| The customer cancelled | `El cliente canceló la solicitud` |
+| Someone else resolved it (a legacy review route) | `Otra persona resolvió la solicitud` |
+| Someone else cancelled it | `Otra persona canceló la solicitud` |
+| It was resolved together with others of the same postal code | `Se resolvió junto con otras de su zona` |
+
+The person who closed the request is never told, and nobody is told about a request that nobody had taken. There is no email for any of these. A notice appears within about a second of the change, not in the same response.
 
 ## 3. Routes
 
@@ -78,15 +87,15 @@ No body. Marks only the caller's unread notices in the current sucursal.
 { "updated": 4 }
 ```
 
-### `GET /notifications/preferences`
+### `GET /me/notification-preferences`
 
 ```json
 { "emailEnabled": true, "soundEnabled": true }
 ```
 
-Both default to `true` (D14: sound is on by default). Preferences belong to the **person**: they are the same in every sucursal and on every device.
+Both default to `true` (D14: sound is on by default). Preferences belong to the **person**: they are the same in every sucursal and on every device. Same guards as the other routes (no CASL permission).
 
-### `PUT /notifications/preferences`
+### `PATCH /me/notification-preferences`
 
 Send at least one flag; the other keeps its stored value. Returns the full object. An empty body is a plain `400`; unknown fields are `400`.
 
@@ -98,7 +107,7 @@ Send at least one flag; the other keeps its stored value. Returns the full objec
 { "emailEnabled": true, "soundEnabled": false }
 ```
 
-The contract text in §5.2 mentions `GET/PATCH /me/notification-preferences`. This slice shipped `GET/PUT /notifications/preferences` as requested for the backend task; the shape is the same.
+There is no `/notifications/preferences` route.
 
 ## 4. Email, so support questions have an answer
 

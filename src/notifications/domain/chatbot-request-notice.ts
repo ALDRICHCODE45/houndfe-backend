@@ -66,6 +66,19 @@ export const AUDIENCE_GRANTS: Record<
   ESCALATION_VIEWERS: [['read', 'ChatbotEscalation']],
 };
 
+/**
+ * Why a request closed under the person who was attending it (§5.1: «el
+ * cliente canceló o se resolvió solo → quien la atendía»). A notice written
+ * before causes existed has none and reads as the customer's cancel.
+ */
+export const CLOSED_CAUSES = [
+  'CUSTOMER',
+  'RESOLVED_BY_OTHER',
+  'CANCELLED_BY_OTHER',
+  'SIBLING_RESOLVED',
+] as const;
+export type ClosedCause = (typeof CLOSED_CAUSES)[number];
+
 /** What the producer writes. Small, and never customer data (§6.3). */
 export interface ChatbotRequestNotice {
   type: NoticeType;
@@ -78,12 +91,15 @@ export interface ChatbotRequestNotice {
   recipientUserId?: string;
   /** The person who caused the event; they are never notified of it. */
   actorUserId?: string;
+  /** `REQUEST_CANCELLED` only: why it closed. */
+  cause?: ClosedCause;
 }
 
 /** `payload` of an in-app notification: just enough to render and link. */
 export interface NoticePayload {
   folio: number;
   subtype: string;
+  cause?: ClosedCause;
 }
 
 // ------------------------------------------------------------------- email
@@ -161,12 +177,23 @@ export const NOTICE_HEADLINE: Record<NoticeType, string> = {
   REQUEST_OVERDUE: 'Solicitud vencida',
 };
 
+/** `REQUEST_CANCELLED` wording by cause; the customer's cancel is the default. */
+const CLOSED_TITLE: Record<ClosedCause, string> = {
+  CUSTOMER: 'El cliente canceló la solicitud',
+  RESOLVED_BY_OTHER: 'Otra persona resolvió la solicitud',
+  CANCELLED_BY_OTHER: 'Otra persona canceló la solicitud',
+  SIBLING_RESOLVED: 'Se resolvió junto con otras de su zona',
+};
+
 /** §5.2 `title` (<=120) and `body` (<=200), built from type and payload. */
 export function noticeText(
   type: string,
   payload: Partial<NoticePayload> | null,
 ): { title: string; body: string } {
-  const title = TITLE[type as NoticeType] ?? 'Aviso';
+  const title =
+    type === 'REQUEST_CANCELLED'
+      ? CLOSED_TITLE[payload?.cause ?? 'CUSTOMER']
+      : (TITLE[type as NoticeType] ?? 'Aviso');
   const parts = [
     payload?.subtype ? subtypeLabel(payload.subtype) : null,
     typeof payload?.folio === 'number' ? formatFolio(payload.folio) : null,
