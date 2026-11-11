@@ -325,11 +325,14 @@ enum CatalogPublishMode {
 // Abstract_Status: collapses low_stock → available, keeps zero out.
 // Custom_Quantity: configurable non-negative integer; forced out at zero.
 // Hidden: always null indicator regardless of stock.
+// System_Status_Exact_Low_Stock: as System_Status, and a low_stock row also
+// carries its real quantity as `exactQuantity` (public-catalog v0, S3; opt-in).
 enum CatalogStockPresentation {
   SYSTEM_STATUS
   ABSTRACT_STATUS
   CUSTOM_QUANTITY
   HIDDEN
+  SYSTEM_STATUS_EXACT_LOW_STOCK
 }
 
 // ============================================================================

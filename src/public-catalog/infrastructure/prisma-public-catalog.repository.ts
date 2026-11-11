@@ -8,6 +8,7 @@ import type { PublicCatalogCategoryFacet } from '../application/dto/public-categ
 import type {
   IPublicCatalogRepository,
   ListProductsParams,
+  PublicBranchProfile,
   PublicCartCandidate,
   PublicProductDetailProjection,
   PublicProductListProjection,
@@ -17,7 +18,7 @@ import type {
   ProductWithIncludes,
   ProductDetailWithIncludes,
 } from '../application/mappers/public-product.mapper';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { readEditorialPublishedCoverageV2 } from '../../catalog-editorial/infrastructure/prisma-editorial-published-coverage-v2';
 import {
   readEditorialPublicFacetVocabularyV2,
@@ -68,6 +69,9 @@ const PUBLICATION_SURVIVORSHIP: Prisma.ProductWhereInput = {
 type EditorialScope = {
   products: Prisma.ProductWhereInput;
   variants: Prisma.VariantWhereInput;
+  /** The same variant gate as `variants`, as ids for the raw price sort. */
+  unrecordedProductIds: string[];
+  coveredVariantIds: string[];
 };
 
 function editorialScope(
@@ -92,6 +96,8 @@ function editorialScope(
     variants: {
       OR: [{ productId: { in: unrecorded } }, { id: { in: covered } }],
     },
+    unrecordedProductIds: unrecorded,
+    coveredVariantIds: covered,
   };
 }
 
@@ -133,6 +139,23 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       address: t.address,
       phone: t.phone,
     }));
+  }
+
+  async findPublicBranchProfile(
+    tenantId: string,
+  ): Promise<PublicBranchProfile> {
+    const client = this.tenantPrisma.getClient();
+    const [tenant, zone] = await Promise.all([
+      client.tenant.findUnique({
+        where: { id: tenantId },
+        select: { phone: true },
+      }),
+      client.deliveryZone.findFirst({
+        where: { tenantId, isActive: true, type: { not: 'DENIED' } },
+        select: { id: true },
+      }),
+    ]);
+    return { phone: tenant?.phone ?? null, deliveryAvailable: zone !== null };
   }
 
   async listTenantPublicPriceContexts(
@@ -447,8 +470,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       gatesAnd.push({ categoryId: params.filters.categoryId });
     }
     if (params.filters.q && scope) {
-      // P4 S4 — Published title and description only, never operational
-      // names; same case-insensitive contains as the operational search.
+      // P4 S4 — Published title and description, never operational names;
+      // same case-insensitive contains as the operational search. Public
+      // catalog v0 S2 — the brand name also matches (brand is public data,
+      // already shown on the card); the Published scope above still gates
+      // which products can match.
       const text = (field: 'commercialTitle' | 'description') => ({
         publishedDocument: {
           path: [field],
@@ -457,9 +483,21 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         },
       });
       gatesAnd.push({
-        editorialState: {
-          is: { OR: [text('commercialTitle'), text('description')] },
-        },
+        OR: [
+          {
+            editorialState: {
+              is: { OR: [text('commercialTitle'), text('description')] },
+            },
+          },
+          {
+            brand: {
+              name: {
+                contains: params.filters.q,
+                mode: 'insensitive' as const,
+              },
+            },
+          },
+        ],
       });
     } else if (params.filters.q) {
       const ci = {
@@ -608,11 +646,42 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       }),
     ]);
 
-    const items = await client.product.findMany({
-      where: eligibleWhere,
-      orderBy: this.resolveOrderBy(params.filters.sort),
-      skip: (params.filters.page - 1) * params.filters.limit,
-      take: params.filters.limit,
+    // Public catalog v0 S1 — price sorts order ALL eligible products in SQL by
+    // the card's «desde» price; the page is then loaded by id in that order.
+    // Other sorts keep the Prisma createdAt order and paging.
+    const priceSort =
+      params.filters.sort === 'price_asc' ||
+      params.filters.sort === 'price_desc'
+        ? params.filters.sort
+        : null;
+    const pageIds = priceSort
+      ? await this.orderedPriceSortPageIds({
+          tenantId,
+          globalPriceListId,
+          sort: priceSort,
+          eligibleIds: (
+            await client.product.findMany({
+              where: eligibleWhere,
+              select: { id: true },
+            })
+          ).map((row) => row.id),
+          scope,
+          skip: (params.filters.page - 1) * params.filters.limit,
+          take: params.filters.limit,
+        })
+      : null;
+
+    const loaded = await client.product.findMany({
+      where: pageIds
+        ? { AND: [eligibleWhere, { id: { in: pageIds } }] }
+        : eligibleWhere,
+      ...(pageIds
+        ? {}
+        : {
+            orderBy: this.resolveOrderBy(params.filters.sort),
+            skip: (params.filters.page - 1) * params.filters.limit,
+            take: params.filters.limit,
+          }),
       include: {
         category: { select: { id: true, name: true } },
         brand: { select: { name: true } },
@@ -648,11 +717,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       },
     });
 
-    const sorted = this.sortByPriceIfNeeded(
-      // SAFETY: The include shape above matches ProductWithIncludes; this bridges Prisma's conditional query inference.
-      items as unknown as ProductWithIncludes[],
-      params.filters.sort,
-    );
+    // SAFETY: The include shape above matches ProductWithIncludes; this bridges Prisma's conditional query inference.
+    const items = loaded as unknown as ProductWithIncludes[];
+    const sorted = pageIds
+      ? this.inOrderOf(items, pageIds)
+      : this.sortByPriceIfNeeded(items, params.filters.sort);
 
     const participating = this.withStockPresentationParticipants(sorted);
     const projected = scope
@@ -666,6 +735,82 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       categories: await this.toCategoryFacets(facetGroups),
       ...(attributes ? { attributes } : {}),
     };
+  }
+
+  /**
+   * Public catalog v0 S1 — one page of eligible product ids ordered by the
+   * card's «desde» price in the selected context, over ALL eligible products.
+   *
+   * «Desde» mirrors `computeFromPrice`: for a variant product the cheapest
+   * positive selected-list price among its public (non-OFF, and covered when
+   * editorial-scoped) variants, else the product price; hidden-price and
+   * prescription products sort last in both directions (their price is never
+   * public); ties break by name, then id. Raw SQL does not pass through the
+   * tenant-scoped client, so every table repeats `tenantId` explicitly, and
+   * the ids come from the same eligibility `where` as the page itself.
+   */
+  private async orderedPriceSortPageIds(input: {
+    tenantId: string;
+    globalPriceListId: string;
+    sort: 'price_asc' | 'price_desc';
+    eligibleIds: string[];
+    scope: EditorialScope | null;
+    skip: number;
+    take: number;
+  }): Promise<string[]> {
+    if (input.eligibleIds.length === 0) return [];
+    const { tenantId, globalPriceListId, scope } = input;
+    const variantScope = scope
+      ? Prisma.sql`AND (v."productId" = ANY(${scope.unrecordedProductIds}::text[]) OR v."id" = ANY(${scope.coveredVariantIds}::text[]))`
+      : Prisma.empty;
+    const direction =
+      input.sort === 'price_asc' ? Prisma.sql`ASC` : Prisma.sql`DESC`;
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT p."id"
+      FROM "products" p
+      LEFT JOIN "price_lists" pl
+        ON pl."productId" = p."id"
+       AND pl."tenantId" = ${tenantId}
+       AND pl."globalPriceListId" = ${globalPriceListId}
+       AND pl."priceCents" > 0
+      LEFT JOIN (
+        SELECT v."productId", MIN(vp."priceCents") AS "minCents"
+        FROM "variants" v
+        JOIN "variant_prices" vp
+          ON vp."variantId" = v."id"
+         AND vp."tenantId" = ${tenantId}
+         AND vp."priceCents" > 0
+        JOIN "price_lists" vpl
+          ON vpl."id" = vp."priceListId"
+         AND vpl."tenantId" = ${tenantId}
+         AND vpl."globalPriceListId" = ${globalPriceListId}
+        WHERE v."tenantId" = ${tenantId}
+          AND v."catalogPublishMode" <> 'OFF'
+          ${variantScope}
+        GROUP BY v."productId"
+      ) vmin ON vmin."productId" = p."id" AND p."hasVariants"
+      WHERE p."tenantId" = ${tenantId}
+        AND p."id" = ANY(${input.eligibleIds}::text[])
+      ORDER BY
+        (p."hidePriceInOnlineCatalog" OR p."requiresPrescription") ASC,
+        CASE
+          WHEN p."hidePriceInOnlineCatalog" OR p."requiresPrescription" THEN NULL
+          ELSE COALESCE(vmin."minCents", pl."priceCents")
+        END ${direction} NULLS LAST,
+        p."name" ASC,
+        p."id" ASC
+      LIMIT ${input.take} OFFSET ${input.skip}
+    `);
+    return rows.map((row) => row.id);
+  }
+
+  /** Reorders loaded rows to the order of `ids` (unknown ids are dropped). */
+  private inOrderOf<T extends { id: string }>(items: T[], ids: string[]): T[] {
+    const byId = new Map(items.map((item) => [item.id, item]));
+    return ids.flatMap((id) => {
+      const item = byId.get(id);
+      return item ? [item] : [];
+    });
   }
 
   /**

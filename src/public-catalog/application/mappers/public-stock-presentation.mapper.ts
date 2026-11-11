@@ -34,7 +34,8 @@ export interface PublicVariantStockMappingInput {
   /** Product supplying `useStock` and the inherited presentation config. */
   product: StockPresentationSource & { useStock: boolean };
   /** Variant presentation source fields plus its operational stock. */
-  variant: StockPresentationSource & Omit<StockPresentationOperationalInput, 'useStock'>;
+  variant: StockPresentationSource &
+    Omit<StockPresentationOperationalInput, 'useStock'>;
   tenant: StockPresentationDefaults;
 }
 
@@ -46,11 +47,16 @@ export interface PublicAggregateVariantStockMappingInput {
   variantParticipants: readonly unknown[];
 }
 
-function toDto(rendered: RenderedStockPresentation): PublicStockPresentationDto {
+function toDto(
+  rendered: RenderedStockPresentation,
+): PublicStockPresentationDto {
   return {
     mode: rendered.mode,
     status: rendered.status,
     customQuantity: rendered.customQuantity,
+    ...(rendered.exactQuantity !== undefined
+      ? { exactQuantity: rendered.exactQuantity }
+      : {}),
   };
 }
 
@@ -59,7 +65,10 @@ export function mapPublicProductStockPresentation(
   input: PublicProductStockMappingInput,
 ): StockPresentationMappingResult {
   const config = resolveProductStockPresentation(input.product, input.tenant);
-  return { kind: 'mapped', value: toDto(renderStockPresentation(config, input.product)) };
+  return {
+    kind: 'mapped',
+    value: toDto(renderStockPresentation(config, input.product)),
+  };
 }
 
 /** Individual variant: tenant→product→variant resolution plus rendering. */
@@ -91,7 +100,9 @@ function isVariantOperationalStock(
 ): candidate is VariantOperationalStock {
   if (typeof candidate !== 'object' || candidate === null) return false;
   const record = candidate as Record<string, unknown>;
-  return isFiniteNumber(record['quantity']) && isFiniteNumber(record['minQuantity']);
+  return (
+    isFiniteNumber(record['quantity']) && isFiniteNumber(record['minQuantity'])
+  );
 }
 
 /**

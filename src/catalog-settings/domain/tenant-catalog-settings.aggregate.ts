@@ -4,7 +4,8 @@ export type CatalogStockPresentationValue =
   | 'SYSTEM_STATUS'
   | 'ABSTRACT_STATUS'
   | 'CUSTOM_QUANTITY'
-  | 'HIDDEN';
+  | 'HIDDEN'
+  | 'SYSTEM_STATUS_EXACT_LOW_STOCK';
 export interface TenantBaseProps {
   tenantId: string;
   isActive: boolean;

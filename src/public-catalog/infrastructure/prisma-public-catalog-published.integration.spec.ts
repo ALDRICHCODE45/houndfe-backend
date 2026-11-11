@@ -391,6 +391,21 @@ describe('public catalog from Published editorial on PostgreSQL', () => {
     expect(await notFoundBody(drafted)).toEqual(miss);
   });
 
+  it('switch on: price sorts order the Published products by «desde» over covered variants (public catalog v0 S1)', async () => {
+    await setSwitch(true);
+    const sorted = async (sort: 'price_asc' | 'price_desc') =>
+      (
+        await list.executeForContext({
+          tenant,
+          context: await context(),
+          filters: { sort, page: 1, limit: 50, categoryId },
+        })
+      ).items.map((item) => item.id);
+    // simple 25000; the variant product's «desde» is its cheapest variant (30000).
+    expect(await sorted('price_asc')).toEqual([simple, variants.productId]);
+    expect(await sorted('price_desc')).toEqual([variants.productId, simple]);
+  });
+
   it('switch on: Published title and description replace the operational ones in cards and detail', async () => {
     await setSwitch(true);
     const cards = new Map((await listAll()).items.map((i) => [i.id, i]));

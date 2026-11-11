@@ -558,6 +558,37 @@ describe('public search over Published editorial on PostgreSQL', () => {
     });
   });
 
+  it('switch on: q also matches the brand name of a published product, never an unpublished one (public catalog v0 S2)', async () => {
+    await setSwitch(true);
+    const token = 'Marca' + randomUUID().slice(0, 8);
+    const brand = await prisma.brand.create({
+      data: { name: `pc-fct-${token}` },
+    });
+    try {
+      await prisma.product.updateMany({
+        where: { id: { in: [A, U] } },
+        data: { brandId: brand.id },
+      });
+      // A is published; U has no Published version and must stay out.
+      expect(ids(await listWith({ q: token.toUpperCase() }))).toEqual([A]);
+      expect(ids(await listWith({ q: `pc-fct-${token}` }))).toEqual([A]);
+      // Brand match combines with the existing title/description match.
+      expect(ids(await listWith({ q: 'alfa' }))).toEqual([A]);
+      // Previous behavior: operational names still never match.
+      expect((await listWith({ q: 'operativo' })).items).toEqual([]);
+      await setSwitch(false);
+      // Switch off keeps matching brands (and unpublished products).
+      expect(ids(await listWith({ q: token }))).toEqual([A, U].sort());
+    } finally {
+      await prisma.product.updateMany({
+        where: { id: { in: [A, U] } },
+        data: { brandId: null },
+      });
+      await prisma.brand.delete({ where: { id: brand.id } });
+      await setSwitch(true);
+    }
+  });
+
   it('switch off: q still matches operational names and variant fields', async () => {
     await setSwitch(false);
     expect(ids(await listWith({ q: 'operativo' }))).toEqual(

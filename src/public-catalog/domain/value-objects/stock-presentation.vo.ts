@@ -64,6 +64,8 @@ export interface RenderedStockPresentation {
   mode: CatalogStockPresentationValue;
   status: PublicStockStatus | null;
   customQuantity: number | null;
+  /** S3 — set (number or null) only under SYSTEM_STATUS_EXACT_LOW_STOCK. */
+  exactQuantity?: number | null;
 }
 
 export function renderStockPresentation(
@@ -100,6 +102,17 @@ export function renderStockPresentation(
           : 'available',
         customQuantity: null,
       };
+    case 'SYSTEM_STATUS_EXACT_LOW_STOCK': {
+      const status: PublicStockStatus = operational.useStock
+        ? mapStockStatus(operational.quantity, operational.minQuantity)
+        : 'available';
+      return {
+        mode: config.mode,
+        status,
+        customQuantity: null,
+        exactQuantity: status === 'low_stock' ? operational.quantity : null,
+      };
+    }
   }
 }
 
@@ -134,5 +147,13 @@ export function renderAggregateVariantStockPresentation(
         : anyLow
           ? 'low_stock'
           : 'out_of_stock';
-  return { mode: config.mode, status, customQuantity: null };
+  return {
+    mode: config.mode,
+    status,
+    customQuantity: null,
+    // A product-level row never sums variants into an exact quantity.
+    ...(config.mode === 'SYSTEM_STATUS_EXACT_LOW_STOCK'
+      ? { exactQuantity: null }
+      : {}),
+  };
 }

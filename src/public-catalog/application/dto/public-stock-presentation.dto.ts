@@ -9,7 +9,8 @@ export type PublicStockPresentationMode =
   | 'SYSTEM_STATUS'
   | 'ABSTRACT_STATUS'
   | 'CUSTOM_QUANTITY'
-  | 'HIDDEN';
+  | 'HIDDEN'
+  | 'SYSTEM_STATUS_EXACT_LOW_STOCK';
 
 /**
  * F2.WU6 slice 6 — stable public stock projection (design §9.2). Carries
@@ -23,4 +24,12 @@ export interface PublicStockPresentationDto {
   status: PublicStockStatus | null;
   /** Configured presentation quantity for `CUSTOM_QUANTITY`, else `null`. */
   customQuantity: number | null;
+  /**
+   * Public catalog v0 (S3) — present only under the opt-in
+   * `SYSTEM_STATUS_EXACT_LOW_STOCK` mode: the real quantity while the row's
+   * status is `low_stock`, else `null`. Product-level rows of a variant
+   * product are always `null` (a variant's own row carries its quantity).
+   * Absent for every other mode.
+   */
+  exactQuantity?: number | null;
 }

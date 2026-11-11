@@ -151,7 +151,8 @@ export class PrismaCatalogSettingsRepository implements ICatalogSettingsReposito
             | 'SYSTEM_STATUS'
             | 'ABSTRACT_STATUS'
             | 'CUSTOM_QUANTITY'
-            | 'HIDDEN',
+            | 'HIDDEN'
+            | 'SYSTEM_STATUS_EXACT_LOW_STOCK',
           catalogStockPresentationDefaultCustomQty:
             settings.stockPresentationDefault.customQuantity,
         },

@@ -148,8 +148,19 @@ export interface PublicProductListProjection
   editorial?: PublicEditorialProjectionV2;
 }
 
+/** Public catalog v0 (S4) — the public facts of one branch not in pickup. */
+export interface PublicBranchProfile {
+  /** The tenant's public phone (same value `/branches` lists). */
+  phone: string | null;
+  /** At least one active delivery zone that is not DENIED. */
+  deliveryAvailable: boolean;
+}
+
 export interface IPublicCatalogRepository {
   findActiveBranches(): Promise<PublicBranchDto[]>;
+
+  /** Public catalog v0 (S4) — phone and delivery availability of a tenant. */
+  findPublicBranchProfile(tenantId: string): Promise<PublicBranchProfile>;
 
   /** Only catalog-bound public lists of the guarded tenant, default first. */
   listTenantPublicPriceContexts(
