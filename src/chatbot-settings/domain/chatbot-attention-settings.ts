@@ -17,6 +17,16 @@ import {
   type OpeningRange,
 } from '../../shipping/pickup/domain/opening-hours';
 import { isCalendarDate } from '../../chatbot-requests/domain/business-hours-calendar';
+import {
+  collectFieldErrors,
+  MAX_CLOSED_DATES,
+  MAX_REASON_LENGTH,
+  MAX_SLA_MINUTES,
+  SettingsValidationError,
+  type FieldError,
+} from './chatbot-settings-validation';
+
+export { MAX_CLOSED_DATES, MAX_SLA_MINUTES };
 
 export const ALL_SUBTYPES = [
   'RESTOCK',
@@ -46,6 +56,8 @@ export interface SchedulingSettings {
 export interface AttentionSettings {
   openingHours: OpeningHours;
   closedDates: string[];
+  /** S11: why a date is closed; keys are a subset of `closedDates`, sorted. */
+  closedDateReasons: Record<string, string>;
   slas: SlaEntry[];
   windowWarningMinutes: number;
   templateName: string | null;
@@ -62,6 +74,8 @@ export interface AttentionSettingsInput {
     days: Array<{ day: string; ranges: OpeningRange[] }>;
   };
   closedDates: string[];
+  /** Optional; absent means no reasons (a PUT replaces the whole object). */
+  closedDateReasons?: Record<string, string>;
   slas: SlaEntry[];
   windowWarningMinutes: number;
   templateName: string | null;
@@ -71,9 +85,6 @@ export interface AttentionSettingsInput {
   scheduling: SchedulingSettings;
 }
 
-/** Upper bound of any SLA, in business minutes (one week of 24 h days). */
-export const MAX_SLA_MINUTES = 10_080;
-export const MAX_CLOSED_DATES = 400;
 export const DEFAULT_TEMPLATE_COST_TEXT =
   'Enviar la plantilla tiene un costo para el negocio.';
 
@@ -101,6 +112,7 @@ export function defaultSettings(): AttentionSettings {
       })),
     },
     closedDates: [],
+    closedDateReasons: {},
     slas: ALL_SUBTYPES.map((subtype) => ({
       subtype,
       claimMinutes: DEFAULT_SLAS[subtype][0],
@@ -196,11 +208,74 @@ function normalizeSlas(input: SlaEntry[]): SlaEntry[] {
 /**
  * Validates and canonicalizes a PUT body (400 `INVALID_CHATBOT_SETTINGS` or
  * the pickup domain's `INVALID_OPENING_HOURS`). The result is what is stored,
- * returned and compared.
+ * returned and compared. A rejection is a `SettingsValidationError`: the same
+ * `code`/`message` as always (the first rule that fails) plus `fieldErrors`,
+ * every located problem of the body (S11).
  */
 export function normalizeSettingsInput(
   input: AttentionSettingsInput,
 ): AttentionSettings {
+  const located = collectFieldErrors(input);
+  let normalized: AttentionSettings;
+  try {
+    normalized = normalizeCore(input);
+  } catch (error) {
+    if (!(error instanceof InvalidArgumentError)) throw error;
+    // The domain rejected it; the list says where (a fallback keeps it never empty).
+    throw new SettingsValidationError(
+      error.message,
+      error.code,
+      located.length > 0 ? located : [unlocated(error)],
+    );
+  }
+  if (located.length > 0) {
+    throw new SettingsValidationError(
+      'closedDateReasons is invalid',
+      'INVALID_CHATBOT_SETTINGS',
+      located,
+    );
+  }
+  return normalized;
+}
+
+/** A domain rejection the collector did not locate (it should not happen). */
+const unlocated = (error: InvalidArgumentError): FieldError => ({
+  path: error.code === 'INVALID_OPENING_HOURS' ? 'openingHours' : '',
+  code: 'INVALID_VALUE',
+});
+
+function normalizeReasons(
+  input: AttentionSettingsInput,
+  closedDates: string[],
+): Record<string, string> {
+  const raw = input.closedDateReasons;
+  if (raw === undefined) return {};
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw invalid('closedDateReasons must be an object keyed by date');
+  }
+  const entries: Array<[string, string]> = [];
+  for (const date of Object.keys(raw).sort()) {
+    const reason = raw[date];
+    if (!isCalendarDate(date) || !closedDates.includes(date)) {
+      throw invalid('closedDateReasons keys must be closed dates');
+    }
+    const trimmed = typeof reason === 'string' ? reason.trim() : '';
+    if (
+      trimmed.length < 1 ||
+      Array.from(trimmed).length > MAX_REASON_LENGTH ||
+      CONTROL.test(trimmed)
+    ) {
+      throw invalid(
+        `a closed date reason must be plain text of 1 to ${MAX_REASON_LENGTH} characters`,
+      );
+    }
+    entries.push([date, trimmed]);
+  }
+  // `fromEntries` defines own properties: no prototype write whatever the key.
+  return Object.fromEntries(entries);
+}
+
+function normalizeCore(input: AttentionSettingsInput): AttentionSettings {
   const openingHours = normalizeOpeningHours(input.openingHours);
   if (!openingHours.days.some((day) => day.ranges.length > 0)) {
     throw invalid('openingHours needs at least one open range');
@@ -252,6 +327,7 @@ export function normalizeSettingsInput(
   return {
     openingHours,
     closedDates,
+    closedDateReasons: normalizeReasons(input, closedDates),
     slas: normalizeSlas(input.slas),
     windowWarningMinutes: integerIn(
       input.windowWarningMinutes,

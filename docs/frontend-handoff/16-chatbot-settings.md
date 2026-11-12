@@ -2,6 +2,8 @@
 
 **Status:** implemented on `feat/human-intervention` (human-intervention unit 7a), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §5.4, §5.5, §12.7, §12.9, §4.9, §10.1 (unit 7). Owner decision S7 on "aplicar a todas" (2026-11-11): «Solo donde tenga membresía (Recomendado)».
 
+**S11 additions (2026-11-12, additive):** `updatedBy` / `updatedAt` on every settings body, `closedDateReasons`, `fieldErrors` on every `400 VALIDATION_ERROR`, at most 6 ranges per day, and the inbox filter `windowClosingSoon` now uses `windowWarningMinutes`. `closedDates` is still `string[]`; nothing that existed changed shape.
+
 Shapes in this document come from the controller, DTOs, service and their specs (`src/chatbot-settings/**`, `src/chatbot-requests/domain/chatbot-sla.ts`). Nothing was sent to the dev API.
 
 **Not in this unit:**
@@ -46,6 +48,7 @@ Initial grants (owner choice L2): Manager has the first two, **not** `ChatbotSet
     ]
   },
   "closedDates": ["2026-12-25"],
+  "closedDateReasons": { "2026-12-25": "Navidad" },
   "slas": [
     { "subtype": "RESTOCK", "claimMinutes": 60, "resolveMinutes": 240 },
     { "subtype": "EXPIRATION", "claimMinutes": 60, "resolveMinutes": 240 },
@@ -62,17 +65,21 @@ Initial grants (owner choice L2): Manager has the first two, **not** `ChatbotSet
   "enabledSubtypes": ["RESTOCK", "EXPIRATION", "DELIVERY_ZONE", "TRANSFER_RECEIPT", "TALK_TO_HUMAN", "COMPLAINT", "UNKNOWN_QUESTION", "DISCOUNT"],
   "receiptCloseMarginMinutes": 60,
   "scheduling": { "enabled": false, "slotMinutes": 30, "slotsOffered": 3, "maxScheduledPerSlot": 3 },
-  "branchOpeningHours": null
+  "branchOpeningHours": null,
+  "updatedBy": { "id": "6f1c…", "displayName": "Ana López" },
+  "updatedAt": "2026-11-12T15:04:05.123Z"
 }
 ```
 
-The example is the **default** (what a sucursal with no row gets, except `version: 0`). Field notes:
+The example shows a saved sucursal. A sucursal with **no row** gets the defaults with `version: 0`, `closedDateReasons: {}`, `updatedBy: null` and `updatedAt: null` (the three S11 fields are always present). Field notes:
 
 - `openingHours` is the same `OpeningHoursBody` (`{timeZone, days}`) the pickup editor already uses, so `OpeningHoursEditor` works unchanged. Seven days, ranges `HH:mm`, no overlaps or touching ranges, no range crossing midnight, latest close `23:59`.
-- `closedDates`: real local dates `YYYY-MM-DD` in `openingHours.timeZone`, sorted and unique, at most 400. A closed date has no business time at all (a holiday).
+- `closedDates`: real local dates `YYYY-MM-DD` in `openingHours.timeZone`, sorted and unique, at most 400. A closed date has no business time at all (a holiday). It stays a plain `string[]`. A repeated date in a `PUT` is merged, not an error.
+- `closedDateReasons` (S11): `{ "YYYY-MM-DD": "reason" }`, an object keyed by date (chosen over a list of `{date, reason}` so the screen looks a reason up by date). Optional text per closed date, 1 to 80 characters after trimming, plain text. **Keys must be dates present in `closedDates`**, otherwise `400` with `REASON_WITHOUT_DATE`. Dates without a reason have no key. Always present in `GET` (`{}` when none). It is **copied by apply-to-all** together with `closedDates`.
+- `updatedBy` / `updatedAt` (S11): who saved the settings last and when (UTC ISO). `updatedBy` is `{ id, displayName }`, where `displayName` is the name copied at the time of the save, so it **survives the deletion of that user** (the `id` may no longer exist). Both are `null` for a sucursal with no row (defaults). After "apply to all", a target sucursal shows the person who applied. A `PUT` that changes nothing keeps the previous author and time. **Read-only: do not send them back** (an unknown field is a `400`, same as `version`).
 - `slas`: always **all eight subtypes**, in the order above. `null` means "no deadline of this kind". `TRANSFER_RECEIPT` has no claim time and **its resolve time is not configured**: a receipt is due at the close of the day when it arrives in hours with more than `receiptCloseMarginMinutes` left, otherwise at the close of the next business day (§5.4). Show those two fields as read-only.
 - `TALK_TO_HUMAN.resolveMinutes` is `null` by design ("en vivo").
-- `windowWarningMinutes` (0 to 1440): how long before the 24 h WhatsApp window closes a request counts as "closing soon". Stored; the inbox filter still uses its own 2 h until unit 7c.
+- `windowWarningMinutes` (0 to 1440): how long before the 24 h WhatsApp window closes a request counts as "closing soon". **S11: the inbox filter `windowClosingSoon` and the `windowClosingSoon` count of `/chatbot-requests/counts` use this value** (handoff 14 §16); `0` turns the warning off; a sucursal on the default (120) behaves as before.
 - `templateName`: lowercase letters, digits and `_`, 1 to 512, or `null` (not configured: the send-template command answers `422 TEMPLATE_NOT_CONFIGURED`).
 - `templateCostText`: plain text, 1 to 200 characters. Show it as is in the "Enviar plantilla" confirmation (§12.7).
 - `enabledSubtypes`, `scheduling`: stored only (see above).
@@ -87,6 +94,7 @@ Full replacement, plus the version you edited:
   "expectedVersion": 3,
   "openingHours": { "timeZone": "America/Mexico_City", "days": [ ... seven days ... ] },
   "closedDates": ["2026-12-25"],
+  "closedDateReasons": { "2026-12-25": "Navidad" },
   "slas": [ ... eight entries ... ],
   "windowWarningMinutes": 120,
   "templateName": null,
@@ -97,9 +105,9 @@ Full replacement, plus the version you edited:
 }
 ```
 
-You can send back exactly what `GET` returned (without `version`) plus `expectedVersion`. `branchOpeningHours` may be present and is ignored. Any other unknown field is a `400`. `expectedVersion` is the `version` you loaded (`0` the first time).
+You can send back exactly what `GET` returned (without `version`, `updatedBy` and `updatedAt`) plus `expectedVersion`. `closedDateReasons` is optional, but a `PUT` replaces the whole object: **leaving it out clears every reason**. `branchOpeningHours` may be present and is ignored. Any other unknown field is a `400`. `expectedVersion` is the `version` you loaded (`0` the first time).
 
-Success: `200` with the new `GET` body plus one extra field, `recompute` (see below). The version goes up by one **only if something changed**; saving identical content answers `200` with the same version, `recompute: "NOT_NEEDED"`, and does nothing else. **`recompute` exists only in the `PUT` response: do not send it back** (an unknown field is a `400`, same as `version`).
+Success: `200` with the new `GET` body plus one extra field, `recompute` (see below). The version goes up by one **only if something changed**; saving identical content answers `200` with the same version, `recompute: "NOT_NEEDED"`, and does nothing else. The `PUT` response also carries `updatedBy` / `updatedAt` of this save. **`recompute` exists only in the `PUT` response: do not send it back** (an unknown field is a `400`, same as `version`).
 
 Limits, all checked on the server:
 
@@ -108,7 +116,8 @@ Limits, all checked on the server:
 | `slas[].claimMinutes`, `resolveMinutes` | `null` or an integer 1 to 10080; `resolveMinutes` not below `claimMinutes`; `TRANSFER_RECEIPT.resolveMinutes` must be `null` |
 | `receiptCloseMarginMinutes` | integer 0 to 1440 |
 | `windowWarningMinutes` | integer 0 to 1440 |
-| `openingHours` | at least one open range in the week |
+| `openingHours` | at least one open range in the week; at most **6 ranges per day** (settings only) |
+| `closedDateReasons` | keys are dates of `closedDates`; each reason 1 to 80 characters, plain text |
 | `scheduling.slotMinutes` | 5 to 240; `slotsOffered` 1 to 10; `maxScheduledPerSlot` 1 to 50 |
 
 ### What a change does to open requests
@@ -128,13 +137,64 @@ After a change is saved, the **open** requests (`NEW`, `IN_PROGRESS`) of that su
 
 | Status | `code` | When |
 | --- | --- | --- |
-| 400 | `VALIDATION_ERROR` | Shape, or a rule above. Has `reason`: `INVALID_OPENING_HOURS` (overlap, midnight, bad zone, missing day) or `INVALID_CHATBOT_SETTINGS` (everything else), and a fixed English `message` you can log |
+| 400 | `VALIDATION_ERROR` | Shape, or a rule above. Has `fieldErrors` (below). When a rule failed it also has `reason`: `INVALID_OPENING_HOURS` (overlap, midnight, bad zone, missing day) or `INVALID_CHATBOT_SETTINGS` (everything else), and a fixed English `message` you can log |
 | 401 / 403 | `UNAUTHORIZED` / `INSUFFICIENT_PERMISSIONS` | Not signed in or inactive / missing permission |
 | 409 | `VERSION_CONFLICT` | Someone saved first. Body has `current`: the same object `GET` returns. Replace the form with it (or merge) and retry with `current.version`. (On `apply-to-all-tenants` `current` is present only if you also have `read:ChatbotSettings`, see §5) |
 
 ```json
-{ "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them", "current": { "version": 4, "openingHours": { }, "...": "..." } }
+{ "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them", "current": { "version": 4, "openingHours": { }, "...": "...", "updatedBy": { "id": "6f1c…", "displayName": "Ana López" }, "updatedAt": "2026-11-12T15:04:05.123Z" } }
 ```
+
+`current.updatedBy` / `current.updatedAt` tell the user who saved first ("Ana López guardó cambios hace 2 minutos"). Same rule on the `apply-to-all-tenants` `409` when it carries `current`.
+
+### `fieldErrors` (S11)
+
+Every `400 VALIDATION_ERROR` of `PUT /chatbot-settings` and of `POST /chatbot-settings/apply-to-all-tenants` has a `fieldErrors` array. `statusCode`, `code`, `message` (and `reason` when present) are exactly what they were; `fieldErrors` is the addition. The server reports **every** problem it finds in the body, not just the first (when the shape of the body is wrong, only the shape problems come back; fix them and send again).
+
+```json
+{
+  "statusCode": 400,
+  "code": "VALIDATION_ERROR",
+  "reason": "INVALID_OPENING_HOURS",
+  "message": "TUESDAY: ranges must not overlap or touch",
+  "fieldErrors": [
+    { "path": "openingHours.days[1].ranges[1]", "code": "OVERLAP" },
+    { "path": "slas[3].resolveMinutes", "code": "MUST_BE_NULL" },
+    { "path": "closedDates[2]", "code": "INVALID_DATE" }
+  ]
+}
+```
+
+`path` is JSON-path-like, relative to the body you sent: `openingHours.days[1].ranges[0].open`, `slas[3].resolveMinutes`, `closedDates[2]`, `closedDateReasons["2026-12-25"]`, `scheduling.slotMinutes`. Indexes are the positions **in your request**. The list never contains what you sent (no values). Use `code` for your own text; the `message` is English, for logs. An empty `fieldErrors` means the problem could not be located; show the generic error.
+
+| `code` | Meaning | Typical `path` |
+| --- | --- | --- |
+| `REQUIRED` | Missing (or `null` where a value is required), or a weekday / subtype missing from the list | `receiptCloseMarginMinutes`, `openingHours.days`, `slas` |
+| `INVALID_TYPE` | Wrong JSON type | `windowWarningMinutes`, `closedDates[1]` |
+| `INVALID_VALUE` | Not one of the allowed values | `slas[0].subtype`, `enabledSubtypes[1]`, `openingHours.days[2].day` |
+| `UNKNOWN_FIELD` | A field the route does not accept (including `version`, `updatedBy`, `updatedAt`, `recompute`) | `tenantId` |
+| `OUT_OF_RANGE` | A number outside its limit (table above) or not an integer | `slas[5].resolveMinutes`, `scheduling.slotMinutes`, `expectedVersion` |
+| `INVALID_LENGTH` | Text too short or too long (reason 1 to 80, cost text 1 to 200) | `closedDateReasons["2026-12-25"]`, `templateCostText` |
+| `INVALID_TEXT` | Control characters in a text | `templateCostText`, `closedDateReasons[...]` |
+| `INVALID_TEMPLATE_NAME` | Not lowercase letters, digits and `_` (1 to 512) | `templateName` |
+| `INVALID_TIME` | Not `HH:mm` between `00:00` and `23:59` | `openingHours.days[0].ranges[0].open` |
+| `CROSSES_MIDNIGHT` | Closes before it opens (for example `22:00` to `02:00`); split it across days | `openingHours.days[0].ranges[0]` |
+| `EMPTY_RANGE` | Opens and closes at the same time | `openingHours.days[0].ranges[0]` |
+| `OVERLAP` | The range overlaps or touches another of the same day; the path is the **later** one | `openingHours.days[1].ranges[1]` |
+| `TOO_MANY_RANGES` | More than 6 ranges in one day | `openingHours.days[3].ranges` |
+| `INVALID_TIMEZONE` | Not an IANA time zone | `openingHours.timeZone` |
+| `INVALID_DAY` / `DUPLICATE_DAY` | Unknown weekday name / weekday repeated | `openingHours.days[2].day` |
+| `NO_OPEN_RANGE` | Every day is closed | `openingHours.days` |
+| `INVALID_DATE` | Not a real `YYYY-MM-DD` date | `closedDates[2]`, `closedDateReasons["2026-02-30"]` |
+| `TOO_MANY_DATES` | More than 400 distinct closed dates | `closedDates` |
+| `REASON_WITHOUT_DATE` | A reason for a date that is not in `closedDates` | `closedDateReasons["2026-12-24"]` |
+| `DUPLICATE_SUBTYPE` | A subtype appears twice in `slas` | `slas[7].subtype` |
+| `MUST_BE_NULL` | `TRANSFER_RECEIPT.resolveMinutes` must be `null` | `slas[3].resolveMinutes` |
+| `RESOLVE_BELOW_CLAIM` | `resolveMinutes` is lower than `claimMinutes` | `slas[5].resolveMinutes` |
+
+New codes may be added later; treat an unknown `code` as a generic error on that `path`. (`DUPLICATE_DATE` does not exist: a repeated closed date is merged.)
+
+On `apply-to-all-tenants`, `fieldErrors` covers its small body: `dryRun` (`INVALID_TYPE`), `expectedVersion` (`OUT_OF_RANGE` / `INVALID_TYPE`) and unknown fields (`UNKNOWN_FIELD`).
 
 Two people saving at once: exactly one wins, the others get `409`.
 
@@ -151,7 +211,7 @@ Request body (both optional):
 - `dryRun: true`: reports what would change and writes nothing. Call it first and show "N sucursales cambian" before the user confirms.
 - `expectedVersion`: the version of **this** sucursal's settings the user saw. A stale one answers `409 VERSION_CONFLICT`, so you never copy something other than what was on screen. The body carries `current` (same object as `GET`) **only if you also have `read:ChatbotSettings` in this sucursal**, because this route requires just `update:ChatbotSettingsAllBranches` and must not be a way around `GET`. Without that permission the `409` has no `current` key: `{ "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them" }`. Handle both: if `current` is missing, tell the user the settings changed and ask them to reload (a `GET` will work if they can read; otherwise just retry the dry run). Save with `PUT` first, then apply.
 
-Copied: `openingHours`, `closedDates`, `slas`, `windowWarningMinutes`, `receiptCloseMarginMinutes`, `scheduling`. **Not copied** (they stay per sucursal): `templateName`, `templateCostText`, `enabledSubtypes`.
+Copied: `openingHours`, `closedDates`, `closedDateReasons`, `slas`, `windowWarningMinutes`, `receiptCloseMarginMinutes`, `scheduling`. **Not copied** (they stay per sucursal): `templateName`, `templateCostText`, `enabledSubtypes`.
 
 Response `200`:
 

@@ -3689,6 +3689,8 @@ model ChatbotAttentionSettings {
   timeZone                  String
   days                      Json
   closedDates               String[]
+  // S11: `{ "YYYY-MM-DD": "reason" }`, keys a subset of `closedDates`.
+  closedDateReasons         Json                    @default("{}")
   slas                      Json
   windowWarningMinutes      Int
   templateName              String?

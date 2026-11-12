@@ -89,7 +89,7 @@ Query (all optional; unknown parameters are `400`):
 | `subtype` | any `subtype` | all |
 | `assignee` | `me`, `unassigned` (alias `none`), or a user id (UUID) | all |
 | `overdue` | `true` / `false` | not filtered |
-| `windowClosingSoon` | `true` / `false` (WhatsApp window closes within the next 2 hours) | not filtered |
+| `windowClosingSoon` | `true` / `false` (WhatsApp window closes within the sucursal's `windowWarningMinutes`, 120 by default; see the note below) | not filtered |
 | `q` | free text, at most 100 characters: a folio, a customer name, or phone digits (see below) | no search |
 | `cursor` | the `nextCursor` of the previous page | first page |
 | `limit` | 1–50 | 25 |
@@ -144,7 +144,7 @@ Order is the same as inside a group (open: nearest deadline, then `createdAt`, `
   "resolved7d": 12, "cancelled7d": 5, "openGroups": 9, "unassigned": 4 }
 ```
 
-The first seven are over open requests of the current sucursal. `new` and `inProgress` are by status; `mine` is the caller's `IN_PROGRESS` requests; `windowClosingSoon` uses the same 2-hour window as the filter. `new`/`inProgress` include scheduled requests.
+The first seven are over open requests of the current sucursal. `new` and `inProgress` are by status; `mine` is the caller's `IN_PROGRESS` requests; `windowClosingSoon` uses the same window as the filter: the sucursal's `windowWarningMinutes` setting (S11, handoff 16; 120 minutes while it has never saved settings). `new`/`inProgress` include scheduled requests.
 
 **`unassigned` (S9, v1.5, additive).** Open requests with no assignee: the total behind the «Sin responsable» filter (`assignee=unassigned`). Section 15.2.
 
@@ -414,7 +414,7 @@ New optional query parameters, identical to the ones of `groups` (section 4):
 | `subtype` | string | any `subtype` | all |
 | `assignee` | string | `me`, `unassigned` (alias `none`), or a user id (UUID) | all |
 | `overdue` | boolean | `true` / `false` | not filtered |
-| `windowClosingSoon` | boolean | `true` / `false` (WhatsApp window closes within 2 hours) | not filtered |
+| `windowClosingSoon` | boolean | `true` / `false` (WhatsApp window closes within the sucursal's `windowWarningMinutes`, 120 by default) | not filtered |
 | `q` | string, at most 100 chars | folio, customer name, or phone digits | no search |
 
 - **Same rows as the group.** For the same data and the same query string, `GET /chatbot-requests/groups?...` and `GET /chatbot-requests?customerKey=<that group>&...` match the same requests, in the same order (the group shows the first 10). So «Ver las N restantes» keeps the filters the user has on, and `N` is the group's `moreRequests`.
@@ -482,3 +482,14 @@ No new event type and no new field on the `request` row of the stream: the row i
 Measured with 5,000 open requests over ~2,000 customers plus 20,000 closed and two noise sucursales: a page of 25 groups p95 **6.9 ms** (target < 200 ms), every page of a full walk p95 9.4 ms, counts 2 ms, detail 4.2 ms, history 1.7 ms. See `docs/perf/chatbot-inbox-load-results.md`.
 
 **`q` (slice 4b)**, same data plus 20,000 customers per sucursal (accented Spanish names), p95: folio **1.6 ms**, phone **4–6 ms**, a digits-only `q` without `read:CustomerPhone` **0 ms** (nothing is searched), customer name **89–123 ms** (a short prefix such as `mar` with ~3,700 matching customers is the slowest; a miss 80 ms). The name search has no index: PostgreSQL cannot index a *contains* match without the `pg_trgm` extension, which this database does not use, so it folds accents and case in SQL over the sucursal's customers (~4 µs per customer). Cost grows with the number of customers of one sucursal; measure again past ~100,000 customers.
+
+
+## 16. `windowClosingSoon` follows the sucursal setting (S11, additive)
+
+The `windowClosingSoon` filter (on `groups` and on the by-customer list) and the `windowClosingSoon` count of `/chatbot-requests/counts` no longer use a fixed 2 hours. They use the **`windowWarningMinutes` of the current sucursal** (handoff 16, `GET /chatbot-settings`):
+
+- A request matches when its WhatsApp window closes in `(now, now + windowWarningMinutes]`. The end of the range is inclusive; a window that already closed never matches.
+- A sucursal that never saved settings uses **120**, so nothing changes for it. Saving 120 behaves the same.
+- `0` turns the warning off: the filter returns nothing and the count is `0`.
+- Filter and count always agree, and each sucursal only sees its own setting. Changing the setting takes effect on the next read (nothing is recomputed or stored on the rows).
+- No new field and no new parameter: show the value the user chose in your label (for example "Ventana por cerrar (60 min)") by reading `windowWarningMinutes` from the settings if you have `read:ChatbotSettings`.

@@ -66,6 +66,15 @@ export class PutChatbotSettingsDto {
   @IsString({ each: true })
   closedDates!: string[];
 
+  /**
+   * S11: why a date is closed, `{ "YYYY-MM-DD": "reason" }`. Optional (absent
+   * means no reasons). Keys and texts are validated by the domain, which
+   * locates each problem in `fieldErrors`.
+   */
+  @IsOptional()
+  @IsObject()
+  closedDateReasons?: Record<string, string>;
+
   @IsArray()
   @ArrayMaxSize(8)
   @ValidateNested({ each: true })

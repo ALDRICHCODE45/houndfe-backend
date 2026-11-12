@@ -1712,4 +1712,152 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       ).toBe('55 **** 5678');
     });
   });
+
+  // ------------------------------------------- S11: windowClosingSoon setting
+
+  describe('windowClosingSoon follows the tenant windowWarningMinutes (S11)', () => {
+    const MIN = 60_000;
+    /** Minutes before the WhatsApp window closes; 0 and -1 are never "soon". */
+    const CLOSES_IN = [-1, 0, 30, 60, 61, 119, 120, 121, 600, 1440];
+    const tenants: string[] = [];
+
+    async function tenantWithWarning(
+      minutes: number | null,
+    ): Promise<{ id: string; names: Record<number, string> }> {
+      const id = randomUUID();
+      tenants.push(id);
+      await prisma.tenant.create({
+        data: { id, name: 'Ventana', slug: `cr-window-${id}` },
+      });
+      if (minutes !== null) {
+        const base = defaultSettings();
+        await prisma.chatbotAttentionSettings.create({
+          data: {
+            tenantId: id,
+            version: 1,
+            timeZone: base.openingHours.timeZone,
+            days: base.openingHours.days as never,
+            closedDates: [],
+            slas: base.slas as never,
+            windowWarningMinutes: minutes,
+            templateCostText: base.templateCostText,
+            enabledSubtypes: base.enabledSubtypes,
+            receiptCloseMarginMinutes: base.receiptCloseMarginMinutes,
+            schedulingEnabled: false,
+            slotMinutes: 30,
+            slotsOffered: 3,
+            maxScheduledPerSlot: 3,
+          },
+        });
+      }
+      const names: Record<number, string> = {};
+      for (const closesIn of CLOSES_IN) {
+        const closesAt = new Date(NOW.getTime() + closesIn * MIN);
+        names[closesIn] = `w${closesIn}`;
+        await create(
+          {
+            summary: names[closesIn],
+            kind: 'CONVERSATION',
+            subtype: 'TALK_TO_HUMAN',
+            lastCustomerMessageAt: new Date(closesAt.getTime() - DAY),
+            whatsappWindowClosesAt: closesAt,
+          },
+          id,
+        );
+      }
+      return { id, names };
+    }
+
+    const filtered = async (tenantId: string) =>
+      (
+        (await get(
+          '/chatbot-requests/groups?windowClosingSoon=true&limit=50',
+          'manager',
+          tenantId,
+        )) as { body: { items: any[] } }
+      ).body.items
+        .flatMap((g: any) => summaries(g.requests))
+        .sort();
+    const counted = async (tenantId: string) =>
+      (await get('/chatbot-requests/counts', 'manager', tenantId)).body
+        .windowClosingSoon;
+    const only = (...closesIn: number[]) => closesIn.map((m) => `w${m}`).sort();
+
+    afterAll(async () => {
+      await prisma.tenant.deleteMany({ where: { id: { in: tenants } } });
+    });
+
+    it('a tenant without a row keeps the 2 h of before: (now, now + 120 min], boundary included', async () => {
+      const { id } = await tenantWithWarning(null);
+      const expected = only(30, 60, 61, 119, 120);
+      expect(await filtered(id)).toEqual(expected);
+      expect(await counted(id)).toBe(expected.length);
+    });
+
+    it('a tenant saved at 120 behaves exactly like the default', async () => {
+      const { id } = await tenantWithWarning(120);
+      expect(await filtered(id)).toEqual(only(30, 60, 61, 119, 120));
+      expect(await counted(id)).toBe(5);
+    });
+
+    it('a tenant at 60 minutes gets only what closes within the hour, in the filter and in the count', async () => {
+      const { id } = await tenantWithWarning(60);
+      expect(await filtered(id)).toEqual(only(30, 60));
+      expect(await counted(id)).toBe(2);
+    });
+
+    it('a larger window widens both (1440 = everything still open)', async () => {
+      const { id } = await tenantWithWarning(1440);
+      expect(await filtered(id)).toEqual(
+        only(30, 60, 61, 119, 120, 121, 600, 1440),
+      );
+      expect(await counted(id)).toBe(8);
+    });
+
+    it('0 turns the warning off: nothing is closing soon', async () => {
+      const { id } = await tenantWithWarning(0);
+      expect(await filtered(id)).toEqual([]);
+      expect(await counted(id)).toBe(0);
+    });
+
+    it('is tenant scoped: another tenant on 60 does not move the default tenant', async () => {
+      const sixty = await tenantWithWarning(60);
+      const none = await tenantWithWarning(null);
+      expect(await counted(sixty.id)).toBe(2);
+      expect(await counted(none.id)).toBe(5);
+      expect(await filtered(none.id)).toEqual(only(30, 60, 61, 119, 120));
+    });
+
+    it('the by-customer list applies the same window', async () => {
+      const { id } = await tenantWithWarning(60);
+      const customerKey = '525511009900';
+      await create(
+        {
+          customerKey,
+          summary: 'near',
+          lastCustomerMessageAt: new Date(NOW.getTime() - 23.5 * HOUR),
+          whatsappWindowClosesAt: new Date(NOW.getTime() + 30 * MIN),
+        },
+        id,
+      );
+      await create(
+        {
+          customerKey,
+          summary: 'far',
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          lastCustomerMessageAt: new Date(NOW.getTime() - 22.5 * HOUR),
+          whatsappWindowClosesAt: new Date(NOW.getTime() + 90 * MIN),
+        },
+        id,
+      );
+      const list = await get(
+        `/chatbot-requests?customerKey=${encodeURIComponent(token(customerKey, id))}&windowClosingSoon=true&limit=50`,
+        'manager',
+        id,
+      );
+      expect(list.status).toBe(200);
+      expect(summaries(list.body.items)).toEqual(['near']);
+    });
+  });
 });

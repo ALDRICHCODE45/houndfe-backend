@@ -7,7 +7,8 @@
  * tenant-scoped client would refuse, and the same rule keeps the single-tenant
  * paths obviously scoped.
  *
- *   get            settings + read-only `branchOpeningHours` (§12.9).
+ *   get            settings + read-only `branchOpeningHours` (§12.9) +
+ *                  `updatedBy`/`updatedAt` from the settings audit (S11).
  *   put            CAS on `version` (`expectedVersion`): exactly one of several
  *                  concurrent writers wins, the rest get 409 VERSION_CONFLICT
  *                  with the current settings. Identical content is a no-op (no
@@ -52,7 +53,18 @@ import {
 
 export const SETTINGS_CLOCK = Symbol('CHATBOT_SETTINGS_CLOCK');
 
-export interface SettingsView extends AttentionSettings {
+/**
+ * Who saved the settings and when (S11). `null` both while the tenant is on
+ * the defaults (no row). The name is the copy stored in the audit event, so it
+ * survives the deletion of the user, like every other audit name.
+ */
+export interface SettingsAuthor {
+  updatedBy: { id: string; displayName: string } | null;
+  /** ISO instant of the last committed write. */
+  updatedAt: string | null;
+}
+
+export interface SettingsView extends AttentionSettings, SettingsAuthor {
   version: number;
 }
 
@@ -113,6 +125,7 @@ export interface TenantRef {
 const COPIED = [
   'openingHours',
   'closedDates',
+  'closedDateReasons',
   'slas',
   'windowWarningMinutes',
   'receiptCloseMarginMinutes',
@@ -139,6 +152,8 @@ const toColumns = (s: AttentionSettings) => ({
   // SAFETY: the normalized week and SLA table are plain JSON values.
   days: s.openingHours.days as unknown as Prisma.InputJsonValue,
   closedDates: s.closedDates,
+  // SAFETY: a plain object of strings.
+  closedDateReasons: s.closedDateReasons as Prisma.InputJsonObject,
   // SAFETY: the SLA table is an array of plain objects (strings, numbers, null).
   slas: s.slas as unknown as Prisma.InputJsonValue,
   windowWarningMinutes: s.windowWarningMinutes,
@@ -171,7 +186,11 @@ export class ChatbotSettingsService {
       readSettingsRow(this.prisma, tenantId),
       this.prisma.tenantOpeningHours.findFirst({ where: { tenantId } }),
     ]);
-    return this.toResponse(row, branch);
+    return this.toResponse(
+      row,
+      branch,
+      await this.authorOf(this.prisma, tenantId, row),
+    );
   }
 
   /** Same as `get`, on the connection of a transaction that is already open. */
@@ -183,16 +202,49 @@ export class ChatbotSettingsService {
     const branch = await tx.tenantOpeningHours.findFirst({
       where: { tenantId },
     });
-    return this.toResponse(row, branch);
+    return this.toResponse(row, branch, await this.authorOf(tx, tenantId, row));
+  }
+
+  /**
+   * The audit event of exactly the version in the row: every committed write
+   * creates one in the same transaction (a no-op write creates none and does
+   * not move the version), so it is the last writer and the commit instant,
+   * never a mismatch under a concurrent write. One lookup inside the tenant's
+   * index `(tenantId, createdAt DESC)`; no row (defaults) is `null`/`null`.
+   */
+  private async authorOf(
+    db: Pick<Prisma.TransactionClient, 'chatbotAttentionSettingsEvent'>,
+    tenantId: string,
+    row: { version: number } | null,
+  ): Promise<SettingsAuthor> {
+    if (!row) return { updatedBy: null, updatedAt: null };
+    const event = await db.chatbotAttentionSettingsEvent.findFirst({
+      where: { tenantId, toVersion: row.version },
+      orderBy: { createdAt: 'desc' },
+      select: { actorUserId: true, actorDisplayName: true, createdAt: true },
+    });
+    if (!event) return { updatedBy: null, updatedAt: null };
+    return {
+      updatedBy: event.actorUserId
+        ? {
+            id: event.actorUserId,
+            displayName:
+              event.actorDisplayName ??
+              actorDisplayName({ name: '', email: '' }),
+          }
+        : null,
+      updatedAt: event.createdAt.toISOString(),
+    };
   }
 
   private toResponse(
     row: Awaited<ReturnType<typeof readSettingsRow>>,
     branch: { timeZone: string; days: Prisma.JsonValue } | null,
+    author: SettingsAuthor,
   ): SettingsResponse {
     const view: SettingsView = row
-      ? { ...rowToSettings(row), version: row.version }
-      : { ...defaultSettings(), version: 0 };
+      ? { ...rowToSettings(row), version: row.version, ...author }
+      : { ...defaultSettings(), version: 0, ...author };
     return {
       ...view,
       branchOpeningHours: branch

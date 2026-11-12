@@ -353,6 +353,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
     expect(Object.keys(res.body).sort()).toEqual(
       [
         'branchOpeningHours',
+        'closedDateReasons',
         'closedDates',
         'enabledSubtypes',
         'openingHours',
@@ -361,6 +362,8 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
         'slas',
         'templateCostText',
         'templateName',
+        'updatedAt',
+        'updatedBy',
         'version',
         'windowWarningMinutes',
       ].sort(),
@@ -1153,6 +1156,44 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       expect(iso(recomputed.claimDeadlineAt)).toBe('2026-11-10T12:15:00.000Z');
     });
 
+    it('copies the closed-date reasons like the dates; a stale expectedVersion 409 carries updatedBy', async () => {
+      const current = (await get(source)).body;
+      const withReasons = {
+        ...template,
+        closedDateReasons: { '2026-12-25': 'Navidad' },
+      };
+      await put(source, body(withReasons, current.version)).expect(200);
+      const res = await applyAll(source).expect(200);
+      expect(
+        res.body.tenantsApplied
+          .map((t: { tenantId: string }) => t.tenantId)
+          .sort(),
+      ).toEqual([tenantB, tenantD].sort());
+      for (const id of [tenantB, tenantD]) {
+        const row = await root.chatbotAttentionSettings.findUniqueOrThrow({
+          where: { tenantId: id },
+        });
+        expect(row.closedDateReasons).toEqual({ '2026-12-25': 'Navidad' });
+        expect((await get(id)).body.closedDateReasons).toEqual({
+          '2026-12-25': 'Navidad',
+        });
+      }
+      const stale = await applyAll(source, { expectedVersion: 0 }).expect(409);
+      expect(stale.body.current.updatedBy).toEqual({
+        id: userId,
+        displayName: 'Ana',
+      });
+      expect(typeof stale.body.current.updatedAt).toBe('string');
+      expect(stale.body.current.closedDateReasons).toEqual({
+        '2026-12-25': 'Navidad',
+      });
+      // the target shows who applied it (the caller) and when
+      expect((await get(tenantB)).body.updatedBy).toEqual({
+        id: userId,
+        displayName: 'Ana',
+      });
+    });
+
     it('is idempotent: a second run changes nothing', async () => {
       const res = await applyAll(source).expect(200);
       expect(res.body.tenantsApplied).toEqual([]);
@@ -1259,6 +1300,344 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
           message: 'The settings changed; reload them',
         });
         expect(JSON.stringify(withoutRead.body)).not.toContain('openingHours');
+      });
+    });
+  });
+
+  // ------------------------------------------------ S11 (T7f): additions
+
+  describe('S11: who saved, field errors, closed-date reasons', () => {
+    const tenantF: string = randomUUID();
+    const beto: string = randomUUID();
+    const futureUser: string = randomUUID();
+
+    beforeAll(async () => {
+      await prisma.tenant.create({
+        data: { id: tenantF, name: 'Sucursal F', slug: `cs-${tenantF}` },
+      });
+      for (const [id, name] of [
+        [beto, 'Beto'],
+        [futureUser, 'Carla'],
+      ]) {
+        await prisma.user.create({
+          data: {
+            id,
+            email: `${id}@settings.test`,
+            hashedPassword: 'x',
+            name,
+          },
+        });
+      }
+    });
+
+    afterAll(async () => {
+      await prisma.tenant.delete({ where: { id: tenantF } });
+      await prisma.user.deleteMany({
+        where: { id: { in: [beto, futureUser] } },
+      });
+    });
+
+    const putAs = (uid: string, body: object, tenantId = tenantF) =>
+      request(server())
+        .put('/chatbot-settings')
+        .set(as('manager', tenantId, uid))
+        .send(body);
+
+    describe('updatedBy / updatedAt', () => {
+      it('are null for a tenant on the defaults (no row)', async () => {
+        const res = await get(tenantF).expect(200);
+        expect(res.body).toMatchObject({
+          version: 0,
+          updatedBy: null,
+          updatedAt: null,
+          closedDateReasons: {},
+        });
+      });
+
+      it('name the last writer, copied from the audit; PUT answers them too', async () => {
+        const first = await putAs(beto, body(ALWAYS_OPEN(), 0)).expect(200);
+        const event =
+          await prisma.chatbotAttentionSettingsEvent.findFirstOrThrow({
+            where: { tenantId: tenantF },
+            orderBy: { createdAt: 'desc' },
+          });
+        expect(first.body.updatedBy).toEqual({ id: beto, displayName: 'Beto' });
+        expect(first.body.updatedAt).toBe(event.createdAt.toISOString());
+        const read = await get(tenantF).expect(200);
+        expect(read.body.updatedBy).toEqual({ id: beto, displayName: 'Beto' });
+        expect(read.body.updatedAt).toBe(first.body.updatedAt);
+
+        const second = await putAs(
+          userId,
+          body({ ...ALWAYS_OPEN(), windowWarningMinutes: 45 }, 1),
+        ).expect(200);
+        expect(second.body.updatedBy).toEqual({
+          id: userId,
+          displayName: 'Ana',
+        });
+        expect(
+          new Date(second.body.updatedAt).getTime(),
+        ).toBeGreaterThanOrEqual(new Date(first.body.updatedAt).getTime());
+      });
+
+      it('an identical PUT is a no-op and keeps who and when', async () => {
+        const before = (await get(tenantF)).body;
+        const same = await putAs(
+          beto,
+          body({ ...ALWAYS_OPEN(), windowWarningMinutes: 45 }, 2),
+        ).expect(200);
+        expect(same.body.version).toBe(2);
+        expect(same.body.updatedBy).toEqual(before.updatedBy);
+        expect(same.body.updatedAt).toBe(before.updatedAt);
+      });
+
+      it('the 409 current carries them', async () => {
+        const res = await putAs(beto, body(ALWAYS_OPEN(), 0)).expect(409);
+        expect(res.body.current.updatedBy).toEqual({
+          id: userId,
+          displayName: 'Ana',
+        });
+        expect(typeof res.body.current.updatedAt).toBe('string');
+      });
+
+      it('survive the deletion of the user (the name is the stored copy)', async () => {
+        await putAs(
+          futureUser,
+          body({ ...ALWAYS_OPEN(), windowWarningMinutes: 50 }, 2),
+        ).expect(200);
+        await prisma.user.delete({ where: { id: futureUser } });
+        const res = await get(tenantF).expect(200);
+        expect(res.body.updatedBy).toEqual({
+          id: futureUser,
+          displayName: 'Carla',
+        });
+      });
+    });
+
+    describe('closedDateReasons', () => {
+      const withReasons = (reasons?: Record<string, string>) => ({
+        ...ALWAYS_OPEN(),
+        windowWarningMinutes: 50,
+        closedDates: ['2026-12-25', '2026-01-01'],
+        ...(reasons ? { closedDateReasons: reasons } : {}),
+      });
+
+      it('are stored with the dates, returned by GET and PUT, closedDates stays string[]', async () => {
+        const res = await putAs(
+          beto,
+          body(
+            withReasons({ '2026-12-25': 'Navidad', '2026-01-01': 'Año nuevo' }),
+            3,
+          ),
+        ).expect(200);
+        expect(res.body.closedDates).toEqual(['2026-01-01', '2026-12-25']);
+        expect(res.body.closedDateReasons).toEqual({
+          '2026-01-01': 'Año nuevo',
+          '2026-12-25': 'Navidad',
+        });
+        const read = (await get(tenantF).expect(200)).body;
+        expect(read.closedDateReasons).toEqual(res.body.closedDateReasons);
+        expect(read.version).toBe(4);
+      });
+
+      it('changing only a reason is a real change (version +1); the same map is a no-op', async () => {
+        const changed = await putAs(
+          beto,
+          body(
+            withReasons({ '2026-12-25': 'Feriado', '2026-01-01': 'Año nuevo' }),
+            4,
+          ),
+        ).expect(200);
+        expect(changed.body.version).toBe(5);
+        const same = await putAs(
+          beto,
+          // another key order, same content
+          body(
+            withReasons({ '2026-01-01': 'Año nuevo', '2026-12-25': 'Feriado' }),
+            5,
+          ),
+        ).expect(200);
+        expect(same.body.version).toBe(5);
+      });
+
+      it('a reason for a date that is not closed is a 400 with fieldErrors, nothing saved', async () => {
+        const res = await putAs(
+          beto,
+          body(withReasons({ '2026-12-24': 'Nochebuena' }), 5),
+        ).expect(400);
+        expect(res.body).toMatchObject({
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+          reason: 'INVALID_CHATBOT_SETTINGS',
+          fieldErrors: [
+            {
+              path: 'closedDateReasons["2026-12-24"]',
+              code: 'REASON_WITHOUT_DATE',
+            },
+          ],
+        });
+        expect((await get(tenantF)).body.version).toBe(5);
+      });
+
+      it('omitting closedDateReasons clears them (a PUT replaces the object)', async () => {
+        const res = await putAs(beto, body(withReasons(), 5)).expect(200);
+        expect(res.body.closedDateReasons).toEqual({});
+        expect(res.body.version).toBe(6);
+      });
+
+      it('a reason of 81 characters or an empty one is INVALID_LENGTH', async () => {
+        const res = await putAs(
+          beto,
+          body(
+            withReasons({ '2026-12-25': 'x'.repeat(81), '2026-01-01': ' ' }),
+            6,
+          ),
+        ).expect(400);
+        expect(res.body.fieldErrors).toEqual(
+          expect.arrayContaining([
+            {
+              path: 'closedDateReasons["2026-12-25"]',
+              code: 'INVALID_LENGTH',
+            },
+            {
+              path: 'closedDateReasons["2026-01-01"]',
+              code: 'INVALID_LENGTH',
+            },
+          ]),
+        );
+      });
+    });
+
+    describe('400 VALIDATION_ERROR carries fieldErrors', () => {
+      const bad = async (body: object) => {
+        const res = await putAs(beto, body).expect(400);
+        return res.body as Record<string, any>;
+      };
+
+      it('a domain rule: same statusCode/code/reason/message as before plus the located list', async () => {
+        const settings = ALWAYS_OPEN();
+        settings.openingHours.days[1].ranges = [
+          { open: '09:00', close: '14:00' },
+          { open: '13:00', close: '18:00' },
+        ];
+        expect(await bad(body(settings, 6))).toEqual({
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+          reason: 'INVALID_OPENING_HOURS',
+          message: 'TUESDAY: ranges must not overlap or touch',
+          fieldErrors: [
+            { path: 'openingHours.days[1].ranges[1]', code: 'OVERLAP' },
+          ],
+        });
+      });
+
+      it('reports several problems at once, each with its path', async () => {
+        const settings = ALWAYS_OPEN();
+        settings.openingHours.timeZone = 'Mars/Olympus';
+        settings.openingHours.days[0].ranges = [
+          { open: '22:00', close: '02:00' },
+        ];
+        settings.closedDates = ['2026-12-25', '2026-02-30'];
+        settings.slas[5].claimMinutes = 100;
+        settings.slas[5].resolveMinutes = 50;
+        settings.slas[3].resolveMinutes = 10;
+        const res = await bad(body(settings, 6));
+        expect(res.fieldErrors).toEqual(
+          expect.arrayContaining([
+            { path: 'openingHours.timeZone', code: 'INVALID_TIMEZONE' },
+            {
+              path: 'openingHours.days[0].ranges[0]',
+              code: 'CROSSES_MIDNIGHT',
+            },
+            { path: 'closedDates[1]', code: 'INVALID_DATE' },
+            { path: 'slas[5].resolveMinutes', code: 'RESOLVE_BELOW_CLAIM' },
+            { path: 'slas[3].resolveMinutes', code: 'MUST_BE_NULL' },
+          ]),
+        );
+        expect(res.fieldErrors).toHaveLength(5);
+      });
+
+      it('shape errors (the DTO) get paths and codes too, with the generic envelope unchanged', async () => {
+        const settings = ALWAYS_OPEN();
+        settings.openingHours.days[2].ranges = [
+          { open: '9:00', close: '10:00' },
+        ];
+        const res = await bad(body(settings, 6));
+        expect(res).toMatchObject({
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid request',
+          fieldErrors: [
+            {
+              path: 'openingHours.days[2].ranges[0].open',
+              code: 'INVALID_TIME',
+            },
+          ],
+        });
+        expect(res.reason).toBeUndefined();
+      });
+
+      it('more than 6 ranges in a day is TOO_MANY_RANGES (settings), the 7th is the error', async () => {
+        const settings = ALWAYS_OPEN();
+        settings.openingHours.days[3].ranges = Array.from(
+          { length: 7 },
+          (_, n) => ({
+            open: `${String(n * 3).padStart(2, '0')}:00`,
+            close: `${String(n * 3).padStart(2, '0')}:30`,
+          }),
+        );
+        expect((await bad(body(settings, 6))).fieldErrors).toEqual([
+          { path: 'openingHours.days[3].ranges', code: 'TOO_MANY_RANGES' },
+        ]);
+      });
+
+      it('missing, mistyped, out of range and unknown fields', async () => {
+        const settings: Record<string, unknown> = {
+          ...ALWAYS_OPEN(),
+          tenantId: tenantA,
+          windowWarningMinutes: 'soon',
+        };
+        delete settings.receiptCloseMarginMinutes;
+        const res = await bad(settings);
+        expect(res.fieldErrors).toEqual(
+          expect.arrayContaining([
+            { path: 'expectedVersion', code: 'REQUIRED' },
+            { path: 'receiptCloseMarginMinutes', code: 'REQUIRED' },
+            { path: 'windowWarningMinutes', code: 'INVALID_TYPE' },
+            { path: 'tenantId', code: 'UNKNOWN_FIELD' },
+          ]),
+        );
+        const negative = await bad(body(ALWAYS_OPEN(), -1));
+        expect(negative.fieldErrors).toEqual([
+          { path: 'expectedVersion', code: 'OUT_OF_RANGE' },
+        ]);
+      });
+
+      it('never echoes what the caller sent', async () => {
+        const settings = ALWAYS_OPEN();
+        settings.templateCostText = 'SECRETO-123\u0000';
+        const res = await bad(body(settings, 6));
+        expect(JSON.stringify(res)).not.toContain('SECRETO-123');
+      });
+
+      it('apply-to-all validates its body the same way', async () => {
+        const res = await applyAll(
+          tenantA,
+          { dryRun: 'yes', expectedVersion: -1, extra: 1 },
+          'admin',
+        ).expect(400);
+        expect(res.body).toMatchObject({
+          statusCode: 400,
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid request',
+        });
+        expect(res.body.fieldErrors).toEqual(
+          expect.arrayContaining([
+            { path: 'dryRun', code: 'INVALID_TYPE' },
+            { path: 'expectedVersion', code: 'OUT_OF_RANGE' },
+            { path: 'extra', code: 'UNKNOWN_FIELD' },
+          ]),
+        );
       });
     });
   });

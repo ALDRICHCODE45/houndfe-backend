@@ -28,7 +28,7 @@ import type {
   RequestRecord,
 } from '../application/chatbot-request-reads.service';
 import { readDecision } from './chatbot-request-decision.reader';
-import { LAST_RELEASED } from './chatbot-sla-policy';
+import { LAST_RELEASED, readWindowWarningMinutes } from './chatbot-sla-policy';
 import { assignableUserWhere } from './assignable-users';
 import { phoneLookupPairs } from '../domain/canonical-phone';
 import { closedWindowCutoff } from '../domain/staff-inbox';
@@ -41,8 +41,6 @@ const GROUP_ROWS = 10;
 const MERGE_CANDIDATES = 20;
 const OTHER_OPEN = 20;
 const LINK_CANDIDATES = 10;
-/** Technical default of "ventana por cerrar" (§8) until unit 7 adds settings. */
-const WINDOW_WARNING_MS = 2 * 3_600_000;
 
 const OPEN = Prisma.sql`r."status" IN ('NEW', 'IN_PROGRESS')`;
 const URGENCY = Prisma.sql`(CASE WHEN r."status" = 'NEW' THEN r."claimDeadlineAt" ELSE r."resolveDeadlineAt" END)`;
@@ -171,6 +169,15 @@ const mergeCandidateWhere = (
 const and = (parts: Prisma.Sql[]) => Prisma.join(parts, ' AND ');
 const asDate = (part: string | null) => new Date(part as string);
 
+/**
+ * "Ventana por cerrar": the WhatsApp window closes within the tenant's
+ * `windowWarningMinutes` (S11), `(now, now + warning]`. Zero minutes is an
+ * empty range: the warning is off. Served by `chatbot_requests_open_window_idx`
+ * `(tenantId, whatsappWindowClosesAt)`.
+ */
+const windowClosingSoon = (now: Date, warningMs: number) =>
+  Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + warningMs)}`;
+
 /** Tab and filters as predicates on alias `r` (open tabs hit the partial indexes). */
 function inboxPredicates(
   tab: InboxTab,
@@ -178,6 +185,7 @@ function inboxPredicates(
   userId: string,
   now: Date,
   cutoff: Date,
+  windowWarningMs: number,
 ): Prisma.Sql[] {
   const parts: Prisma.Sql[] = [];
   if (tab === 'open' || tab === 'scheduled') parts.push(OPEN);
@@ -203,9 +211,7 @@ function inboxPredicates(
   }
   if (filters.overdue) parts.push(Prisma.sql`r."overdueAt" IS NOT NULL`);
   if (filters.windowClosingSoon) {
-    parts.push(
-      Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + WINDOW_WARNING_MS)}`,
-    );
+    parts.push(windowClosingSoon(now, windowWarningMs));
   }
   return parts;
 }
@@ -244,7 +250,14 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     cursor: Array<string | null> | null;
   }): Promise<GroupRecord[]> {
     const t = this.tenantId();
-    const preds = inboxPredicates(q.tab, q.filters, q.userId, q.now, q.cutoff);
+    const preds = inboxPredicates(
+      q.tab,
+      q.filters,
+      q.userId,
+      q.now,
+      q.cutoff,
+      await this.windowWarningMs(q.filters),
+    );
     if (q.filters.search) preds.push(searchPredicate(q.filters.search, t));
     const closed = q.tab === 'resolved' || q.tab === 'cancelled';
     const rows = closed
@@ -341,7 +354,16 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       ORDER BY p."lastClosedAt" DESC, p."customerKey" ASC, x."closedAt" DESC, x."id" DESC`);
   }
 
-  listByCustomer(q: {
+  /**
+   * The tenant's warning window in ms, read only when the filter needs it
+   * (one primary-key lookup per request, not per row).
+   */
+  private async windowWarningMs(filters: InboxFilters): Promise<number> {
+    if (!filters.windowClosingSoon) return 0;
+    return (await readWindowWarningMinutes(this.db, this.tenantId())) * 60_000;
+  }
+
+  async listByCustomer(q: {
     customerKey: string;
     tab: InboxTab;
     filters: InboxFilters;
@@ -354,7 +376,14 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     const closed = q.tab === 'resolved' || q.tab === 'cancelled';
     const preds = [
       Prisma.sql`r."customerKey" = ${q.customerKey}`,
-      ...inboxPredicates(q.tab, q.filters, q.userId, q.now, q.cutoff),
+      ...inboxPredicates(
+        q.tab,
+        q.filters,
+        q.userId,
+        q.now,
+        q.cutoff,
+        await this.windowWarningMs(q.filters),
+      ),
     ];
     // The same `q` predicate as the groups (R12 was decided by the service).
     if (q.filters.search) {
@@ -373,6 +402,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
 
   async counts(userId: string, now: Date): Promise<InboxCounts> {
     const t = this.tenantId();
+    const warningMs = (await readWindowWarningMinutes(this.db, t)) * 60_000;
     const open = (extra: Prisma.Sql) => Prisma.sql`(
       SELECT count(*)::int FROM "chatbot_requests" r
       WHERE r."tenantId" = ${t} AND ${OPEN} AND ${extra})`;
@@ -394,9 +424,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
           WHERE r."tenantId" = ${t} AND r."status" = 'IN_PROGRESS'
             AND r."assigneeUserId" = ${userId}) AS "mine",
         ${open(Prisma.sql`r."overdueAt" IS NOT NULL`)} AS "overdue",
-        ${open(
-          Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + WINDOW_WARNING_MS)}`,
-        )} AS "windowClosingSoon",
+        ${open(windowClosingSoon(now, warningMs))} AS "windowClosingSoon",
         ${open(Prisma.sql`r."scheduledFor" IS NOT NULL`)} AS "scheduled",
         ${open(Prisma.sql`r."needsReschedule"`)} AS "needsReschedule",
         ${closed7d('RESOLVED')} AS "resolved7d",

@@ -51,6 +51,7 @@ export interface SettingsRow {
   timeZone: string;
   days: unknown;
   closedDates: string[];
+  closedDateReasons: unknown;
   slas: unknown;
   windowWarningMinutes: number;
   templateName: string | null;
@@ -63,6 +64,16 @@ export interface SettingsRow {
   maxScheduledPerSlot: number;
 }
 
+/** The stored map with sorted keys (JSONB does not keep the written order). */
+const sortedReasons = (value: unknown): Record<string, string> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(
+        Object.entries(value as Record<string, string>).sort(([a], [b]) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        ),
+      )
+    : {};
+
 /** The stored row as the domain value (the row is written normalized). */
 export function rowToSettings(row: SettingsRow): AttentionSettings {
   return {
@@ -71,6 +82,7 @@ export function rowToSettings(row: SettingsRow): AttentionSettings {
       days: row.days as AttentionSettings['openingHours']['days'],
     },
     closedDates: [...row.closedDates],
+    closedDateReasons: sortedReasons(row.closedDateReasons),
     slas: row.slas as AttentionSettings['slas'],
     windowWarningMinutes: row.windowWarningMinutes,
     templateName: row.templateName,
@@ -113,7 +125,7 @@ export async function readSettingsRow(
         : Prisma.empty;
   const read = async () => {
     const rows = await db.$queryRaw<SettingsRow[]>(Prisma.sql`
-      SELECT "version", "timeZone", "days", "closedDates", "slas",
+      SELECT "version", "timeZone", "days", "closedDates", "closedDateReasons", "slas",
              "windowWarningMinutes", "templateName", "templateCostText",
              "enabledSubtypes"::text[] AS "enabledSubtypes",
              "receiptCloseMarginMinutes", "schedulingEnabled", "slotMinutes",
@@ -129,6 +141,25 @@ export async function readSettingsRow(
     SELECT 1 AS "locked" FROM "tenants" WHERE "id" = ${tenantId}
     ${lock === 'SHARE' ? Prisma.sql`FOR SHARE` : Prisma.sql`FOR NO KEY UPDATE`}`);
   return read();
+}
+
+/**
+ * How long before the 24 h WhatsApp window closes a request counts as
+ * "closing soon" (S11): the tenant's `windowWarningMinutes`, or the default
+ * while it has no settings row. One primary-key read (`tenantId` is the key),
+ * so the inbox filter and `/counts` never join or loop per row.
+ */
+export async function readWindowWarningMinutes(
+  db: RawDb,
+  tenantId: string,
+): Promise<number> {
+  const rows = await db.$queryRaw<Array<{ windowWarningMinutes: number }>>(
+    Prisma.sql`SELECT "windowWarningMinutes" FROM "chatbot_attention_settings"
+      WHERE "tenantId" = ${tenantId}`,
+  );
+  return (
+    rows[0]?.windowWarningMinutes ?? defaultSettings().windowWarningMinutes
+  );
 }
 
 export async function loadSlaPolicy(
