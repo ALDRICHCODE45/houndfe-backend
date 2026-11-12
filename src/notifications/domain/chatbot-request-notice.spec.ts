@@ -2,6 +2,7 @@ import {
   EMAIL_BATCH_WINDOW_MS,
   NOTICE_OUTBOX_EVENT_TYPES,
   NOTICE_TYPES,
+  audienceFor,
   audienceOf,
   batchWindowEnd,
   emailModeOf,
@@ -199,4 +200,46 @@ describe('slaNoticeDropReason: a held SLA notice that no longer applies is dropp
       expect(slaNoticeDropReason(notice(type), null)).toBeNull();
     },
   );
+});
+
+describe('live conversation notices (unit 11, §4.6, §5.1)', () => {
+  it('"el cliente escribió" and the 5-minute notice go to the attendee; the 15-minute one to the reassigners', () => {
+    expect(audienceFor({ type: 'CONVERSATION_CUSTOMER_MESSAGE' })).toBe('USER');
+    expect(audienceFor({ type: 'CONVERSATION_UNANSWERED', level: 5 })).toBe(
+      'USER',
+    );
+    expect(audienceFor({ type: 'CONVERSATION_UNANSWERED', level: 15 })).toBe(
+      'REASSIGNERS',
+    );
+    // every other type keeps its fixed audience
+    expect(audienceFor({ type: 'REQUEST_OVERDUE', level: 15 })).toBe(
+      'ESCALATION_VIEWERS',
+    );
+  });
+
+  it('never sends email (§5.1 "Correo: No")', () => {
+    expect(emailModeOf('CONVERSATION_CUSTOMER_MESSAGE', 'TALK_TO_HUMAN')).toBe(
+      'NONE',
+    );
+    expect(emailModeOf('CONVERSATION_UNANSWERED', 'COMPLAINT')).toBe('NONE');
+  });
+
+  it('writes the in-app text from type and payload only', () => {
+    expect(
+      noticeText('CONVERSATION_CUSTOMER_MESSAGE', {
+        folio: 12,
+        subtype: 'COMPLAINT',
+      }),
+    ).toEqual({ title: 'El cliente escribió', body: 'Queja · S-000012' });
+    expect(
+      noticeText('CONVERSATION_UNANSWERED', {
+        folio: 12,
+        subtype: 'TALK_TO_HUMAN',
+        level: 15,
+      }).title,
+    ).toBe('Cliente esperando respuesta (15 min)');
+    expect(
+      noticeText('CONVERSATION_UNANSWERED', { folio: 1, subtype: 'X' }).title,
+    ).toBe('Cliente esperando respuesta');
+  });
 });

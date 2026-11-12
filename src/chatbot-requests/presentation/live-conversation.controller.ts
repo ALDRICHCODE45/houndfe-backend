@@ -4,6 +4,7 @@
  *
  * Staff (JWT + tenant + active user + `read` and `update:ChatbotRequest`):
  *   POST /chatbot-requests/:id/messages   {clientMessageId, expectedEpoch, text}
+ *   POST /chatbot-requests/:id/template   {expectedEpoch}  (§4.5, the paid template)
  *        `Idempotency-Key` MUST equal `clientMessageId` (§12.12).
  * Bot (`svc_` credential; the tenant comes from the guard):
  *   POST /chatbot-api/conversations/:conversationRef/session-ack  `conversation:write`, `control`
@@ -61,6 +62,7 @@ import {
 import {
   IdempotencyKey,
   StaffMessageDto,
+  TemplateRequestDto,
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
 
@@ -222,8 +224,30 @@ export class LiveConversationStaffController {
       clientMessageId: body.clientMessageId.toLowerCase(),
       expectedEpoch: body.expectedEpoch,
       content: parseStaffMessageContent(body),
-      // The paid-template command is not part of the first slice of unit 11.
-      templateAllowed: false,
+    });
+  }
+
+  /**
+   * §4.5: "Enviar plantilla". `Idempotency-Key` (uuid) identifies the template
+   * message (a retry answers the same one). Refusals: `409 WINDOW_OPEN`,
+   * `422 TEMPLATE_NOT_CONFIGURED`, `409 TEMPLATE_ALREADY_SENT` (see the store).
+   */
+  @Post(':id/template')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  async requestTemplate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() body: TemplateRequestDto,
+    @Req() req: StaffRequest,
+  ): Promise<StaffMessageResult> {
+    if (!req.user) throw new ForbiddenException();
+    return this.store.requestTemplate({
+      requestId: id,
+      actorUserId: req.user.userId,
+      clientMessageId: key,
+      expectedEpoch: body.expectedEpoch,
     });
   }
 }

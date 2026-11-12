@@ -50,6 +50,7 @@ export class LiveSessionSweepScheduler {
       reverted: 0,
       ended: 0,
       idleEnded: 0,
+      noticed: 0,
       skipped: 0,
       failed: 0,
     };
@@ -67,6 +68,8 @@ export class LiveSessionSweepScheduler {
         break;
       }
     }
+    // T11d: the notice phase (customer wrote, 5 and 15 min unanswered).
+    total.noticed += (await this.store.runNoticeBatch(now)).noticed;
     return total;
   }
 }

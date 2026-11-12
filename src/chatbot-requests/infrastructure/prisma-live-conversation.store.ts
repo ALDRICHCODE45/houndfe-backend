@@ -12,7 +12,11 @@ import { randomUUID } from 'node:crypto';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import { actorDisplayName } from '../domain/actor-display-name';
-import { buildStaffMessagePayload, FEED_TYPE } from '../domain/chatbot-feed';
+import {
+  buildStaffMessagePayload,
+  buildTemplateRequestedPayload,
+  FEED_TYPE,
+} from '../domain/chatbot-feed';
 import {
   decideSessionAck,
   staffFirstName,
@@ -21,6 +25,7 @@ import {
 } from '../domain/live-session';
 import { mediaMatchesMessageType } from '../../conversations/domain/conversation-media';
 import { insertFeedItems } from './chatbot-feed-writes';
+import { readSettingsRow } from './chatbot-sla-policy';
 import { lockRequestRow, type TenantClient } from './chatbot-request-writes';
 import {
   bumpVersion,
@@ -45,9 +50,11 @@ export interface StaffMessageResult {
     seq: number;
     direction: 'OUT';
     author: 'STAFF';
-    type: 'TEXT' | 'IMAGE' | 'DOCUMENT';
+    type: 'TEXT' | 'IMAGE' | 'DOCUMENT' | 'TEMPLATE';
     /** The text, or the caption of a media message (`''` when none). */
     text: string;
+    /** TEMPLATE only: the approved template the tenant's settings name. */
+    templateName?: string;
     /** IMAGE/DOCUMENT only. */
     media?: { id: string; mimeType: string; filename: string | null };
     deliveryStatus: string;
@@ -283,7 +290,6 @@ export class PrismaLiveConversationStore {
     clientMessageId: string;
     expectedEpoch: number;
     content: StaffMessageContent;
-    templateAllowed: boolean;
   }): Promise<StaffMessageResult> {
     const { content } = input;
     // What the stored `text` column holds: the text, or the caption.
@@ -385,20 +391,22 @@ export class PrismaLiveConversationStore {
         tenantId,
         request.conversationRef as string,
       );
-      const [window] = await tx.$queryRaw<
-        { lastCustomerMessageAt: Date | null }[]
-      >(Prisma.sql`
-        SELECT "lastCustomerMessageAt" FROM "chatbot_requests"
-        WHERE "tenantId" = ${tenantId} AND "id" = ${request.id}`);
-      const closesAt = whatsappWindowClosesAt(
-        conversation.lastCustomerMessageAt,
-        window?.lastCustomerMessageAt ?? null,
-        conversation.windowClosedAt,
+      const window = await this.windowOf(
+        tx,
+        tenantId,
+        request.id,
+        conversation,
       );
-      if (!closesAt || closesAt.getTime() <= Date.now()) {
+      if (!window.open) {
+        const template = await this.templateOffer(
+          tx,
+          tenantId,
+          request.id,
+          window.key,
+        );
         throw new ChatbotRequestCommandError('WINDOW_CLOSED', 409, current, {
-          templateAllowed: input.templateAllowed,
-          whatsappWindowClosesAt: closesAt?.toISOString() ?? null,
+          templateAllowed: template.allowed,
+          whatsappWindowClosesAt: window.closesAt?.toISOString() ?? null,
         });
       }
 
@@ -483,6 +491,300 @@ export class PrismaLiveConversationStore {
         input.clientMessageId,
         staff,
         media ?? undefined,
+      );
+    });
+  }
+
+  /**
+   * §4.5: the chat's 24 h window as the staff checks see it. `key` is the
+   * instant the window closed (it identifies "this closed window" for the
+   * once-per-window template); with no customer message known at all it is
+   * the request's creation time, which no later window can share.
+   */
+  private async windowOf(
+    tx: TenantClient,
+    tenantId: string,
+    requestId: string,
+    conversation: {
+      lastCustomerMessageAt: Date | null;
+      windowClosedAt: Date | null;
+    },
+  ): Promise<{ open: boolean; closesAt: Date | null; key: Date }> {
+    const [row] = await tx.$queryRaw<
+      { lastCustomerMessageAt: Date | null; createdAt: Date }[]
+    >(Prisma.sql`
+      SELECT "lastCustomerMessageAt", "createdAt" FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}`);
+    const closesAt = whatsappWindowClosesAt(
+      conversation.lastCustomerMessageAt,
+      row?.lastCustomerMessageAt ?? null,
+      conversation.windowClosedAt,
+    );
+    return {
+      open: closesAt !== null && closesAt.getTime() > Date.now(),
+      closesAt,
+      key: closesAt ?? row?.createdAt,
+    };
+  }
+
+  /**
+   * Can a template be requested for this closed window? It needs the tenant's
+   * approved template name and no live template for the window: a row whose
+   * message is `FAILED` (Meta refused it, or a later failed status) may be
+   * replaced; QUEUED, SENT, DELIVERED, READ and UNKNOWN (it may have been
+   * sent, and it costs money) may not. The row is locked: a concurrent click
+   * waits for this transaction (the request row already serializes clicks).
+   */
+  private async templateOffer(
+    tx: TenantClient,
+    tenantId: string,
+    requestId: string,
+    windowKey: Date,
+  ): Promise<{
+    allowed: boolean;
+    name: string | null;
+    languageCode: string;
+    existingId: string | null;
+    taken: boolean;
+  }> {
+    const settings = await readSettingsRow(tx, tenantId);
+    const [existing] = await tx.$queryRaw<
+      { id: string; deliveryStatus: string | null }[]
+    >(Prisma.sql`
+      SELECT t."id", m."deliveryStatus"::text AS "deliveryStatus"
+      FROM "chatbot_session_templates" t
+      LEFT JOIN "conversation_messages" m
+        ON m."tenantId" = t."tenantId" AND m."id" = t."messageId"
+      WHERE t."tenantId" = ${tenantId} AND t."requestId" = ${requestId}
+        AND t."windowClosedAt" = ${windowKey}
+      FOR UPDATE OF t`);
+    const taken =
+      !!existing &&
+      existing.deliveryStatus !== null &&
+      existing.deliveryStatus !== 'FAILED';
+    return {
+      allowed: !!settings?.templateName && !taken,
+      name: settings?.templateName ?? null,
+      languageCode: settings?.templateLanguageCode ?? 'es_MX',
+      existingId: existing?.id ?? null,
+      taken,
+    };
+  }
+
+  /**
+   * §4.5 / S16 8: the attendee's "Enviar plantilla" button. ONE transaction,
+   * the same gates as a message (request, assignee, replay of the key, session
+   * ACTIVE, epoch) and then the inverse window check: it is refused while the
+   * window is open (`409 WINDOW_OPEN`), without a configured template name
+   * (`422 TEMPLATE_NOT_CONFIGURED`) and when this closed window already has a
+   * live template (`409 TEMPLATE_ALREADY_SENT`). It stores a `TEMPLATE` message
+   * (`text` = the template name), enqueues `template.requested`, records the
+   * once-per-window row (replacing the message of a failed one) and a
+   * `TEMPLATE_SENT` audit event. Nothing automatic ever calls it.
+   */
+  async requestTemplate(input: {
+    requestId: string;
+    actorUserId: string;
+    clientMessageId: string;
+    expectedEpoch: number;
+  }): Promise<StaffMessageResult> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    return this.tenantPrisma.runInTransaction(async () => {
+      const tx = this.tenantPrisma.getClient();
+      const request = await lockRequestRow(tx, tenantId, input.requestId);
+      if (!request) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+      const current = {
+        version: request.version,
+        status: request.status,
+        claimedBy:
+          request.assigneeUserId && request.assigneeDisplayName
+            ? {
+                id: request.assigneeUserId,
+                displayName: request.assigneeDisplayName,
+              }
+            : null,
+      };
+      if (request.kind !== 'CONVERSATION') {
+        throw new ChatbotRequestCommandError(
+          'ACTION_NOT_ALLOWED',
+          422,
+          current,
+        );
+      }
+      if (request.assigneeUserId !== input.actorUserId) {
+        throw new ChatbotRequestCommandError('NOT_ASSIGNEE', 403);
+      }
+      const [user] = await tx.$queryRaw<{ name: string; email: string }[]>(
+        Prisma.sql`SELECT "name", "email" FROM "users" WHERE "id" = ${input.actorUserId}`,
+      );
+      const staff = {
+        id: input.actorUserId,
+        displayName: actorDisplayName(user ?? { name: '', email: '' }),
+      };
+
+      const [existing] = await tx.$queryRaw<
+        {
+          id: string;
+          seq: number;
+          type: string;
+          text: string | null;
+          staffUserId: string | null;
+          deliveryStatus: string | null;
+          receivedAt: Date;
+          requestMatches: boolean;
+        }[]
+      >(Prisma.sql`
+        SELECT m."id", m."seq", m."type"::text AS "type", m."text",
+               m."staffUserId", m."deliveryStatus"::text AS "deliveryStatus",
+               m."receivedAt",
+               (c."conversationRef" = ${request.conversationRef}) AS "requestMatches"
+        FROM "conversation_messages" m
+        JOIN "chatbot_conversations" c
+          ON c."tenantId" = m."tenantId" AND c."id" = m."conversationId"
+        WHERE m."tenantId" = ${tenantId} AND m."clientMessageId" = ${input.clientMessageId}`);
+      if (existing) {
+        if (
+          !existing.requestMatches ||
+          existing.staffUserId !== input.actorUserId ||
+          existing.type !== 'TEMPLATE'
+        ) {
+          throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
+        }
+        return this.toResult(existing, input.clientMessageId, staff);
+      }
+
+      const session = await lockLatestSession(tx, tenantId, request.id);
+      if (!session || session.state !== 'ACTIVE') {
+        throw new ChatbotRequestCommandError(
+          'SESSION_NOT_ACTIVE',
+          409,
+          current,
+          { sessionState: session?.state ?? null },
+        );
+      }
+      if (input.expectedEpoch !== session.epoch) {
+        throw new ChatbotRequestCommandError('STALE_EPOCH', 409, current, {
+          currentEpoch: session.epoch,
+        });
+      }
+      const conversation = await lockConversation(
+        tx,
+        tenantId,
+        request.conversationRef as string,
+      );
+      const window = await this.windowOf(
+        tx,
+        tenantId,
+        request.id,
+        conversation,
+      );
+      if (window.open) {
+        throw new ChatbotRequestCommandError('WINDOW_OPEN', 409, current, {
+          whatsappWindowClosesAt: window.closesAt?.toISOString() ?? null,
+        });
+      }
+      const offer = await this.templateOffer(
+        tx,
+        tenantId,
+        request.id,
+        window.key,
+      );
+      if (!offer.name) {
+        throw new ChatbotRequestCommandError('TEMPLATE_NOT_CONFIGURED', 422);
+      }
+      if (offer.taken) {
+        throw new ChatbotRequestCommandError(
+          'TEMPLATE_ALREADY_SENT',
+          409,
+          current,
+        );
+      }
+
+      const messageId = randomUUID();
+      const seq = conversation.nextSeq;
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "chatbot_conversations"
+        SET "nextSeq" = ${seq + 1}, "updatedAt" = now()
+        WHERE "id" = ${conversation.id}`);
+      const [stored] = await tx.$queryRaw<{ receivedAt: Date }[]>(Prisma.sql`
+        INSERT INTO "conversation_messages"
+          ("id", "tenantId", "conversationId", "seq", "direction", "author",
+           "staffUserId", "clientMessageId", "type", "text", "receivedAt",
+           "deliveryStatus", "purgeAfter")
+        VALUES (${messageId}, ${tenantId}, ${conversation.id}, ${seq}, 'OUT',
+                'STAFF', ${input.actorUserId}, ${input.clientMessageId},
+                'TEMPLATE'::"ConversationMessageType", ${offer.name}, now(),
+                'QUEUED', now() + interval '12 months')
+        RETURNING "receivedAt"`);
+      if (offer.existingId) {
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE "chatbot_session_templates"
+          SET "messageId" = ${messageId}, "sessionId" = ${session.id}
+          WHERE "tenantId" = ${tenantId} AND "id" = ${offer.existingId}`);
+      } else {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO "chatbot_session_templates"
+            ("id", "tenantId", "requestId", "sessionId", "windowClosedAt",
+             "messageId")
+          VALUES (${randomUUID()}, ${tenantId}, ${request.id}, ${session.id},
+                  ${window.key}, ${messageId})`);
+      }
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "chatbot_live_sessions"
+        SET "lastStaffActivityAt" = now(), "updatedAt" = now()
+        WHERE "id" = ${session.id}`);
+      await insertFeedItems(tx, tenantId, [
+        {
+          requestId: request.id,
+          type: FEED_TYPE.templateRequested,
+          conversationRef: request.conversationRef,
+          payload: buildTemplateRequestedPayload({
+            requestId: request.id,
+            handoffEpoch: session.epoch,
+            seq,
+            messageId,
+            templateName: offer.name,
+            languageCode: offer.languageCode,
+          }),
+        },
+      ]);
+      await tx.chatbotRequestEvent.create({
+        data: {
+          tenantId,
+          requestId: request.id,
+          type: 'TEMPLATE_SENT',
+          actorKind: 'USER',
+          actorId: input.actorUserId,
+          actorDisplayName: staff.displayName,
+          version: request.version,
+          data: {
+            messageId,
+            templateName: offer.name,
+            languageCode: offer.languageCode,
+            handoffEpoch: session.epoch,
+          },
+        },
+      });
+      await emitRealtimeEvents(tx, [
+        {
+          tenantId,
+          userId: null,
+          type: 'conversation.message',
+          requestId: request.id,
+          payload: { messageId, seq },
+        },
+      ]);
+      return this.toResult(
+        {
+          id: messageId,
+          seq,
+          type: 'TEMPLATE',
+          text: offer.name,
+          deliveryStatus: 'QUEUED',
+          receivedAt: stored.receivedAt,
+        },
+        input.clientMessageId,
+        staff,
       );
     });
   }
@@ -592,8 +894,11 @@ export class PrismaLiveConversationStore {
         seq: row.seq,
         direction: 'OUT',
         author: 'STAFF',
-        type: (row.type ?? 'TEXT') as 'TEXT' | 'IMAGE' | 'DOCUMENT',
-        text: row.text ?? '',
+        type: (row.type ?? 'TEXT') as StaffMessageResult['message']['type'],
+        text: row.type === 'TEMPLATE' ? '' : (row.text ?? ''),
+        ...(row.type === 'TEMPLATE' && row.text
+          ? { templateName: row.text }
+          : {}),
         ...(media
           ? {
               media: {

@@ -32,6 +32,10 @@ export const SESSION_TIMING = {
   idleEndMs: 2 * 3_600_000,
   /** The customer silent this long: "Finalizar" needs no confirmation (§4.6). */
   finishIdleMs: 30 * 60_000,
+  /** Customer message unanswered this long: notice to the attendee (§4.6). */
+  unansweredAttendeeMs: 5 * 60_000,
+  /** … and this long: notice to whoever may reassign (§4.6). */
+  unansweredReassignMs: 15 * 60_000,
 } as const;
 
 export const WHATSAPP_WINDOW_MS = 24 * 3_600_000;

@@ -69,7 +69,7 @@ The message is stored in the same transaction as the item the bot reads, so it e
 | `403 NOT_ASSIGNEE`                                              | You do not hold the request                                                                                                                       |
 | `409 SESSION_NOT_ACTIVE` `{sessionState}`                       | `STARTING` ("Conectando…"), `ENDING`, ended, or no session                                                                                        |
 | `409 STALE_EPOCH` `{currentEpoch}`                              | `expectedEpoch` is not the current one (reload the row)                                                                                           |
-| `409 WINDOW_CLOSED` `{templateAllowed, whatsappWindowClosesAt}` | The 24 h window is closed. **`templateAllowed` is `false` in this slice** (the paid template command is not built yet): show the composer blocked |
+| `409 WINDOW_CLOSED` `{templateAllowed, whatsappWindowClosesAt}` | The 24 h window is closed. Block the composer. **`templateAllowed: true`** means "Enviar plantilla" can be pressed now (a template name is configured and this closed window has no live template): see section 3c |
 | `422 ACTION_NOT_ALLOWED`                                        | Not a conversation                                                                                                                                |
 | `404`, `400`, `401`, `403 INSUFFICIENT_PERMISSIONS`             | As everywhere                                                                                                                                     |
 
@@ -125,6 +125,36 @@ Two calls. Only the assignee, only while the session is `ACTIVE`, same permissio
 
 **Showing it.** In the conversation (`GET …/conversation`) and in `conversation.message`, the item has `type` `IMAGE`/`DOCUMENT`, `text` = caption and `media {id, mimeType, sizeBytes, purged, …}`. Open the bytes with `GET /chatbot-media/:id` (authenticated, `Authorization` header): the attendee may open the files of **their session's** messages without `read:ChatbotConversation` (others still need it).
 
+## 3c. The paid template (T11d, §4.5): `POST /chatbot-requests/:id/template`
+
+With the 24 h window closed the attendee cannot write; the only way to reach the customer is the **paid template**, sent **only when the attendee presses a button** (nothing automatic ever sends it). It costs money, so show `templateCostText` (settings) before the confirmation.
+
+`POST /chatbot-requests/:id/template`, permissions `read` + `update:ChatbotRequest`, header `Idempotency-Key: <uuid>` (it identifies the template message: a retry with the same key answers the same message), body **exactly** `{ "expectedEpoch": <integer> }` (the template name and language come from the branch settings; no other key is accepted).
+
+`200` answers like a text message, with `type: "TEMPLATE"` and the `templateName`:
+
+```json
+{ "message": { "id": "…", "seq": 21, "direction": "OUT", "author": "STAFF", "type": "TEMPLATE",
+               "text": "", "templateName": "seguimiento_pedido", "deliveryStatus": "QUEUED",
+               "clientMessageId": "<the Idempotency-Key>", "staff": { "id": "…", "displayName": "…" },
+               "createdAt": "…" } }
+```
+
+The message joins the thread (`conversation.message` SSE, ordered by `seq`) and its `deliveryStatus` moves with `message.status` exactly as a text message does (`QUEUED` → `SENT` → `DELIVERED` → `READ`, `UNKNOWN`, `FAILED`). **A template is never `DEFERRED`** (the bot may not defer it). When the customer answers the template the window opens again (`WINDOW_CLOSED` stops) and the composer works.
+
+| Error | When |
+| --- | --- |
+| `409 WINDOW_OPEN` `{whatsappWindowClosesAt}` | The window is still open: write a message instead |
+| `422 TEMPLATE_NOT_CONFIGURED` | The branch has no `templateName` in its settings (send the admin to the settings screen) |
+| `409 TEMPLATE_ALREADY_SENT` | This closed window already has a live template: queued, sent, delivered, read **or of unknown delivery** (it may have been sent, and it costs money). Once per closed window |
+| `403 NOT_ASSIGNEE`, `409 SESSION_NOT_ACTIVE`, `409 STALE_EPOCH` `{currentEpoch}`, `422 ACTION_NOT_ALLOWED` | As for a message |
+| `409 IDEMPOTENCY_CONFLICT` | The key already identifies something that is not your template message of this request |
+| `404`, `400`, `401`, `403 INSUFFICIENT_PERMISSIONS` | As everywhere |
+
+**Retry.** A template whose message ended `FAILED` can be requested again (a **new** `Idempotency-Key`): Meta refused it (the bot's `STALE`) or WhatsApp reported a failure after accepting it. The new request replaces the failed one for that window. `UNKNOWN` ("Entrega dudosa") does **not** allow a retry.
+
+**Button state.** Enable "Enviar plantilla" when the last text send answered `WINDOW_CLOSED {templateAllowed: true}` (or from your own knowledge of the window and the settings). `templateAllowed` is evaluated at that moment: after a template is pending it is `false`, after a failed one it is `true` again.
+
 ## 4. Finish: `POST /chatbot-requests/:id/finish`
 
 `read` + `update:ChatbotRequest`; `Idempotency-Key`; body `{ "expectedVersion": 5, "note": "Resuelto por teléfono", "complaintOutcome": "NO_ACTION" }`. `note` is internal, 1 to 1000 characters, required. `complaintOutcome` (`RETURN | REPLACEMENT | REFUND | NO_ACTION`) is **stored only**: nothing is triggered (D19). It is optional here; making it mandatory for `COMPLAINT` belongs to unit 12.
@@ -146,5 +176,6 @@ Two calls. Only the assignee, only while the session is `ACTIVE`, same permissio
 - **Release.** `release` of a live request is `422 ACTION_NOT_ALLOWED`: a live conversation never goes back to `NEW` while the bot is muted. The way out is `finish`; a reassigner can force it. (The proposal's §4.2 sentence "release ≡ return to bot" is implemented as that.)
 - **Reassign** (STARTING or ACTIVE) keeps the epoch and the session and moves it to the new attendee: the previous attendee can no longer write (`403 NOT_ASSIGNEE`), the new one can. The bot tells the customer "Ahora te atiende <nombre>" (owner decision Q2, first name only). You get the usual `request.reassigned` SSE event; the session state does not change, so there is **no** `session.*` event for it.
 - **Cancel** stays `WAITING`-only (`409 CANCEL_NOT_ALLOWED` while a session runs), as before.
-- **Not built yet:** the template command and `templateCostText` in the detail (the `templateLanguageCode` setting already exists, handoff 16); the "5/15 minutes unanswered" and "customer wrote" notices; the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
-- **Revert notice.** When the start reverts (start timeout) you get `request.released` + `session.ended` (state `WAITING`); there is no persistent notification yet.
+- **Notices (T11d).** Three in-app notices, never by email, never held outside business hours (a live chat's clocks do not pause): `CONVERSATION_CUSTOMER_MESSAGE` ("El cliente escribió", the attendee, once per unanswered burst: not again until the attendee has replied), `CONVERSATION_UNANSWERED` level 5 ("Cliente esperando respuesta (5 min)", the attendee) and level 15 (same title with 15, whoever holds `update:ChatbotRequestAssignment`). `payload` carries `{folio, subtype}` and, for the unanswered one, `level: 5 | 15`; the `title`/`body` come ready from `GET /notifications`. They are written by the backend's 10-second session sweep, so allow up to ~10 s after the customer's message. Only the highest level due is sent (a delayed sweep sends the 15-minute one, not both). A reply from the attendee stops the clock; a newer customer message restarts it.
+- **Not built yet:** `templateCostText` in the detail (the `templateLanguageCode` setting exists, handoff 16); the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
+- **Revert notice.** When the start reverts (start timeout) you get `request.released` + `session.ended` (state `WAITING`); there is no persistent notification for it (the realtime events are the notice; §12.15 only requires the bot to be told, which the feed item `conversation.ended START_TIMEOUT` does).

@@ -32,6 +32,9 @@ export const NOTICE_TYPES = [
   'REQUEST_CLAIM_REMINDER',
   'REQUEST_ESCALATION',
   'REQUEST_OVERDUE',
+  // Unit 11 (§4.6, §5.1): the live conversation. In-app only, never held.
+  'CONVERSATION_CUSTOMER_MESSAGE',
+  'CONVERSATION_UNANSWERED',
 ] as const;
 export type NoticeType = (typeof NOTICE_TYPES)[number];
 
@@ -40,7 +43,11 @@ export type NoticeType = (typeof NOTICE_TYPES)[number];
  * permissions when the notify row is consumed; `USER` names the person in the
  * row itself.
  */
-export type NoticeAudience = 'HANDLERS' | 'ESCALATION_VIEWERS' | 'USER';
+export type NoticeAudience =
+  | 'HANDLERS'
+  | 'ESCALATION_VIEWERS'
+  | 'REASSIGNERS'
+  | 'USER';
 
 const AUDIENCE: Record<NoticeType, NoticeAudience> = {
   REQUEST_CREATED: 'HANDLERS',
@@ -49,9 +56,29 @@ const AUDIENCE: Record<NoticeType, NoticeAudience> = {
   REQUEST_OVERDUE: 'ESCALATION_VIEWERS',
   REQUEST_REASSIGNED: 'USER',
   REQUEST_CANCELLED: 'USER',
+  CONVERSATION_CUSTOMER_MESSAGE: 'USER',
+  CONVERSATION_UNANSWERED: 'USER',
 };
 
 export const audienceOf = (type: NoticeType): NoticeAudience => AUDIENCE[type];
+
+/** Minutes the customer waited, as a live-conversation notice carries it. */
+export const UNANSWERED_LEVELS = [5, 15] as const;
+export type UnansweredLevel = (typeof UNANSWERED_LEVELS)[number];
+
+/**
+ * The audience of ONE notice. Every type has a fixed audience except
+ * `CONVERSATION_UNANSWERED`: at 5 minutes it is the attendee (`USER`), at 15
+ * minutes it escalates to whoever may reassign (§4.6).
+ */
+export function audienceFor(notice: {
+  type: NoticeType;
+  level?: UnansweredLevel;
+}): NoticeAudience {
+  return notice.type === 'CONVERSATION_UNANSWERED' && notice.level === 15
+    ? 'REASSIGNERS'
+    : AUDIENCE[notice.type];
+}
 
 /** Grants a person needs, as `[action, subject]` pairs (all of them). */
 export const AUDIENCE_GRANTS: Record<
@@ -64,6 +91,8 @@ export const AUDIENCE_GRANTS: Record<
     ['update', 'ChatbotRequest'],
   ],
   ESCALATION_VIEWERS: [['read', 'ChatbotEscalation']],
+  // §4.6: "quienes tienen update:ChatbotRequestAssignment".
+  REASSIGNERS: [['update', 'ChatbotRequestAssignment']],
 };
 
 /**
@@ -103,6 +132,8 @@ export interface ChatbotRequestNotice {
    * across it is dropped at consume time.
    */
   claimCycle?: number;
+  /** `CONVERSATION_UNANSWERED` only: 5 (attendee) or 15 (reassigners). */
+  level?: UnansweredLevel;
 }
 
 /**
@@ -125,6 +156,8 @@ export interface NoticePayload {
   cause?: ClosedCause;
   /** `REQUEST_ESCALATION` / `REQUEST_OVERDUE` only; absent on older rows. */
   reason?: NoticeReason;
+  /** `CONVERSATION_UNANSWERED` only. */
+  level?: UnansweredLevel;
 }
 
 // ------------------------------------------------------------------- email
@@ -142,7 +175,13 @@ const IMMEDIATE_SUBTYPES: ReadonlySet<string> = new Set([
  * with email go one per event; a customer cancel is in-app only.
  */
 export function emailModeOf(type: NoticeType, subtype: string): EmailMode {
-  if (type === 'REQUEST_CANCELLED') return 'NONE';
+  if (
+    type === 'REQUEST_CANCELLED' ||
+    type === 'CONVERSATION_CUSTOMER_MESSAGE' ||
+    type === 'CONVERSATION_UNANSWERED'
+  ) {
+    return 'NONE';
+  }
   if (type === 'REQUEST_CREATED' && !IMMEDIATE_SUBTYPES.has(subtype)) {
     return 'BATCH';
   }
@@ -190,6 +229,8 @@ const TITLE: Record<NoticeType, string> = {
   REQUEST_CLAIM_REMINDER: 'Solicitud sin tomar',
   REQUEST_ESCALATION: 'Solicitud por vencer',
   REQUEST_OVERDUE: 'Solicitud vencida',
+  CONVERSATION_CUSTOMER_MESSAGE: 'El cliente escribió',
+  CONVERSATION_UNANSWERED: 'Cliente esperando respuesta',
 };
 
 /** Email subject/heading lead per type ("Nueva solicitud" is §5.1's). */
@@ -200,6 +241,9 @@ export const NOTICE_HEADLINE: Record<NoticeType, string> = {
   REQUEST_CLAIM_REMINDER: 'Solicitud sin tomar',
   REQUEST_ESCALATION: 'Solicitud por vencer',
   REQUEST_OVERDUE: 'Solicitud vencida',
+  // In-app only (no email), so these are never used as a heading.
+  CONVERSATION_CUSTOMER_MESSAGE: 'El cliente escribió',
+  CONVERSATION_UNANSWERED: 'Cliente esperando respuesta',
 };
 
 /** `REQUEST_CANCELLED` wording by cause; the customer's cancel is the default. */
@@ -225,7 +269,9 @@ export function noticeText(
   const title =
     type === 'REQUEST_CANCELLED'
       ? CLOSED_TITLE[closedCauseOf(payload?.cause) ?? 'CUSTOMER']
-      : (TITLE[type as NoticeType] ?? 'Aviso');
+      : type === 'CONVERSATION_UNANSWERED' && payload?.level
+        ? `${TITLE.CONVERSATION_UNANSWERED} (${payload.level} min)`
+        : (TITLE[type as NoticeType] ?? 'Aviso');
   const parts = [
     payload?.subtype ? subtypeLabel(payload.subtype) : null,
     typeof payload?.folio === 'number' ? formatFolio(payload.folio) : null,

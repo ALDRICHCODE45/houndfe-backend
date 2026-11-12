@@ -9,7 +9,7 @@ import type { Prisma } from '@prisma/client';
 import type { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   NOTICE_NOTIFY_EVENT_TYPE,
-  audienceOf,
+  audienceFor,
   type ChatbotRequestNotice,
   type ClosedCause,
 } from '../domain/chatbot-request-notice';
@@ -33,7 +33,7 @@ export async function enqueueNotice(
    */
   releaseAt?: Date | null,
 ): Promise<boolean> {
-  if (audienceOf(notice.type) === 'USER') {
+  if (audienceFor(notice) === 'USER') {
     if (
       !notice.recipientUserId ||
       notice.recipientUserId === notice.actorUserId

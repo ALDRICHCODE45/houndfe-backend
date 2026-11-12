@@ -4381,6 +4381,12 @@ model ChatbotLiveSession {
   endingAt            DateTime?
   endedAt             DateTime?
   lastStaffActivityAt DateTime  @default(now())
+  // T11d (§4.6): written only by the live session sweep. The customer message
+  // (its instant) the "customer wrote" / "unanswered" notices were issued for,
+  // and the unanswered level already issued for it (0, 5 or 15; CHECK in the
+  // migration 20261113030000_live_conversation_notices).
+  customerNoticeAt    DateTime?
+  unansweredLevel     Int       @default(0) @db.SmallInt
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 

@@ -21,6 +21,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../shared/prisma/prisma.service';
+import { enqueueNotice } from '../../notifications/infrastructure/chatbot-request-notice.writer';
+import type { OutboxClient } from '../../notifications/infrastructure/chatbot-request-notice.writer';
 import {
   dueSessionAction,
   SESSION_TIMING,
@@ -44,6 +46,8 @@ export interface SessionSweepResult {
   reverted: number;
   ended: number;
   idleEnded: number;
+  /** T11d: live conversation notices written (customer wrote, 5 and 15 min). */
+  noticed: number;
   skipped: number;
   failed: number;
 }
@@ -67,6 +71,7 @@ export class LiveSessionSweepStore {
       reverted: 0,
       ended: 0,
       idleEnded: 0,
+      noticed: 0,
       skipped: 0,
       failed: 0,
     };
@@ -103,6 +108,151 @@ export class LiveSessionSweepStore {
       }
     }
     return result;
+  }
+
+  /**
+   * T11d (§4.6, §5.1): the notices of a live conversation, driven by the same
+   * sweep (the mirror store belongs to unit 9, so nothing hooks the customer's
+   * message; the sweep reads the chat's `lastCustomerMessageAt` instead).
+   *
+   * An ACTIVE session is waiting when the customer's newest message is later
+   * than the attendee's last activity. Then, per session and per message:
+   *   - "el cliente escribió" (`CONVERSATION_CUSTOMER_MESSAGE`, attendee) once
+   *     per unanswered burst: not again while an earlier message of the burst
+   *     is still unanswered;
+   *   - 5 min unanswered (`CONVERSATION_UNANSWERED` level 5, the attendee) and
+   *     15 min (level 15, whoever holds `update:ChatbotRequestAssignment`).
+   *     Only the highest level due is sent (a sweep that was down for 16 min
+   *     sends the 15-min notice, not both).
+   * A newer customer message restarts the clock; an attendee message stops it.
+   * The levels live on the session row, so replicas and restarts never repeat
+   * a notice. These clocks never pause outside business hours (§4.6): the
+   * notice is not held.
+   */
+  async runNoticeBatch(now: Date = new Date()): Promise<{ noticed: number }> {
+    const candidates = await this.prisma.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT s."id", s."tenantId", s."requestId"
+      FROM "chatbot_live_sessions" s
+      JOIN "chatbot_conversations" c
+        ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
+      WHERE s."state" = 'ACTIVE'
+        AND c."lastCustomerMessageAt" > s."lastStaffActivityAt"
+        AND (s."customerNoticeAt" IS DISTINCT FROM c."lastCustomerMessageAt"
+             OR s."unansweredLevel" < 15)
+      ORDER BY s."tenantId", s."id" LIMIT ${this.batchSize}`);
+    let noticed = 0;
+    for (const candidate of candidates) {
+      try {
+        noticed += await this.prisma.$transaction((tx) =>
+          this.notify(asTenantClient(tx), candidate, now),
+        );
+      } catch (error) {
+        this.logger.error(
+          `session notice failed for session ${candidate.id}: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+      }
+    }
+    return { noticed };
+  }
+
+  private async notify(
+    tx: TenantClient,
+    { id, tenantId, requestId }: Candidate,
+    now: Date,
+  ): Promise<number> {
+    const [request] = await tx.$queryRaw<
+      {
+        folio: number;
+        subtype: string;
+        status: string;
+        assigneeUserId: string | null;
+      }[]
+    >(Prisma.sql`
+      SELECT "folio", "subtype"::text AS "subtype", "status"::text AS "status",
+             "assigneeUserId"
+      FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}
+      FOR UPDATE SKIP LOCKED`);
+    if (!request?.assigneeUserId || request.status !== 'IN_PROGRESS') return 0;
+    const [session] = await tx.$queryRaw<
+      {
+        state: string;
+        lastStaffActivityAt: Date;
+        customerNoticeAt: Date | null;
+        unansweredLevel: number;
+        lastCustomerMessageAt: Date | null;
+      }[]
+    >(Prisma.sql`
+      SELECT s."state", s."lastStaffActivityAt", s."customerNoticeAt",
+             s."unansweredLevel", c."lastCustomerMessageAt"
+      FROM "chatbot_live_sessions" s
+      JOIN "chatbot_conversations" c
+        ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
+      WHERE s."tenantId" = ${tenantId} AND s."id" = ${id}
+      FOR UPDATE OF s, c`);
+    const last = session?.lastCustomerMessageAt;
+    if (
+      !session ||
+      session.state !== 'ACTIVE' ||
+      !last ||
+      last.getTime() <= session.lastStaffActivityAt.getTime()
+    ) {
+      return 0;
+    }
+    const lastMs = last.getTime();
+    const base = {
+      requestId,
+      folio: request.folio,
+      subtype: request.subtype,
+    };
+    const outbox = tx as unknown as OutboxClient;
+    let written = 0;
+    let level = session.unansweredLevel;
+    if (session.customerNoticeAt?.getTime() !== lastMs) {
+      // A new customer message. Tell the attendee only when the attendee spoke
+      // since the last message this session noticed (a new burst).
+      const firstOfBurst =
+        !session.customerNoticeAt ||
+        session.customerNoticeAt.getTime() <=
+          session.lastStaffActivityAt.getTime();
+      if (
+        firstOfBurst &&
+        (await enqueueNotice(outbox, tenantId, {
+          ...base,
+          type: 'CONVERSATION_CUSTOMER_MESSAGE',
+          dedupKey: `wrote:${id}:${lastMs}`,
+          recipientUserId: request.assigneeUserId,
+        }))
+      ) {
+        written += 1;
+      }
+      level = 0;
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "chatbot_live_sessions"
+        SET "customerNoticeAt" = ${last}, "unansweredLevel" = 0
+        WHERE "tenantId" = ${tenantId} AND "id" = ${id}`);
+    }
+    const waited = now.getTime() - lastMs;
+    const due =
+      waited >= SESSION_TIMING.unansweredReassignMs
+        ? 15
+        : waited >= SESSION_TIMING.unansweredAttendeeMs
+          ? 5
+          : 0;
+    if (due !== 0 && due > level) {
+      await enqueueNotice(outbox, tenantId, {
+        ...base,
+        type: 'CONVERSATION_UNANSWERED',
+        level: due,
+        dedupKey: `unanswered:${due}:${id}:${lastMs}`,
+        ...(due === 5 ? { recipientUserId: request.assigneeUserId } : {}),
+      });
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "chatbot_live_sessions" SET "unansweredLevel" = ${due}
+        WHERE "tenantId" = ${tenantId} AND "id" = ${id}`);
+      written += 1;
+    }
+    return written;
   }
 
   private async handle(

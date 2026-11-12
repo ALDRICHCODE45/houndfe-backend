@@ -65,6 +65,8 @@ const MESSAGES: Record<string, string> = {
   STALE_EPOCH: 'The handoff epoch is not the current one',
   SESSION_NOT_ENDING: 'The session is not ending: only the backend ends it',
   WINDOW_CLOSED: 'The 24 h WhatsApp window is closed',
+  WINDOW_OPEN:
+    'The 24 h WhatsApp window is open: write a message instead of a template',
   TEMPLATE_ALREADY_SENT: 'The template was already requested for this window',
   TEMPLATE_NOT_CONFIGURED: 'No WhatsApp template is configured',
   REQUEST_ERROR: 'Request failed',

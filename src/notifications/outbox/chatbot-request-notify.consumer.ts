@@ -152,6 +152,7 @@ export class ChatbotRequestNotifyConsumer {
         subtype: notice.subtype,
         ...(notice.cause ? { cause: notice.cause } : {}),
         ...(reason ? { reason } : {}),
+        ...(notice.level ? { level: notice.level } : {}),
       });
       // `skipDuplicates` is ON CONFLICT DO NOTHING on (tenant, user, dedupKey):
       // only rows inserted now are returned, so a re-run never mails twice.

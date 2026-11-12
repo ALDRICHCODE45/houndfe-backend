@@ -2968,5 +2968,566 @@ describeIfDb('live conversation (PostgreSQL)', () => {
     });
   });
 
+  describe('T11d (§4.5, S16 8): the paid template command', () => {
+    /** A settings row with the defaults plus the template of the tenant. */
+    async function templateSettings(
+      b: Branch,
+      templateName: string | null,
+      templateLanguageCode?: string,
+    ) {
+      const d = defaultSettings();
+      await prisma.chatbotAttentionSettings.create({
+        data: {
+          tenantId: b.tenantId,
+          timeZone: d.openingHours.timeZone,
+          days: d.openingHours.days as never,
+          closedDates: [],
+          slas: d.slas as never,
+          windowWarningMinutes: d.windowWarningMinutes,
+          templateCostText: d.templateCostText,
+          enabledSubtypes: d.enabledSubtypes,
+          receiptCloseMarginMinutes: d.receiptCloseMarginMinutes,
+          schedulingEnabled: false,
+          slotMinutes: d.scheduling.slotMinutes,
+          slotsOffered: d.scheduling.slotsOffered,
+          maxScheduledPerSlot: d.scheduling.maxScheduledPerSlot,
+          templateName,
+          ...(templateLanguageCode ? { templateLanguageCode } : {}),
+        },
+      });
+    }
+    /** The customer wrote `hoursAgo` hours ago (both window sources). */
+    async function customerWroteAgo(b: Branch, l: Live, hoursAgo: number) {
+      const at = new Date(Date.now() - hoursAgo * 60 * MIN);
+      const c = await conversation(b, l.ref);
+      await prisma.chatbotConversation.update({
+        where: { id: c.id },
+        data: { lastCustomerMessageAt: at, windowClosedAt: null },
+      });
+      await prisma.chatbotRequest.update({
+        where: { id: l.id },
+        data: { lastCustomerMessageAt: at },
+      });
+    }
+    const template = (
+      b: Branch,
+      id: string,
+      body: object,
+      opts: { role?: string; userId?: string; key?: string } = {},
+    ) => staffPost(b, `/chatbot-requests/${id}/template`, body, opts);
+    const templateRows = (b: Branch, requestId: string) =>
+      prisma.chatbotSessionTemplate.findMany({
+        where: { tenantId: b.tenantId, requestId },
+      });
+    const statuses = (b: Branch, list: object[]) =>
+      asBot(b, server().post('/chatbot-api/messages/statuses:batch')).send({
+        statuses: list,
+      });
+    const messageOf = (id: string) =>
+      prisma.conversationMessage.findUniqueOrThrow({ where: { id } });
+
+    /**
+     * ACTIVE session whose 24 h window has closed. `name`: the tenant's
+     * template (default one), `null` = settings without a template name,
+     * `false` = no settings row (already created for this branch, or defaults).
+     */
+    async function closedWindow(
+      b: Branch,
+      name: string | null | false = 'seguimiento_pedido',
+      language?: string,
+    ) {
+      if (name !== false) await templateSettings(b, name, language);
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      await customerWroteAgo(b, l, 25);
+      return l;
+    }
+
+    it('with a closed window the attendee requests the approved template: a TEMPLATE message (QUEUED, STAFF, next seq), one template.requested {requestId, handoffEpoch, seq, messageId, templateName, languageCode}, the once-per-window row and a TEMPLATE_SENT audit event; the same key again is the same answer', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const key = randomUUID();
+      const res = await template(b, l.id, { expectedEpoch: 1 }, { key }).expect(
+        200,
+      );
+      expect(res.body.message).toMatchObject({
+        type: 'TEMPLATE',
+        author: 'STAFF',
+        direction: 'OUT',
+        deliveryStatus: 'QUEUED',
+        clientMessageId: key,
+        templateName: 'seguimiento_pedido',
+        staff: { id: users.ana },
+      });
+      const [item] = await items(b, l.id, 'template.requested');
+      expect(item.payload).toEqual({
+        requestId: l.id,
+        handoffEpoch: 1,
+        seq: res.body.message.seq,
+        messageId: res.body.message.id,
+        templateName: 'seguimiento_pedido',
+        languageCode: 'es_MX',
+      });
+      expect(item.conversationRef).toBe(l.ref);
+      const stored = await messageOf(res.body.message.id);
+      expect(stored).toMatchObject({
+        type: 'TEMPLATE',
+        author: 'STAFF',
+        direction: 'OUT',
+        deliveryStatus: 'QUEUED',
+        staffUserId: users.ana,
+        seq: res.body.message.seq,
+      });
+      const all = await msgs(b, l.ref);
+      expect(all.at(-1)?.id).toBe(stored.id);
+      const rows = await templateRows(b, l.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].messageId).toBe(stored.id);
+      expect(rows[0].windowClosedAt.getTime()).toBeLessThan(Date.now());
+      expect(
+        (await events(l.id)).filter((e) => e.type === 'TEMPLATE_SENT'),
+      ).toHaveLength(1);
+
+      const replay = await template(
+        b,
+        l.id,
+        { expectedEpoch: 1 },
+        { key },
+      ).expect(200);
+      expect(replay.body.message.id).toBe(res.body.message.id);
+      expect(await items(b, l.id, 'template.requested')).toHaveLength(1);
+      expect(await templateRows(b, l.id)).toHaveLength(1);
+    });
+
+    it('languageCode follows the tenant setting templateLanguageCode (default es_MX)', async () => {
+      const b = await branch();
+      const l = await closedWindow(b, 'order_followup', 'en_US');
+      await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [item] = await items(b, l.id, 'template.requested');
+      expect(item.payload).toMatchObject({
+        templateName: 'order_followup',
+        languageCode: 'en_US',
+      });
+    });
+
+    it('outcomes follow the ACK matrix: PROVIDER_ACCEPTED → SENT with the wamid; DEFERRED_* are 422 OUTCOME_NOT_ALLOWED and the item stays pending; STALE → FAILED', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const sent = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [item] = await items(b, l.id, 'template.requested');
+      for (const refused of [
+        'DEFERRED_WINDOW_CLOSED',
+        'DEFERRED_HUMAN_SESSION',
+      ]) {
+        const no = await outcome(b, item.deliveryId, {
+          attemptId: randomUUID(),
+          outcome: refused,
+          attemptedAt: AT,
+        }).expect(422);
+        expect(no.body.code).toBe('OUTCOME_NOT_ALLOWED');
+      }
+      const wamid = `wamid.tpl.${randomUUID()}`;
+      await outcome(b, item.deliveryId, accepted(wamid)).expect(200);
+      expect(await messageOf(sent.body.message.id)).toMatchObject({
+        deliveryStatus: 'SENT',
+        waMessageId: wamid,
+      });
+
+      const l2 = await closedWindow(b, false);
+      const second = await template(b, l2.id, { expectedEpoch: 1 }).expect(200);
+      const [item2] = await items(b, l2.id, 'template.requested');
+      await outcome(b, item2.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'STALE',
+        attemptedAt: AT,
+      }).expect(200);
+      expect((await messageOf(second.body.message.id)).deliveryStatus).toBe(
+        'FAILED',
+      );
+    });
+
+    it('refusals enqueue nothing: window still open 409 WINDOW_OPEN, no template configured 422 TEMPLATE_NOT_CONFIGURED, not the assignee 403, wrong epoch 409 STALE_EPOCH, STARTING 409 SESSION_NOT_ACTIVE, bad body 400, a conversation without a session 409/422', async () => {
+      const b = await branch();
+      await templateSettings(b, 'seguimiento_pedido');
+      const open = await liveRequest(b);
+      await activeSession(b, open);
+      const stillOpen = await template(b, open.id, {
+        expectedEpoch: 1,
+      }).expect(409);
+      expect(stillOpen.body.code).toBe('WINDOW_OPEN');
+
+      await customerWroteAgo(b, open, 25);
+      const mine = await template(
+        b,
+        open.id,
+        { expectedEpoch: 1 },
+        {
+          userId: users.luis,
+        },
+      ).expect(403);
+      expect(mine.body.code).toBe('NOT_ASSIGNEE');
+      const wrong = await template(b, open.id, { expectedEpoch: 4 }).expect(
+        409,
+      );
+      expect(wrong.body).toMatchObject({
+        code: 'STALE_EPOCH',
+        currentEpoch: 1,
+      });
+      await template(b, open.id, {}).expect(400);
+      await template(b, open.id, {
+        expectedEpoch: 1,
+        templateName: 'x',
+      }).expect(400);
+      expect(await items(b, open.id, 'template.requested')).toHaveLength(0);
+
+      const starting = await liveRequest(b);
+      await claim(b, starting.id).expect(200);
+      await customerWroteAgo(b, starting, 25);
+      const early = await template(b, starting.id, {
+        expectedEpoch: 1,
+      }).expect(409);
+      expect(early.body.code).toBe('SESSION_NOT_ACTIVE');
+      expect(await items(b, starting.id, 'template.requested')).toHaveLength(0);
+
+      // a tenant whose settings carry no template name
+      const b2 = await branch();
+      const l2 = await closedWindow(b2, null);
+      const none = await template(b2, l2.id, { expectedEpoch: 1 }).expect(422);
+      expect(none.body.code).toBe('TEMPLATE_NOT_CONFIGURED');
+      // and a tenant that never saved settings (defaults: no template)
+      const b3 = await branch();
+      const l3 = await closedWindow(b3, false);
+      const def = await template(b3, l3.id, { expectedEpoch: 1 }).expect(422);
+      expect(def.body.code).toBe('TEMPLATE_NOT_CONFIGURED');
+      expect(await templateRows(b2, l2.id)).toHaveLength(0);
+      expect(await templateRows(b3, l3.id)).toHaveLength(0);
+      expect(await templateRows(b, open.id)).toHaveLength(0);
+    });
+
+    it('once per closed window: while the first template is pending (QUEUED), SENT or UNKNOWN a second one is 409 TEMPLATE_ALREADY_SENT and enqueues nothing', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const queued = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(queued.body.code).toBe('TEMPLATE_ALREADY_SENT');
+      const [item] = await items(b, l.id, 'template.requested');
+      await outcome(b, item.deliveryId, accepted(`wamid.tpl.${randomUUID()}`));
+      const sent = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(sent.body.code).toBe('TEMPLATE_ALREADY_SENT');
+      expect(await items(b, l.id, 'template.requested')).toHaveLength(1);
+      expect(await templateRows(b, l.id)).toHaveLength(1);
+
+      const l2 = await closedWindow(b, false);
+      await template(b, l2.id, { expectedEpoch: 1 }).expect(200);
+      const [item2] = await items(b, l2.id, 'template.requested');
+      await outcome(b, item2.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'DELIVERY_UNKNOWN',
+        attemptedAt: AT,
+      }).expect(200);
+      const unknown = await template(b, l2.id, { expectedEpoch: 1 }).expect(
+        409,
+      );
+      expect(unknown.body.code).toBe('TEMPLATE_ALREADY_SENT');
+    });
+
+    it('two parallel clicks: exactly one template is enqueued', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const results = await Promise.all([
+        template(b, l.id, { expectedEpoch: 1 }),
+        template(b, l.id, { expectedEpoch: 1 }),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      expect(await items(b, l.id, 'template.requested')).toHaveLength(1);
+      expect(await templateRows(b, l.id)).toHaveLength(1);
+    });
+
+    it('a template Meta refused (STALE → FAILED) can be requested again: a new message and item, the same once-per-window row now points at the new message', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const first = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [item] = await items(b, l.id, 'template.requested');
+      await outcome(b, item.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'STALE',
+        attemptedAt: AT,
+      }).expect(200);
+      const [row] = await templateRows(b, l.id);
+
+      const again = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      expect(again.body.message.id).not.toBe(first.body.message.id);
+      expect(again.body.message.seq).toBeGreaterThan(first.body.message.seq);
+      const all = await items(b, l.id, 'template.requested');
+      expect(all).toHaveLength(2);
+      expect(all[1].payload).toMatchObject({
+        messageId: again.body.message.id,
+      });
+      const rows = await templateRows(b, l.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(row.id);
+      expect(rows[0].messageId).toBe(again.body.message.id);
+      // and the new one is now the pending one
+      const third = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(third.body.code).toBe('TEMPLATE_ALREADY_SENT');
+    });
+
+    it('an async failure after the bot accepted it (PROVIDER_ACCEPTED, then a FAILED status) also allows a retry; a DELIVERED one does not', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const first = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [item] = await items(b, l.id, 'template.requested');
+      const wamid = `wamid.tpl.${randomUUID()}`;
+      await outcome(b, item.deliveryId, accepted(wamid)).expect(200);
+      const refused = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(refused.body.code).toBe('TEMPLATE_ALREADY_SENT');
+
+      await statuses(b, [
+        {
+          providerMessageId: wamid,
+          status: 'FAILED',
+          occurredAt: new Date().toISOString(),
+          errorCode: '131026',
+        },
+      ]).expect(200);
+      expect((await messageOf(first.body.message.id)).deliveryStatus).toBe(
+        'FAILED',
+      );
+      const retry = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      expect(retry.body.message.id).not.toBe(first.body.message.id);
+      const [, second] = await items(b, l.id, 'template.requested');
+      const wamid2 = `wamid.tpl.${randomUUID()}`;
+      await outcome(b, second.deliveryId, accepted(wamid2)).expect(200);
+      await statuses(b, [
+        {
+          providerMessageId: wamid2,
+          status: 'DELIVERED',
+          occurredAt: new Date().toISOString(),
+        },
+      ]).expect(200);
+      const noMore = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(noMore.body.code).toBe('TEMPLATE_ALREADY_SENT');
+    });
+
+    it('WINDOW_CLOSED on a text message reports templateAllowed: true only when a template can be requested now', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const closed = await say(b, l.id, 1, 'hola').expect(409);
+      expect(closed.body).toMatchObject({
+        code: 'WINDOW_CLOSED',
+        templateAllowed: true,
+      });
+      await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const after = await say(b, l.id, 1, 'hola otra vez').expect(409);
+      expect(after.body).toMatchObject({
+        code: 'WINDOW_CLOSED',
+        templateAllowed: false,
+      });
+      // a failed template makes it available again
+      const [item] = await items(b, l.id, 'template.requested');
+      await outcome(b, item.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'STALE',
+        attemptedAt: AT,
+      }).expect(200);
+      const again = await say(b, l.id, 1, 'y otra').expect(409);
+      expect(again.body.templateAllowed).toBe(true);
+
+      // no template name configured: false
+      const b2 = await branch();
+      const l2 = await closedWindow(b2, null);
+      const none = await say(b2, l2.id, 1, 'hola').expect(409);
+      expect(none.body).toMatchObject({
+        code: 'WINDOW_CLOSED',
+        templateAllowed: false,
+      });
+    });
+
+    it('the customer answering the template reopens the window (staff can write); when it closes again a new template is allowed (a new once-per-window row)', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      const first = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [item] = await items(b, l.id, 'template.requested');
+      await outcome(b, item.deliveryId, accepted(`wamid.tpl.${randomUUID()}`));
+      await mirrorIn(b, l.ref, 'sí, gracias').expect(200);
+      await say(b, l.id, 1, 'qué bueno que contestas').expect(200);
+
+      // a day later the window is closed again
+      await customerWroteAgo(b, l, 26);
+      const second = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      expect(second.body.message.id).not.toBe(first.body.message.id);
+      const rows = await templateRows(b, l.id);
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((r) => r.windowClosedAt.getTime())).size).toBe(2);
+    });
+
+    it('a COMPLAINT can also request it, and the template is refused for a request that is not a live conversation (a restock one) and after the session ended', async () => {
+      const b = await branch();
+      const l = await closedWindow(b);
+      await prisma.chatbotRequest.update({
+        where: { id: l.id },
+        data: { subtype: 'COMPLAINT' },
+      });
+      await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+
+      const done = await closedWindow(b, false);
+      const v = await versionOf(done.id);
+      await finish(b, done.id, v).expect(200);
+      const ended = await template(b, done.id, { expectedEpoch: 1 }).expect(
+        409,
+      );
+      expect(ended.body.code).toBe('SESSION_NOT_ACTIVE');
+      expect(await items(b, done.id, 'template.requested')).toHaveLength(0);
+
+      const unknown = await template(b, randomUUID(), {
+        expectedEpoch: 1,
+      }).expect(404);
+      expect(unknown.body.code).toBe('NOT_FOUND');
+    });
+  });
+
+  describe('T11d notices (§4.6, §5.1): "el cliente escribió" and "sin contestar en 5 / 15 min"', () => {
+    const notifyRows = async (b: Branch, requestId: string) =>
+      (
+        await prisma.outboxEvent.findMany({
+          where: {
+            tenantId: b.tenantId,
+            aggregateId: requestId,
+            eventType: 'chatbot_request.notify',
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      ).map((r) => ({
+        payload: r.payload as Record<string, unknown>,
+        nextAttemptAt: r.nextAttemptAt,
+      }));
+    const ofType = async (b: Branch, requestId: string, type: string) =>
+      (await notifyRows(b, requestId)).filter((r) => r.payload.type === type);
+    const tickAt = (ms: number) =>
+      sweepScheduler().tick(new Date(Date.now() + ms));
+
+    it('the customer writing in an ACTIVE session tells the attendee once per unanswered burst (a second message before a reply adds nothing; after the attendee replies the next one tells again)', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      expect(await notifyRows(b, l.id)).toHaveLength(0);
+
+      await mirrorIn(b, l.ref, 'hola, ¿hay alguien?').expect(200);
+      await tickAt(0);
+      const first = await ofType(b, l.id, 'CONVERSATION_CUSTOMER_MESSAGE');
+      expect(first).toHaveLength(1);
+      expect(first[0].payload).toMatchObject({
+        type: 'CONVERSATION_CUSTOMER_MESSAGE',
+        requestId: l.id,
+        folio: 1,
+        subtype: 'TALK_TO_HUMAN',
+        recipientUserId: users.ana,
+      });
+      // never customer data (§6.3)
+      expect(JSON.stringify(first[0].payload)).not.toMatch(/hola|5255830|wa:/);
+      // not held for business hours: the staff clocks of a live chat never pause
+      expect(first[0].nextAttemptAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + 1000,
+      );
+
+      await tickAt(0);
+      await mirrorIn(b, l.ref, 'sigo aquí').expect(200);
+      await tickAt(0);
+      expect(
+        await ofType(b, l.id, 'CONVERSATION_CUSTOMER_MESSAGE'),
+      ).toHaveLength(1);
+
+      await say(b, l.id, 1, 'Hola, ya te atiendo').expect(200);
+      await mirrorIn(b, l.ref, 'gracias').expect(200);
+      await tickAt(0);
+      const again = await ofType(b, l.id, 'CONVERSATION_CUSTOMER_MESSAGE');
+      expect(again).toHaveLength(2);
+      expect(again[0].payload.dedupKey).not.toBe(again[1].payload.dedupKey);
+    });
+
+    it('unanswered: nothing before 5 min, one notice to the attendee at 5 min, one to the reassigners at 15 min (level 15), never repeated', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      await mirrorIn(b, l.ref, '¿me contestan?').expect(200);
+
+      await tickAt(4 * MIN + 59_000);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(0);
+
+      await tickAt(5 * MIN + 1000);
+      await tickAt(5 * MIN + 2000);
+      const five = await ofType(b, l.id, 'CONVERSATION_UNANSWERED');
+      expect(five).toHaveLength(1);
+      expect(five[0].payload).toMatchObject({
+        level: 5,
+        recipientUserId: users.ana,
+        requestId: l.id,
+        folio: 1,
+        subtype: 'TALK_TO_HUMAN',
+      });
+      expect(five[0].nextAttemptAt.getTime()).toBeLessThanOrEqual(
+        Date.now() + 1000,
+      );
+
+      await tickAt(14 * MIN);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(1);
+      await tickAt(15 * MIN + 1000);
+      await tickAt(15 * MIN + 2000);
+      await tickAt(30 * MIN);
+      const all = await ofType(b, l.id, 'CONVERSATION_UNANSWERED');
+      expect(all).toHaveLength(2);
+      expect(all[1].payload).toMatchObject({ level: 15 });
+      // the 15-minute notice goes to whoever holds update:ChatbotRequestAssignment
+      expect(all[1].payload.recipientUserId).toBeUndefined();
+      expect(all[0].payload.dedupKey).not.toBe(all[1].payload.dedupKey);
+    });
+
+    it('a sweep that was down for 16 minutes sends only the 15-minute notice', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      await mirrorIn(b, l.ref, 'hola').expect(200);
+      await tickAt(16 * MIN);
+      const rows = await ofType(b, l.id, 'CONVERSATION_UNANSWERED');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toMatchObject({ level: 15 });
+    });
+
+    it('an attendee reply stops the clock; a later customer message restarts it from zero', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      await mirrorIn(b, l.ref, 'hola').expect(200);
+      await say(b, l.id, 1, 'Aquí estoy').expect(200);
+      await tickAt(20 * MIN);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(0);
+
+      await mirrorIn(b, l.ref, 'otra duda').expect(200);
+      await tickAt(4 * MIN);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(0);
+      await tickAt(5 * MIN + 1000);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(1);
+    });
+
+    it('no notice for a session that is not ACTIVE (ENDING / ENDED) or a request nobody holds', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      await mirrorIn(b, l.ref, 'hola').expect(200);
+      await finish(b, l.id, version).expect(200);
+      await tickAt(20 * MIN);
+      expect(await ofType(b, l.id, 'CONVERSATION_UNANSWERED')).toHaveLength(0);
+      expect(
+        await ofType(b, l.id, 'CONVERSATION_CUSTOMER_MESSAGE'),
+      ).toHaveLength(0);
+
+      // a chat with no session at all (customer messages of a plain request)
+      const plain = await liveRequest(b);
+      await mirrorIn(b, plain.ref, 'hola').expect(200);
+      await tickAt(20 * MIN);
+      expect(await notifyRows(b, plain.id)).toHaveLength(0);
+    });
+  });
+
   // SLICE2-END
 });

@@ -338,6 +338,7 @@ export type ChatbotRequestCommandErrorCode =
   | 'STALE_EPOCH'
   | 'SESSION_NOT_ENDING'
   | 'WINDOW_CLOSED'
+  | 'WINDOW_OPEN'
   | 'TEMPLATE_ALREADY_SENT'
   | 'TEMPLATE_NOT_CONFIGURED';
 

@@ -134,6 +134,17 @@ export class FinishDto extends ExpectedVersionDto {
 }
 
 /**
+ * Unit 11 (§4.5): `POST …/template {expectedEpoch}`; the `Idempotency-Key`
+ * (uuid) identifies the template message. No other key is accepted: the
+ * template name and language come from the tenant's settings.
+ */
+export class TemplateRequestDto {
+  @IsInt()
+  @Min(1)
+  expectedEpoch!: number;
+}
+
+/**
  * Unit 11 (§4.4 `messages {clientMessageId, expectedEpoch, text}` or, S15 Q5,
  * `{…, type: IMAGE|DOCUMENT, mediaId, caption?}`). The header
  * `Idempotency-Key` must equal `clientMessageId`. `text` is `unknown`:
