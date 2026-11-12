@@ -787,6 +787,17 @@ export class ChatbotRequestReadsService {
       // Unit 10: what staff answered to a clarification (a clarification has
       // no `decision`). Kept after the conversation purge (§3.6).
       reply: this.replyOf(request, resolved ? iso(request.resolvedAt) : null),
+      // Unit 12 (§4.8): how a finished COMPLAINT was classified; null while it
+      // is open, when it was closed by the idle sweep (nobody classified it)
+      // and for every other subtype.
+      complaintOutcome:
+        request.subtype === 'COMPLAINT' &&
+        resolved &&
+        typeof (request.resolution as { complaintOutcome?: unknown })
+          ?.complaintOutcome === 'string'
+          ? (request.resolution as { complaintOutcome: string })
+              .complaintOutcome
+          : null,
       ...(record.zoneImpact ? { zoneImpact: record.zoneImpact } : {}),
       deliveries: record.deliveries.map((d) => ({
         deliveryId: d.deliveryId,

@@ -62,6 +62,7 @@ const MESSAGES: Record<string, string> = {
   THUMB_UNAVAILABLE: 'This file has no thumbnail',
   MEDIA_STORAGE_FAILED: 'The file could not be stored or read, retry later',
   SESSION_NOT_ACTIVE: 'The live session is not active',
+  COMPLAINT_OUTCOME_REQUIRED: 'A complaint needs its outcome to be closed',
   STALE_EPOCH: 'The handoff epoch is not the current one',
   SESSION_NOT_ENDING: 'The session is not ending: only the backend ends it',
   WINDOW_CLOSED: 'The 24 h WhatsApp window is closed',

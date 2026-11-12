@@ -113,6 +113,7 @@ export type ChatbotRequestErrorCode =
   | 'CANCEL_NOT_ALLOWED'
   | 'MERGE_NOT_ALLOWED'
   | 'SESSION_NOT_ACTIVE'
+  | 'COMPLAINT_OUTCOME_REQUIRED'
   | 'VALIDATION_ERROR';
 
 export interface ChatbotRequestError {
@@ -428,9 +429,12 @@ export function reply(
  * the request is RESOLVED in the same write and the application moves the
  * session to ENDING and tells the bot. Check order: closed, kind, nobody holds
  * it, holder, version, session (a message or a finish while STARTING, ENDING
- * or with no session is `SESSION_NOT_ACTIVE`). `complaintOutcome` is only
- * recorded (unit 12 owns making it mandatory and measuring it); nothing is
- * triggered by it (D19).
+ * or with no session is `SESSION_NOT_ACTIVE`), then, last, the complaint
+ * classification (unit 12, §4.8): a COMPLAINT cannot be finished without
+ * `complaintOutcome` (`422 COMPLAINT_OUTCOME_REQUIRED`); any other subtype
+ * ignores a value that was sent (it is neither stored nor audited, so the
+ * metrics by outcome only count complaints). The value itself is validated at
+ * the edge (400). Nothing is triggered by it (D19).
  */
 export function finish(
   state: ChatbotRequestState,
@@ -439,7 +443,7 @@ export function finish(
     actorCanReassign: boolean;
     expectedVersion: number;
     note: string;
-    complaintOutcome?: string;
+    complaintOutcome?: string | null;
     now: Date;
   },
 ): CommandResult {
@@ -453,6 +457,13 @@ export function finish(
     return reject(state, 'VERSION_CONFLICT', 409);
   if (state.liveSessionState !== 'ACTIVE')
     return reject(state, 'SESSION_NOT_ACTIVE', 409);
+  const isComplaint = state.subtype === 'COMPLAINT';
+  if (isComplaint && !cmd.complaintOutcome)
+    return reject(state, 'COMPLAINT_OUTCOME_REQUIRED', 422);
+  const outcome =
+    isComplaint && cmd.complaintOutcome
+      ? { complaintOutcome: cmd.complaintOutcome }
+      : {};
   return accept(
     state,
     {
@@ -462,24 +473,12 @@ export function finish(
       resolvedByDisplayName: cmd.actor.displayName,
       closedAt: cmd.now,
       nextSlaCheckAt: null,
-      resolution: {
-        action: 'FINISH',
-        note: cmd.note,
-        ...(cmd.complaintOutcome
-          ? { complaintOutcome: cmd.complaintOutcome }
-          : {}),
-      },
+      resolution: { action: 'FINISH', note: cmd.note, ...outcome },
     },
     {
       type: 'FINISHED',
       ...userEvent(cmd.actor),
-      data: {
-        note: cmd.note,
-        forced,
-        ...(cmd.complaintOutcome
-          ? { complaintOutcome: cmd.complaintOutcome }
-          : {}),
-      },
+      data: { note: cmd.note, forced, ...outcome },
     },
   );
 }

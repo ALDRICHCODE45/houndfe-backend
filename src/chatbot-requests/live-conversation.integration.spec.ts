@@ -379,12 +379,16 @@ describeIfDb('live conversation (PostgreSQL)', () => {
     b: Branch,
     id: string,
     version: number,
-    opts: { role?: string; userId?: string } = {},
+    opts: { role?: string; userId?: string; body?: object } = {},
   ) =>
     staffPost(
       b,
       `/chatbot-requests/${id}/finish`,
-      { expectedVersion: version, note: 'Resuelto por teléfono.' },
+      {
+        expectedVersion: version,
+        note: 'Resuelto por teléfono.',
+        ...opts.body,
+      },
       opts,
     );
   const say = (
@@ -4215,6 +4219,120 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       } finally {
         await clean();
       }
+    });
+  });
+
+  describe('unit 12 (§4.8, S15 Q6): complaintOutcome is mandatory to finish a COMPLAINT', () => {
+    const complaintSession = async (b: Branch) => {
+      const l = await liveRequest(b, { subtype: 'COMPLAINT' });
+      const { version } = await activeSession(b, l);
+      return { l, version };
+    };
+    const snapshot = async (b: Branch, id: string) => ({
+      row: await row(id),
+      events: (await events(id)).length,
+      feed: (await items(b, id)).length,
+      session: (await sessions(b, id))[0].state,
+    });
+
+    it('missing → 422 COMPLAINT_OUTCOME_REQUIRED with the field error; version, events, feed and session stay as they were; then it closes with the outcome', async () => {
+      const b = await branch();
+      const { l, version } = await complaintSession(b);
+      const before = await snapshot(b, l.id);
+
+      const refused = await finish(b, l.id, version).expect(422);
+      expect(refused.body).toMatchObject({
+        statusCode: 422,
+        code: 'COMPLAINT_OUTCOME_REQUIRED',
+        current: { version, status: 'IN_PROGRESS' },
+        fieldErrors: [{ path: 'complaintOutcome', code: 'REQUIRED' }],
+      });
+      await finish(b, l.id, version, {
+        body: { complaintOutcome: null },
+      }).expect(422);
+      expect(await snapshot(b, l.id)).toEqual(before);
+      expect(before.session).toBe('ACTIVE');
+
+      const ok = await finish(b, l.id, version, {
+        body: { complaintOutcome: 'REPLACEMENT' },
+      }).expect(200);
+      expect(ok.body.request).toMatchObject({
+        status: 'RESOLVED',
+        version: version + 1,
+      });
+      expect((await row(l.id)).resolution).toMatchObject({
+        action: 'FINISH',
+        complaintOutcome: 'REPLACEMENT',
+      });
+      const finished = (await events(l.id)).filter(
+        (e) => e.type === 'FINISHED',
+      );
+      expect(finished).toHaveLength(1);
+      expect(finished[0].data).toMatchObject({
+        complaintOutcome: 'REPLACEMENT',
+      });
+      expect(await items(b, l.id, 'conversation.ended')).toHaveLength(1);
+
+      const detail = await server()
+        .get(`/chatbot-requests/${l.id}`)
+        .set(as(b, 'manager'))
+        .expect(200);
+      expect(detail.body.complaintOutcome).toBe('REPLACEMENT');
+      expect(
+        detail.body.audit.find((e: any) => e.type === 'FINISHED').data,
+      ).toMatchObject({ complaintOutcome: 'REPLACEMENT' });
+    });
+
+    it('an invalid value is a 400 VALIDATION_ERROR and changes nothing; the check runs after the state checks (stale version → 409)', async () => {
+      const b = await branch();
+      const { l, version } = await complaintSession(b);
+      const before = await snapshot(b, l.id);
+      const bad = await finish(b, l.id, version, {
+        body: { complaintOutcome: 'CHARGEBACK' },
+      }).expect(400);
+      expect(bad.body.code).toBe('VALIDATION_ERROR');
+      await finish(b, l.id, version, {
+        body: { complaintOutcome: '' },
+      }).expect(400);
+      const stale = await finish(b, l.id, version + 7).expect(409);
+      expect(stale.body.code).toBe('VERSION_CONFLICT');
+      expect(await snapshot(b, l.id)).toEqual(before);
+    });
+
+    it('a reassigner forcing the finish of a COMPLAINT needs it too', async () => {
+      const b = await branch();
+      const { l, version } = await complaintSession(b);
+      const refused = await finish(b, l.id, version, {
+        role: 'manager',
+        userId: users.luis,
+      }).expect(422);
+      expect(refused.body.code).toBe('COMPLAINT_OUTCOME_REQUIRED');
+      await finish(b, l.id, version, {
+        role: 'manager',
+        userId: users.luis,
+        body: { complaintOutcome: 'NO_ACTION' },
+      }).expect(200);
+    });
+
+    it('a conversation that is not a COMPLAINT needs no outcome, and one that was sent is not stored', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      await finish(b, l.id, version, {
+        body: { complaintOutcome: 'REFUND' },
+      }).expect(200);
+      const resolution = (await row(l.id)).resolution as Record<
+        string,
+        unknown
+      >;
+      expect(resolution).not.toHaveProperty('complaintOutcome');
+      const finished = (await events(l.id)).find((e) => e.type === 'FINISHED');
+      expect(finished!.data).not.toHaveProperty('complaintOutcome');
+      const detail = await server()
+        .get(`/chatbot-requests/${l.id}`)
+        .set(as(b, 'manager'))
+        .expect(200);
+      expect(detail.body.complaintOutcome).toBeNull();
     });
   });
 

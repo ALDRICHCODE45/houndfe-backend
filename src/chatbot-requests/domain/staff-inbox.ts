@@ -267,6 +267,9 @@ export function computeActionAvailability(
       actorCanReassign: canReassign,
       expectedVersion,
       note: 'candidate',
+      // Unit 12: a COMPLAINT needs the outcome in the body, which is not a
+      // reason to hide the button; the offer assumes it will come.
+      complaintOutcome: 'NO_ACTION',
       now,
     }),
   );

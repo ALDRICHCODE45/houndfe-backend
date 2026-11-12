@@ -68,6 +68,67 @@ describe('finish (§4.8)', () => {
     expect(r.patch.resolution).toMatchObject({ complaintOutcome: 'REFUND' });
   });
 
+  describe('complaint classification is mandatory (unit 12, §4.8)', () => {
+    const complaint = (patch: Partial<ChatbotRequestState> = {}) =>
+      live({ subtype: 'COMPLAINT', ...patch });
+
+    it.each(['RETURN', 'REPLACEMENT', 'REFUND', 'NO_ACTION'])(
+      'a COMPLAINT closes with %s and records it in the row and the event',
+      (value) => {
+        const r = finish(complaint(), cmd({ complaintOutcome: value }));
+        if (!r.ok) throw new Error('expected ok');
+        expect(r.patch.resolution).toMatchObject({ complaintOutcome: value });
+        expect(r.event.data).toMatchObject({ complaintOutcome: value });
+      },
+    );
+
+    it.each([undefined, null, ''])(
+      'a COMPLAINT without it (%p) is refused: 422 COMPLAINT_OUTCOME_REQUIRED, nothing changes',
+      (value) => {
+        const r = finish(complaint(), cmd({ complaintOutcome: value }));
+        expect(errorOf(r)).toBe('COMPLAINT_OUTCOME_REQUIRED/422');
+        if (r.ok) throw new Error('expected a refusal');
+        expect(r.error.current).toMatchObject({ version: 4 });
+      },
+    );
+
+    it('the state checks answer first: a stale version, a foreign holder or a closed request win over the missing outcome', () => {
+      expect(errorOf(finish(complaint({ version: 9 }), cmd()))).toBe(
+        'VERSION_CONFLICT/409',
+      );
+      expect(errorOf(finish(complaint({ assignee: luis }), cmd()))).toBe(
+        'NOT_ASSIGNEE/403',
+      );
+      expect(
+        errorOf(finish(complaint({ liveSessionState: 'ENDING' }), cmd())),
+      ).toBe('SESSION_NOT_ACTIVE/409');
+      expect(errorOf(finish(complaint({ status: 'RESOLVED' }), cmd()))).toBe(
+        'REQUEST_CLOSED/409',
+      );
+    });
+
+    it('a forced finish of a COMPLAINT needs it too', () => {
+      expect(
+        errorOf(
+          finish(complaint(), cmd({ actor: luis, actorCanReassign: true })),
+        ),
+      ).toBe('COMPLAINT_OUTCOME_REQUIRED/422');
+    });
+
+    it('a request that is not a COMPLAINT does not need it and does not keep one that was sent', () => {
+      const r = finish(live(), cmd({ complaintOutcome: 'REFUND' }));
+      if (!r.ok) throw new Error('expected ok');
+      expect(r.patch.resolution).toEqual({
+        action: 'FINISH',
+        note: 'Resuelto por teléfono',
+      });
+      expect(r.event.data).toEqual({
+        note: 'Resuelto por teléfono',
+        forced: false,
+      });
+    });
+  });
+
   it.each([
     ['closed request', { status: 'RESOLVED' as const }, 'REQUEST_CLOSED/409'],
     [

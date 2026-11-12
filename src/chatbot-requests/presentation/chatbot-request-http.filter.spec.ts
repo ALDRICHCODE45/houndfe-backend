@@ -83,3 +83,25 @@ describe('ChatbotRequestHttpFilter (bot intake codes)', () => {
     ).toMatchObject({ statusCode: 422, code: 'SCHEDULING_DISABLED' });
   });
 });
+
+describe('ChatbotRequestHttpFilter (unit 12 complaint outcome)', () => {
+  it('answers COMPLAINT_OUTCOME_REQUIRED with a fixed message and the field error', () => {
+    const { status, body } = run(
+      new ChatbotRequestCommandError(
+        'COMPLAINT_OUTCOME_REQUIRED',
+        422,
+        { version: 4, status: 'IN_PROGRESS', claimedBy: null },
+        { fieldErrors: [{ path: 'complaintOutcome', code: 'REQUIRED' }] },
+      ),
+    );
+
+    expect(status).toBe(422);
+    expect(body).toEqual({
+      statusCode: 422,
+      code: 'COMPLAINT_OUTCOME_REQUIRED',
+      message: 'A complaint needs its outcome to be closed',
+      current: { version: 4, status: 'IN_PROGRESS', claimedBy: null },
+      fieldErrors: [{ path: 'complaintOutcome', code: 'REQUIRED' }],
+    });
+  });
+});

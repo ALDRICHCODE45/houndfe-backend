@@ -111,7 +111,8 @@ export class LinkCustomerDto extends ExpectedVersionDto {
 /**
  * Unit 11 (§4.8 `finish {expectedVersion, note ≤ 1000, complaintOutcome?}`).
  * `note` is `unknown` on purpose: `parseFinishNote` (domain) owns the rules.
- * `complaintOutcome` is only recorded in this unit (unit 12 enforces it).
+ * `complaintOutcome` (unit 12): checked against the four values here (400);
+ * the domain makes it mandatory for a COMPLAINT (422) and ignores it elsewhere.
  */
 export class FinishDto extends ExpectedVersionDto {
   @IsDefined()

@@ -145,7 +145,7 @@ export type StaffCommand =
   /** Unit 10: `text` is already cleaned by `parseReplyText`. */
   | { kind: 'reply'; text: string }
   /** Unit 11 (§4.8): `note` is already cleaned by `parseFinishNote`. */
-  | { kind: 'finish'; note: string; complaintOutcome?: string };
+  | { kind: 'finish'; note: string; complaintOutcome?: string | null };
 
 export interface StaffCommandInput {
   requestId: string;
@@ -340,7 +340,9 @@ export type ChatbotRequestCommandErrorCode =
   | 'WINDOW_CLOSED'
   | 'WINDOW_OPEN'
   | 'TEMPLATE_ALREADY_SENT'
-  | 'TEMPLATE_NOT_CONFIGURED';
+  | 'TEMPLATE_NOT_CONFIGURED'
+  // Complaints (unit 12).
+  | 'COMPLAINT_OUTCOME_REQUIRED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -426,7 +428,16 @@ function toView(row: ChatbotRequestRow): ChatbotRequestView {
 }
 
 const rejected = (error: ChatbotRequestError) =>
-  new ChatbotRequestCommandError(error.code, error.httpStatus, error.current);
+  new ChatbotRequestCommandError(
+    error.code,
+    error.httpStatus,
+    error.current,
+    // Unit 12: the field the FE has to fill (same `{path, code}` shape as the
+    // settings screen, S11).
+    error.code === 'COMPLAINT_OUTCOME_REQUIRED'
+      ? { fieldErrors: [{ path: 'complaintOutcome', code: 'REQUIRED' }] }
+      : undefined,
+  );
 
 function commandHash(input: StaffCommandInput): string {
   const command = input.command as Record<string, unknown>;
