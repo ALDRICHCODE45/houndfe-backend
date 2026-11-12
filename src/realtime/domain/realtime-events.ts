@@ -72,7 +72,7 @@ export const isNotificationStreamType = (
  * (`realtime-event-log.integration.spec.ts` compares them for every enum
  * value), so a new audit type must be decided in both places.
  *
- * `null` = not announced: templates, finish, reschedule and delivery
+ * `null` = not announced: templates, finish and delivery
  * outcomes do not change the inbox row (they belong to units 9 to 11); the
  * target of a merge keeps its row unchanged; backfilled events are skipped by
  * the trigger itself.
@@ -110,9 +110,11 @@ export function REQUEST_EVENT_TO_REALTIME(
       return data.milestone === 'OVERDUE'
         ? 'request.overdue'
         : 'request.updated';
+    // Unit 14: a reschedule moves `scheduledFor` and clears `needsReschedule`.
+    case 'RESCHEDULED':
+      return 'request.updated';
     case 'TEMPLATE_SENT':
     case 'FINISHED':
-    case 'RESCHEDULED':
     case 'DELIVERY_OUTCOME':
       return null;
   }

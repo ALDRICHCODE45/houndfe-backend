@@ -76,3 +76,9 @@ describe('TENANT_SCOPED_MODELS — live conversation registration (human-interve
     },
   );
 });
+
+describe('TENANT_SCOPED_MODELS — scheduled conversations (human-intervention unit 14)', () => {
+  it('scopes ScheduledSlotCounter by tenant', () => {
+    expect(TENANT_SCOPED_MODELS.has('ScheduledSlotCounter')).toBe(true);
+  });
+});

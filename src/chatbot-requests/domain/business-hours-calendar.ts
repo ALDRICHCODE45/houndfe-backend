@@ -234,6 +234,29 @@ export class BusinessCalendar {
     return result;
   }
 
+  /**
+   * The open ranges (whole, not clipped) of every local date that intersects
+   * `[from, to)`, as real instants, in order. Unit 14 lays its blocks out from
+   * each range's opening.
+   */
+  openRangesBetween(from: Date, to: Date): Array<[Date, Date]> {
+    const start = from.getTime();
+    const stop = to.getTime();
+    const found: Array<[Date, Date]> = [];
+    if (stop <= start) return found;
+    let date = this.localDateOf(start);
+    for (let scanned = 0; scanned <= MAX_SCAN_DAYS * 5; scanned++) {
+      for (const [open, close] of this.intervalsOf(date)) {
+        if (close > start && open < stop) {
+          found.push([new Date(open), new Date(close)]);
+        }
+      }
+      if (this.dayStartAfter(date) >= stop) break;
+      date = nextDate(date);
+    }
+    return found;
+  }
+
   /** `true` when the instant is inside an open range (the close is outside). */
   isOpenAt(at: Date): boolean {
     const ms = at.getTime();

@@ -539,6 +539,7 @@ model Tenant {
   // human-intervention / unit 11 — live conversation sessions.
   chatbotLiveSessions         ChatbotLiveSession[]
   chatbotSessionTemplates     ChatbotSessionTemplate[]
+  scheduledSlotCounters       ScheduledSlotCounter[]
   // human-intervention / unit 6 — in-app notices.
   notifications               Notification[]
   // human-intervention / unit 7a — chatbot attention settings and their audit.
@@ -3855,6 +3856,20 @@ model ChatbotRequest {
   scheduledFor            DateTime?
   requiresTemplateAtStart Boolean   @default(false)
   needsReschedule         Boolean   @default(false)
+  // Unit 14 (§4.9): the scheduled-conversation sweep's durable cursor. Stage 0 =
+  // the reminder is due at `scheduleDueAt` (scheduledFor - 10 min), 1 = the
+  // "solicitud nueva" notice is due (scheduledFor), 2 = nothing left (due NULL).
+  // Migration-only partial index `chatbot_requests_schedule_due_idx`
+  // ("scheduleDueAt") WHERE "scheduleDueAt" IS NOT NULL (the sweep reads only
+  // due rows), and the partial unique `chatbot_requests_open_scheduled_uq`
+  // ("tenantId", "customerKey", "subtype") WHERE "scheduledFor" IS NOT NULL AND
+  // status IN ('NEW','IN_PROGRESS') (one open scheduled request per customer
+  // and subtype, Q4).
+  // S20 (6): monotonic per request; 1 at booking, +1 on every reschedule and on
+  // the cancel of a scheduled request. Carried by both feed items and answers.
+  scheduleVersion         Int       @default(0)
+  scheduleStage           Int       @default(0) @db.SmallInt
+  scheduleDueAt           DateTime?
 
   // Bot-written, untrusted plain text (§6.1).
   summary  String  @db.VarChar(140)
@@ -4418,4 +4433,20 @@ model ChatbotSessionTemplate {
 
   @@unique([tenantId, requestId, windowClosedAt])
   @@map("chatbot_session_templates")
+}
+
+// Unit 14 (§4.9, §10.1 "Agenda"): one row per `(tenant, block start)` that was
+// ever booked. `booked` is the number of non-cancelled requests scheduled at
+// `startsAt`, written ONLY by `INSERT … ON CONFLICT DO UPDATE … WHERE booked <
+// max` (the row lock serializes the last seat) and released on cancel and on a
+// move. The primary key serves the slot listing (a range read of full blocks).
+model ScheduledSlotCounter {
+  tenantId String
+  startsAt DateTime
+  booked   Int      @default(0)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, startsAt])
+  @@map("scheduled_slot_counters")
 }
