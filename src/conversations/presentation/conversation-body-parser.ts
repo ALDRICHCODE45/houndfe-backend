@@ -21,7 +21,15 @@
  * parser's own message is ever echoed.
  */
 import type { INestApplication } from '@nestjs/common';
-import express, { type RequestHandler } from 'express';
+import type { RequestHandler } from 'express';
+import { createRequire } from 'node:module';
+
+// `express` is not a direct dependency (pnpm): resolve it through
+// @nestjs/platform-express, like the other route-scoped body parsers.
+const localRequire = createRequire(__filename);
+const express = createRequire(localRequire.resolve('@nestjs/platform-express'))(
+  'express',
+) as typeof import('express');
 
 export const CONVERSATION_BATCH_BODY_BYTES = 3 * 1024 * 1024;
 export const CONVERSATION_BATCH_BODY_LIMIT = CONVERSATION_BATCH_BODY_BYTES;
