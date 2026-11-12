@@ -14,6 +14,7 @@ import {
   linkCustomer,
   reassign,
   release,
+  reply,
   resolve,
   type ChatbotRequestState,
   type CommandResult,
@@ -38,14 +39,16 @@ export function closedWindowCutoff(now: Date): Date {
 
 /**
  * Commands the caller can run right now. `RESCHEDULE` is never offered (the
- * route arrives with unit 14), nor are the reply, message, template and
- * finish actions: their routes do not exist yet.
+ * route arrives with unit 14), nor are the message, template and finish
+ * actions: their routes do not exist yet. `REPLY` (unit 10) is the clarification
+ * answer.
  */
 export type AllowedAction =
   | 'CLAIM'
   | 'RELEASE'
   | 'REASSIGN'
   | 'RESOLVE'
+  | 'REPLY'
   | 'MERGE'
   | 'LINK_CUSTOMER'
   | 'CANCEL';
@@ -82,7 +85,9 @@ export interface AllowedActionsOptions {
  *   REQUEST_CLAIMED_BY_OTHER  `claim` / `resolve` of a request someone holds
  *   NOT_ASSIGNEE              `release` / `cancel` / `merge` of a request
  *                             someone else holds, without the assignment
- *                             permission
+ *                             permission; `reply` of a clarification that is
+ *                             not yours (nobody holds it yet, or someone else
+ *                             does): the assignment permission does not lift it
  *   CANCEL_NOT_ALLOWED        a decision is resolved, never cancelled; a
  *                             started live session pins the request
  */
@@ -188,6 +193,21 @@ export function computeActionAvailability(
         : answerOf(
             resolve(state, { actor, expectedVersion, action: 'RESOLVE', now }),
           ),
+    ],
+    [
+      'REPLY',
+      canUpdate,
+      // The real command: only a clarification applies (a decision resolves,
+      // a conversation finishes), and only its assignee may answer.
+      answerOf(
+        reply(state, {
+          actor,
+          expectedVersion,
+          replyId: 'candidate',
+          text: 'candidate',
+          now,
+        }),
+      ),
     ],
     [
       'MERGE',

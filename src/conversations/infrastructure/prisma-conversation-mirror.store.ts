@@ -97,27 +97,43 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
       if (fresh.length === 0) return { accepted: [], duplicates };
 
       await this.assertMedia(db, tenantId, fresh);
+      const replies = await this.resolveReplies(
+        db,
+        tenantId,
+        input.conversationRef,
+        fresh,
+      );
 
-      const stored = fresh.map((message, i) => ({
-        message,
-        id: randomUUID(),
-        seq: chat.nextSeq + i,
-      }));
+      const stored = fresh.map((message, i) => {
+        const reply = message.staffReplyId
+          ? replies.get(message.staffReplyId)
+          : undefined;
+        return {
+          message,
+          // Unit 10: a staff reply keeps its own id (the audit's message id).
+          id: reply ? reply.replyId : randomUUID(),
+          seq: chat.nextSeq + i,
+          reply,
+        };
+      });
       try {
         await db.$executeRaw(Prisma.sql`
         INSERT INTO "conversation_messages"
           ("id", "tenantId", "conversationId", "seq", "direction", "author",
+           "staffUserId", "clientMessageId",
            "waMessageId", "type", "text", "mediaId", "providerTimestamp",
            "observedAt", "receivedAt", "deliveryStatus", "purgeAfter")
         VALUES ${Prisma.join(
           stored.map(
-            ({ message: m, id, seq }) => Prisma.sql`(
+            ({ message: m, id, seq, reply }) => Prisma.sql`(
               ${id}, ${tenantId}, ${chat.id}, ${seq},
               ${m.direction}::"ConversationMessageDirection",
-              ${m.author}::"ConversationMessageAuthor",
+              ${reply ? 'STAFF' : m.author}::"ConversationMessageAuthor",
+              ${reply ? reply.staffUserId : null},
+              ${reply ? reply.replyId : null},
               ${m.waMessageId}, ${m.type}::"ConversationMessageType", ${m.text},
               ${m.mediaId}, ${m.providerTimestamp}, ${m.observedAt}, now(),
-              ${initialDeliveryStatus(m.direction, m.author)}::"ConversationDeliveryStatus",
+              ${initialDeliveryStatus(m.direction, reply ? 'BOT' : m.author)}::"ConversationDeliveryStatus",
               now() + interval '12 months')`,
           ),
         )}`);
@@ -152,14 +168,21 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         tenantId,
         input.conversationRef,
       );
-      const drafts: RealtimeEventDraft[] = stored.flatMap(({ id, seq }) =>
-        requestIds.map((requestId) => ({
-          tenantId,
-          userId: null,
-          type: 'conversation.message',
-          requestId,
-          payload: { messageId: id, seq },
-        })),
+      // Unit 10: a staff reply closed its own request, which is no longer
+      // "open" but is the one its author is looking at, so it hears of the
+      // message too.
+      const drafts: RealtimeEventDraft[] = stored.flatMap(
+        ({ id, seq, reply }) =>
+          (reply && !requestIds.includes(reply.requestId)
+            ? [reply.requestId, ...requestIds]
+            : requestIds
+          ).map((requestId) => ({
+            tenantId,
+            userId: null,
+            type: 'conversation.message',
+            requestId,
+            payload: { messageId: id, seq },
+          })),
       );
       // S12: a customer message changes `unreadCustomerMessages` of every open
       // request of the chat, so each gets ONE `request.updated` per batch (the
@@ -187,6 +210,58 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         duplicates,
       };
     });
+  }
+
+  /**
+   * Unit 10: the staff replies the bot says it sent. A `staffReplyId` must be
+   * the id of a RESOLVED clarification of THIS tenant and THIS chat; the staff
+   * user comes from the backend's own record (`resolvedByActorId`), never from
+   * the batch. An unknown, foreign or other-chat id is a bug in the bot: the
+   * whole batch is refused (`422 REPLY_NOT_FOUND`), never mirrored as the bot's.
+   */
+  private async resolveReplies(
+    db: Db,
+    tenantId: string,
+    conversationRef: string,
+    messages: ParsedMessage[],
+  ): Promise<
+    Map<string, { replyId: string; requestId: string; staffUserId: string }>
+  > {
+    const wanted = messages.flatMap((m) =>
+      m.staffReplyId ? [m.staffReplyId] : [],
+    );
+    const found = new Map<
+      string,
+      { replyId: string; requestId: string; staffUserId: string }
+    >();
+    if (wanted.length === 0) return found;
+    const rows = await db.$queryRaw<
+      Array<{
+        replyId: string;
+        requestId: string;
+        staffUserId: string | null;
+        conversationRef: string | null;
+      }>
+    >(Prisma.sql`
+      SELECT "resolution" ->> 'replyId' AS "replyId", "id" AS "requestId",
+             "resolvedByActorId" AS "staffUserId", "conversationRef"
+      FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId}
+        AND "kind" = 'CLARIFICATION' AND "status" = 'RESOLVED'
+        AND "resolution" ->> 'replyId' = ANY(${wanted}::text[])`);
+    for (const row of rows) {
+      if (row.conversationRef === conversationRef && row.staffUserId) {
+        found.set(row.replyId, {
+          replyId: row.replyId,
+          requestId: row.requestId,
+          staffUserId: row.staffUserId,
+        });
+      }
+    }
+    if (wanted.some((id) => !found.has(id))) {
+      throw new ChatbotRequestCommandError('REPLY_NOT_FOUND', 422);
+    }
+    return found;
   }
 
   private async assertMedia(

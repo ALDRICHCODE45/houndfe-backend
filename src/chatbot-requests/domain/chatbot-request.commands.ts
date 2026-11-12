@@ -91,7 +91,8 @@ export interface ChatbotRequestEventDraft {
     | 'RESOLVED'
     | 'CANCELLED'
     | 'MERGED'
-    | 'CUSTOMER_LINKED';
+    | 'CUSTOMER_LINKED'
+    | 'REPLIED';
   actorKind: 'USER' | 'SERVICE';
   actorId: string;
   actorDisplayName: string | null;
@@ -359,6 +360,64 @@ export function resolve(
   if (state.version !== cmd.expectedVersion)
     return reject(state, 'VERSION_CONFLICT', 409);
   return resolved(state, cmd);
+}
+
+/**
+ * Unit 10 (§2.2: `IN_PROGRESS --> RESOLVED: reply`, §3.10: `update:ChatbotRequest`,
+ * `403 NOT_ASSIGNEE`; owner decision S13). Only a `CLARIFICATION` is answered
+ * with a reply (decisions resolve, conversations finish: §12.6). Replying to a
+ * NEW request claims it for the replier in the same write, exactly as `resolve`
+ * does for a decision (the claim columns ride in the same patch; one event, no
+ * separate CLAIMED). A request held by someone else can only be answered by its
+ * holder: `NOT_ASSIGNEE`, with no reassigner override. The reply closes the
+ * request in the same write. The text goes to `resolution` (kept after the
+ * conversation purge, §3.6); the audit event holds only the message id (§6.2).
+ * Check order: closed, kind, holder, version.
+ */
+export function reply(
+  state: ChatbotRequestState,
+  cmd: {
+    actor: StaffActor;
+    expectedVersion: number;
+    /** The id of the message the bot will send and mirror (clientMessageId). */
+    replyId: string;
+    text: string;
+    now: Date;
+  },
+): CommandResult {
+  if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
+  if (state.kind !== 'CLARIFICATION')
+    return reject(state, 'ACTION_NOT_ALLOWED', 422);
+  if (heldByOther(state, cmd.actor)) return reject(state, 'NOT_ASSIGNEE', 403);
+  if (state.version !== cmd.expectedVersion)
+    return reject(state, 'VERSION_CONFLICT', 409);
+  // S13: the implicit claim of a NEW request (same columns as `resolve`).
+  const implicitClaim =
+    state.status === 'NEW'
+      ? {
+          assigneeUserId: cmd.actor.userId,
+          assigneeDisplayName: cmd.actor.displayName,
+          claimedAt: cmd.now,
+        }
+      : {};
+  return accept(
+    state,
+    {
+      status: 'RESOLVED',
+      ...implicitClaim,
+      resolvedAt: cmd.now,
+      resolvedByActorId: cmd.actor.userId,
+      resolvedByDisplayName: cmd.actor.displayName,
+      closedAt: cmd.now,
+      nextSlaCheckAt: null,
+      resolution: { action: 'REPLY', replyId: cmd.replyId, text: cmd.text },
+    },
+    {
+      type: 'REPLIED',
+      ...userEvent(cmd.actor),
+      data: { messageId: cmd.replyId },
+    },
+  );
 }
 
 /**

@@ -118,6 +118,10 @@ function fakeStore(
       calls.push(`enqueueCancelled:${id}:${reason}:${customerNote ?? ''}`);
       return Promise.resolve();
     },
+    enqueueClarificationAnswer: (id, replyId) => {
+      calls.push(`enqueueClarificationAnswer:${id}:${replyId}`);
+      return Promise.resolve();
+    },
     lockZoneOf: () => {
       calls.push('lockZoneOf');
       return Promise.resolve();

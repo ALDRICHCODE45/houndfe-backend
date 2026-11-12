@@ -433,6 +433,43 @@ export function buildAnswerPayload(source: AnswerSource): AnswerPayload {
   }
 }
 
+/**
+ * `request.answered` of a staff clarification reply (unit 10; §3.3 example
+ * `{kind: "CLARIFICATION", text, prefix}`). Same convention as the decision
+ * answers (L38): the bot composes the wording with each customer's tú/usted
+ * from the structured fields; `text` and `prefix` are an usted fallback.
+ * `staffText` is what staff wrote, to relay as written after the team prefix.
+ * `replyId` is the message id of this reply: the bot sends it back as
+ * `staffReplyId` when it mirrors the message it sent, which is how the mirror
+ * attributes the message to the staff member (author STAFF) and not to the bot.
+ * There is no `legacyId`: a clarification has no wrapped row; the item's own
+ * `requestId` is the id the bot tracks.
+ */
+export type ClarificationAnswerPayload = {
+  kind: 'CLARIFICATION';
+  subtype: 'UNKNOWN_QUESTION';
+  action: 'REPLY';
+  replyId: string;
+  text: string;
+  prefix: string;
+  staffText: string;
+};
+
+export function buildClarificationAnswerPayload(input: {
+  replyId: string;
+  text: string;
+}): ClarificationAnswerPayload {
+  return {
+    kind: 'CLARIFICATION',
+    subtype: 'UNKNOWN_QUESTION',
+    action: 'REPLY',
+    replyId: input.replyId,
+    text: input.text,
+    prefix: TEAM_REPLY_PREFIX,
+    staffText: input.text,
+  };
+}
+
 /** `request.cancelled` (§12.14): no message of its own; the bot decides. */
 export function buildCancelPayload(input: {
   requestId: string;

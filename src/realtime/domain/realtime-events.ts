@@ -63,11 +63,11 @@ export const isNotificationStreamType = (
 
 /**
  * The single source of truth for "which audit event is announced, as what".
- * The SQL trigger of migration 20261112000000 implements exactly this table
+ * The SQL trigger (migration 20261112000000, extended by 20261112050000) implements exactly this table
  * (`realtime-event-log.integration.spec.ts` compares them for every enum
  * value), so a new audit type must be decided in both places.
  *
- * `null` = not announced: replies, templates, finish, reschedule and delivery
+ * `null` = not announced: templates, finish, reschedule and delivery
  * outcomes do not change the inbox row (they belong to units 9 to 11); the
  * target of a merge keeps its row unchanged; backfilled events are skipped by
  * the trigger itself.
@@ -88,6 +88,10 @@ export function REQUEST_EVENT_TO_REALTIME(
       return 'request.reassigned';
     case 'RESOLVED':
       return 'request.resolved';
+    // Unit 10: a clarification reply closes the request (§2.2), so the inbox
+    // row changes exactly as it does for a resolve.
+    case 'REPLIED':
+      return 'request.resolved';
     case 'CANCELLED':
       return 'request.cancelled';
     // The source of a staff merge is closed (SUPERSEDED); the target's row is
@@ -101,7 +105,6 @@ export function REQUEST_EVENT_TO_REALTIME(
       return data.milestone === 'OVERDUE'
         ? 'request.overdue'
         : 'request.updated';
-    case 'REPLIED':
     case 'TEMPLATE_SENT':
     case 'FINISHED':
     case 'RESCHEDULED':

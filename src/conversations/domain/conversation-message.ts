@@ -142,6 +142,12 @@ export interface ParsedMessage {
   type: BotMessageType;
   text: string | null;
   mediaId: string | null;
+  /**
+   * Unit 10: the `replyId` of the `request.answered` item this message carries
+   * (an outgoing TEXT only). The store attributes the message to the staff
+   * member of that reply (author STAFF); the bot never names the author.
+   */
+  staffReplyId?: string | null;
   /** Meta's timestamp. */
   providerTimestamp: Date;
   /** The bot's own clock when it saw the message (display only; seq is ours). */
@@ -156,6 +162,7 @@ const MESSAGE_KEYS = new Set([
   'text',
   'mediaId',
   'kind',
+  'staffReplyId',
   'providerTimestamp',
   'observedAt',
 ]);
@@ -186,6 +193,19 @@ function parseOne(raw: unknown, now: Date): ParsedMessage {
   const messageType = type as BotMessageType;
   if (messageType === 'TEMPLATE' && direction !== 'OUT') return invalid();
   if (raw.kind !== undefined && messageType !== 'UNSUPPORTED') return invalid();
+  let staffReplyId: string | null = null;
+  if (raw.staffReplyId !== undefined) {
+    // Only the outgoing text of a staff reply carries one (unit 10).
+    if (
+      typeof raw.staffReplyId !== 'string' ||
+      direction !== 'OUT' ||
+      messageType !== 'TEXT'
+    ) {
+      return invalid();
+    }
+    staffReplyId = raw.staffReplyId.toLowerCase();
+    if (!UUID.test(staffReplyId)) return invalid();
+  }
 
   let text = parseText(raw.text);
   let mediaId: string | null = null;
@@ -216,6 +236,7 @@ function parseOne(raw: unknown, now: Date): ParsedMessage {
     type: messageType,
     text,
     mediaId,
+    staffReplyId,
     providerTimestamp: parseTimestamp(raw.providerTimestamp, now),
     observedAt: parseTimestamp(raw.observedAt, now),
   };
@@ -232,6 +253,10 @@ export function parseMessageBatch(body: unknown, now: Date): ParsedMessage[] {
   const parsed = messages.map((m) => parseOne(m, now));
   const ids = new Set(parsed.map((m) => m.waMessageId));
   if (ids.size !== parsed.length) return invalid();
+  const replyIds = parsed.flatMap((m) =>
+    m.staffReplyId ? [m.staffReplyId] : [],
+  );
+  if (new Set(replyIds).size !== replyIds.length) return invalid();
   return parsed;
 }
 

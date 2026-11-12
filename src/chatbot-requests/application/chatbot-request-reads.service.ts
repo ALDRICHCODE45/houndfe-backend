@@ -677,6 +677,43 @@ export class ChatbotRequestReadsService {
     };
   }
 
+  /** `reply` of the detail: `{id, text, repliedBy, repliedAt}` or `null`. */
+  private replyOf(
+    request: {
+      kind: string;
+      resolution: unknown;
+      resolvedByActorId: string | null;
+      resolvedByDisplayName: string | null;
+    },
+    repliedAt: string | null,
+  ) {
+    const resolution = request.resolution as {
+      action?: unknown;
+      replyId?: unknown;
+      text?: unknown;
+    } | null;
+    if (
+      !repliedAt ||
+      request.kind !== 'CLARIFICATION' ||
+      resolution?.action !== 'REPLY' ||
+      typeof resolution.replyId !== 'string' ||
+      typeof resolution.text !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      id: resolution.replyId,
+      text: resolution.text,
+      repliedBy: request.resolvedByActorId
+        ? {
+            id: request.resolvedByActorId,
+            displayName: request.resolvedByDisplayName,
+          }
+        : null,
+      repliedAt,
+    };
+  }
+
   /** `GET /chatbot-requests/:id` (§3.8, §12.6). */
   async detail(reader: StaffReader, id: string) {
     const now = this.clock();
@@ -738,6 +775,9 @@ export class ChatbotRequestReadsService {
         this.toRow(r, view, reader),
       ),
       decision: record.decision ? { ...record.decision, resolution } : null,
+      // Unit 10: what staff answered to a clarification (a clarification has
+      // no `decision`). Kept after the conversation purge (§3.6).
+      reply: this.replyOf(request, resolved ? iso(request.resolvedAt) : null),
       ...(record.zoneImpact ? { zoneImpact: record.zoneImpact } : {}),
       deliveries: record.deliveries.map((d) => ({
         deliveryId: d.deliveryId,

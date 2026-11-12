@@ -489,6 +489,7 @@ describe('ChatbotRequestReadsService', () => {
     it('offers MERGE and LINK_CUSTOMER with update:ChatbotRequest, never without it', async () => {
       expect((await view(UPDATE)).allowedActions).toEqual([
         'CLAIM',
+        'REPLY',
         'MERGE',
         'LINK_CUSTOMER',
         'CANCEL',
@@ -500,7 +501,12 @@ describe('ChatbotRequestReadsService', () => {
       const none = await build({
         findDetail: jest.fn().mockResolvedValue(detail({ candidates: [] })),
       }).detail({ userId: 'u', ability: UPDATE as never }, 'r-1');
-      expect(none.allowedActions).toEqual(['CLAIM', 'MERGE', 'CANCEL']);
+      expect(none.allowedActions).toEqual([
+        'CLAIM',
+        'REPLY',
+        'MERGE',
+        'CANCEL',
+      ]);
       expect((await view(UPDATE)).allowedActions).toContain('LINK_CUSTOMER');
     });
 
@@ -517,7 +523,7 @@ describe('ChatbotRequestReadsService', () => {
       const out = await build({
         findDetail: jest.fn().mockResolvedValue(linked),
       }).detail({ userId: 'u', ability: UPDATE as never }, 'r-1');
-      expect(out.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+      expect(out.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
     });
   });
 });

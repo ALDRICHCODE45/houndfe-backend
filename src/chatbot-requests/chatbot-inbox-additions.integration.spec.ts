@@ -405,17 +405,22 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
 
     it('manager: from the row state and abilities, MERGE and LINK_CUSTOMER never on a row', async () => {
       const rows = await groupRows('manager');
+      // Unit 10 / S13: a NEW clarification can be answered (the reply claims
+      // it); someone else's only by its holder (denied NOT_ASSIGNEE).
       expect(rows.free).toMatchObject({
-        allowedActions: ['CLAIM', 'CANCEL'],
+        allowedActions: ['CLAIM', 'REPLY', 'CANCEL'],
         deniedActions: [],
       });
       expect(rows.mine).toMatchObject({
-        allowedActions: ['RELEASE', 'REASSIGN', 'CANCEL'],
+        allowedActions: ['RELEASE', 'REASSIGN', 'REPLY', 'CANCEL'],
         deniedActions: [],
       });
       expect(rows.theirs).toMatchObject({
         allowedActions: ['RELEASE', 'REASSIGN', 'CANCEL'],
-        deniedActions: [{ action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' }],
+        deniedActions: [
+          { action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' },
+          { action: 'REPLY', code: 'NOT_ASSIGNEE' },
+        ],
       });
       expect(rows.restock).toMatchObject({
         allowedActions: ['CLAIM', 'RESOLVE'],
@@ -430,8 +435,8 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
 
     it('cashier: the same state, other abilities, codes only', async () => {
       const rows = await groupRows('cashier');
-      expect(rows.free.allowedActions).toEqual(['CLAIM', 'CANCEL']);
-      expect(rows.mine.allowedActions).toEqual(['RELEASE', 'CANCEL']);
+      expect(rows.free.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
+      expect(rows.mine.allowedActions).toEqual(['RELEASE', 'REPLY', 'CANCEL']);
       expect(rows.mine.deniedActions).toEqual([
         { action: 'REASSIGN', code: 'INSUFFICIENT_PERMISSIONS' },
       ]);
@@ -440,6 +445,7 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
         { action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' },
         { action: 'RELEASE', code: 'NOT_ASSIGNEE' },
         { action: 'REASSIGN', code: 'INSUFFICIENT_PERMISSIONS' },
+        { action: 'REPLY', code: 'NOT_ASSIGNEE' },
         { action: 'CANCEL', code: 'NOT_ASSIGNEE' },
       ]);
       expect(rows.restock.allowedActions).toEqual(['CLAIM']);
@@ -456,6 +462,7 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
       expect(rows.free.allowedActions).toEqual([]);
       expect(rows.free.deniedActions).toEqual([
         { action: 'CLAIM', code: 'INSUFFICIENT_PERMISSIONS' },
+        { action: 'REPLY', code: 'INSUFFICIENT_PERMISSIONS' },
         { action: 'CANCEL', code: 'INSUFFICIENT_PERMISSIONS' },
       ]);
     });
@@ -509,11 +516,11 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
         expect(Array.isArray(row.deniedActions)).toBe(true);
       }
       const free = byFolioLabel(list.body.items).free;
-      expect(free.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+      expect(free.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
 
       const detail = await get(`/chatbot-requests/${free.id}`, 'cashier');
       expect(detail.status).toBe(200);
-      expect(detail.body.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+      expect(detail.body.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
       expect(detail.body.deniedActions).toEqual([]);
       expect(detail.body.otherOpenRequests.length).toBeGreaterThan(0);
       for (const other of detail.body.otherOpenRequests) {
@@ -559,7 +566,11 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
       const res = await get(`/chatbot-requests/${a.id}/merge-candidates`);
       expect(res.status).toBe(200);
       expect(res.body.items).toHaveLength(1);
-      expect(res.body.items[0].allowedActions).toEqual(['CLAIM', 'CANCEL']);
+      expect(res.body.items[0].allowedActions).toEqual([
+        'CLAIM',
+        'REPLY',
+        'CANCEL',
+      ]);
     });
   });
 
@@ -1188,7 +1199,7 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
         expect(rows).toHaveLength(2);
         for (const row of rows) {
           expect(row).toMatchObject({ slaLevel: null, slaPaused: false });
-          expect(row.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+          expect(row.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
         }
         const lines = warn.mock.calls
           .map((call) => String(call[0]))

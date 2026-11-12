@@ -20,6 +20,7 @@ import { Prisma } from '@prisma/client';
 import {
   buildAnswerPayload,
   buildCancelPayload,
+  buildClarificationAnswerPayload,
   buildMergedPayload,
   buildOverdueNoticePayload,
   FEED_CHANNEL,
@@ -232,6 +233,42 @@ function answerSource(
     default:
       return unresolved();
   }
+}
+
+/**
+ * `request.answered` of a staff clarification reply (unit 10). Call it after
+ * the request was written as RESOLVED in this transaction (rule 6: state
+ * change, then feed, then the group refresh). The partial unique index
+ * `chatbot_feed_items_clarification_answer_uq` (migration 20261112050000)
+ * keeps it to one per request even if a caller were to repeat it.
+ */
+export async function enqueueClarificationAnswer(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  replyId: string,
+  text: string,
+): Promise<void> {
+  const request = await tx.chatbotRequest.findFirst({
+    where: {
+      tenantId,
+      id: requestId,
+      status: 'RESOLVED',
+      kind: 'CLARIFICATION',
+    },
+    select: { conversationRef: true },
+  });
+  if (!request) {
+    throw new Error('feed reply: the clarification is not resolved');
+  }
+  await insertFeedItems(tx, tenantId, [
+    {
+      requestId,
+      type: FEED_TYPE.answered,
+      conversationRef: request.conversationRef,
+      payload: buildClarificationAnswerPayload({ replyId, text }),
+    },
+  ]);
 }
 
 /** `request.cancelled` (§12.14) for a staff cancellation. */

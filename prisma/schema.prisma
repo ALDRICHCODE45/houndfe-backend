@@ -3859,6 +3859,9 @@ model ChatbotRequest {
   deliveryZoneRequestId String? @unique
   receiptEvidenceId     String? @unique
 
+  // A staff clarification reply stores `{action: 'REPLY', replyId, text}` here
+  // (unit 10); migration-only unique index `chatbot_requests_reply_id_uq` on
+  // ("tenantId", resolution->>'replyId') WHERE that is not null (20261112050000).
   resolution            Json?
   resolvedAt            DateTime?
   resolvedByActorId     String?
@@ -4028,6 +4031,10 @@ model ChatbotFeedItem {
   // expressible in Prisma's DSL): `chatbot_feed_items_overdue_notice_uq`, UNIQUE
   // ("tenantId", "requestId") WHERE "type" = 'request.overdue_notice' — at most one
   // overdue notice per request; the sweep inserts with ON CONFLICT DO NOTHING.
+  // Migration-only (20261112050000_clarification_replies):
+  // `chatbot_feed_items_clarification_answer_uq`, UNIQUE ("tenantId", "requestId")
+  // WHERE "type" = 'request.answered' AND payload->>'kind' = 'CLARIFICATION' — at
+  // most one staff clarification answer per request (unit 10).
   @@index([tenantId, cursor])
   @@index([tenantId, requestId])
   @@index([createdAt])

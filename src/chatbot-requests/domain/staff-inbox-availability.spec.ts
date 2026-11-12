@@ -13,6 +13,7 @@ import {
   linkCustomer,
   reassign,
   release,
+  reply,
   resolve,
   type ChatbotRequestKind,
   type ChatbotRequestState,
@@ -105,11 +106,15 @@ describe('computeActionAvailability: deniedActions', () => {
       { action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' },
       { action: 'RELEASE', code: 'NOT_ASSIGNEE' },
       { action: 'REASSIGN', code: 'INSUFFICIENT_PERMISSIONS' },
+      // Unit 10: replying is the assignee's alone, for everyone.
+      { action: 'REPLY', code: 'NOT_ASSIGNEE' },
       { action: 'CANCEL', code: 'NOT_ASSIGNEE' },
     ]);
-    // A manager may release, reassign and cancel it: only claiming is denied.
+    // A manager may release, reassign and cancel it: only claiming and
+    // replying (the assignee's alone, unit 10) are denied.
     expect(denied(other, MANAGER)).toEqual([
       { action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' },
+      { action: 'REPLY', code: 'NOT_ASSIGNEE' },
     ]);
   });
 
@@ -183,13 +188,18 @@ describe('computeActionAvailability: deniedActions', () => {
     };
     expect(denied(open, READ_ONLY, facts)).toEqual([
       { action: 'CLAIM', code: 'INSUFFICIENT_PERMISSIONS' },
+      { action: 'REPLY', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'MERGE', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'LINK_CUSTOMER', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'CANCEL', code: 'INSUFFICIENT_PERMISSIONS' },
     ]);
     // A row has no such facts: it can never list them as allowed or denied.
     const row = computeActionAvailability(open, READ_ONLY, ME);
-    expect(row.deniedActions.map((d) => d.action)).toEqual(['CLAIM', 'CANCEL']);
+    expect(row.deniedActions.map((d) => d.action)).toEqual([
+      'CLAIM',
+      'REPLY',
+      'CANCEL',
+    ]);
     const rowManager = computeActionAvailability(open, MANAGER, ME);
     expect(rowManager.allowedActions).not.toContain('MERGE');
     expect(rowManager.allowedActions).not.toContain('LINK_CUSTOMER');
@@ -286,6 +296,17 @@ function legacyAllowedActions(
         resolve(s, { actor, expectedVersion, action: 'RESOLVE', now }).ok,
     ],
     [
+      'REPLY',
+      canUpdate &&
+        reply(s, {
+          actor,
+          expectedVersion,
+          replyId: 'candidate',
+          text: 'candidate',
+          now,
+        }).ok,
+    ],
+    [
       'MERGE',
       canUpdate &&
         options.hasMergeCandidate === true &&
@@ -319,7 +340,7 @@ function legacyAllowedActions(
   return offered.filter(([, ok]) => ok).map(([action]) => action);
 }
 
-describe('computeAllowedActions is unchanged (differential vs the pre-S8 rules)', () => {
+describe('computeAllowedActions is unchanged (differential vs the pre-S8 rules, plus unit 10 REPLY)', () => {
   const kinds: Array<[ChatbotRequestKind, ChatbotRequestSubtype]> = [
     ['DECISION', 'RESTOCK'],
     ['DECISION', 'EXPIRATION'],

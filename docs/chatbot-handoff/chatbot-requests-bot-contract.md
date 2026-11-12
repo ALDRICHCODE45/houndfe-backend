@@ -1,6 +1,6 @@
-# Chatbot ↔ backend: human requests (slices 5a, 5b, 5c; conversation mirror and media: unit 9)
+# Chatbot ↔ backend: human requests (slices 5a, 5b, 5c; conversation mirror and media: unit 9; clarification replies: unit 10)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). The **conversation mirror** (`messages:batch`, `statuses:batch`) and **media** (`POST /chatbot-api/media`) are implemented (unit 9, section "Conversation mirror and media" below; this is what the outbox's `MESSAGE_MIRROR` rows send). Not yet: `cancel-batch`, `reschedule`, scheduling slots, `GET /conversations/:ref/state`, `session-ack`, and the feed types of later units (`request.cancel_ack`, `conversation.*`, `template.requested`).
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). The **conversation mirror** (`messages:batch`, `statuses:batch`) and **media** (`POST /chatbot-api/media`) are implemented (unit 9, section "Conversation mirror and media" below; this is what the outbox's `MESSAGE_MIRROR` rows send). **Clarification replies** (a staff answer to an `UNKNOWN_QUESTION`, delivered through the feed, deferred while the 24 h window is closed, and mirrored as the staff member's message) are unit 10, section "Clarification replies (unit 10)" below. Not yet: `cancel-batch`, `reschedule`, scheduling slots, `GET /conversations/:ref/state`, `session-ack`, and the feed types of later units (`request.cancel_ack`, `conversation.*`, `template.requested`).
 
 ## Common rules
 
@@ -98,7 +98,7 @@ Scope `requests:cancel`, class `write`. Body `{ "reason": "CUSTOMER_WITHDREW" | 
 | Status / code | When |
 | --- | --- |
 | `404 NOT_FOUND` | unknown id, or an id of another branch |
-| `409 ALREADY_RESOLVED` | the request is `RESOLVED`; the body carries `resolution` (what staff decided, e.g. `{"action":"PROVIDE_RESTOCK_ESTIMATE","restockDays":7,"via":"LEGACY_ROUTE"}` for a stock decision) so the bot delivers it instead of saying "cancelled". Clarification replies (`resolution` with text) arrive with unit 10; until then only decisions have a `resolution` |
+| `409 ALREADY_RESOLVED` | the request is `RESOLVED`; the body carries `resolution` (what staff decided, e.g. `{"action":"PROVIDE_RESTOCK_ESTIMATE","restockDays":7,"via":"LEGACY_ROUTE"}` for a stock decision) so the bot delivers it instead of saying "cancelled". For a clarification answered by staff (unit 10) it is `{"action":"REPLY","replyId":"…","text":"…"}`: deliver `text` (the reply may not have reached the customer yet, e.g. a deferred delivery) instead of saying "cancelled" |
 | `409 REQUEST_CLOSED` | already `CANCELLED` (with another key) |
 | `409 CANCEL_NOT_ALLOWED` | a live conversation (`STARTING`/`ACTIVE`/`ENDING`); the customer's words go to the attendant (§4). Live sessions arrive with unit 11, so no request is live yet |
 | `409 IDEMPOTENCY_CONFLICT`, `400 VALIDATION_ERROR` | as above |
@@ -165,6 +165,7 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 | `type` | When | `payload` |
 | --- | --- | --- |
 | `request.answered` | Staff resolved a wrapped decision (stock, expiration, delivery zone, transfer receipt), from the new `resolve` command or from the old staff routes | `{kind: "DECISION", subtype, action, legacyId, text, prefix, …fields}` below |
+| `request.answered` | Staff answered a clarification (`UNKNOWN_QUESTION`) with `reply` (unit 10) | `{kind: "CLARIFICATION", subtype, action: "REPLY", replyId, text, prefix, staffText}`: see "Clarification replies (unit 10)" |
 | `request.cancelled` | Staff cancelled a request (§12.14); no message of its own | `{requestId, reason, cancelledBy: "STAFF", customerNote?}` |
 | `request.merged` | Staff merged this request into another open one of the same customer, subtype **and conversation** (§3.5, §12.11). Informational | `{requestId, intoRequestId, conversationRef}` |
 | `request.overdue_notice` | The request went past the deadline of its active clock (§5.4, unit 7c). **Once per request, ever** | `{requestId, folio, kind, subtype, clock, overdueAt, assigned}`, see "`request.overdue_notice`" below |
@@ -411,7 +412,8 @@ Rules (any violation is one `400 VALIDATION_ERROR`, nothing is stored, the input
 | `messages` | 1 to **50** items (`413 BATCH_TOO_LARGE`, `{limit: 50}`, over 50). The array order is the order the backend stores them in (it assigns `seq` in arrival order; **your clocks are only for display**), so send a chat's rows in your outbox `seq` order. |
 | `waMessageId` | The WhatsApp message id: `A-Z a-z 0-9 . _ = + / : -`, 1 to 255 characters, unique inside the batch. **Inbound:** the wamid Meta sent. **Outbound:** the wamid Meta returned when you sent it (mirror the message once you have it; a message that was never accepted by Meta has no wamid and is not mirrored). |
 | `direction` | `IN` (the customer wrote) or `OUT` (you wrote). |
-| `author` | Optional. If sent it must match: `IN` → `CUSTOMER`, `OUT` → `BOT`. **`STAFF` and `SYSTEM` are refused (`400`)**: staff messages are written by the backend (unit 11), never relayed by the bot (§4.1). |
+| `author` | Optional. If sent it must match: `IN` → `CUSTOMER`, `OUT` → `BOT`. **`STAFF` and `SYSTEM` are refused (`400`)**: staff messages are written by the backend (unit 11), never relayed by the bot (§4.1). The one way a staff member's words get into the mirror is `staffReplyId` (next row, unit 10): the backend decides the author from its own record. |
+| `staffReplyId` | Optional (unit 10). The `replyId` of the `request.answered` item you just delivered; only on an `OUT` `TEXT` message. See "Clarification replies (unit 10)". Anything else (an `IN` message, a non-text type, a malformed id, `null`, the same id twice in a batch) is `400` |
 | `type` | `TEXT`, `IMAGE`, `STICKER`, `DOCUMENT` (a PDF), `AUDIO`, `TEMPLATE` (only `OUT`), `UNSUPPORTED`. `SYSTEM` is refused. |
 | `text` | A string of at most **4 096 characters** (counted as characters, emoji included). Control characters and bidi overrides are removed; markup is kept as text. `TEXT` needs a non-blank text. Media types may carry a caption or none. **`UNSUPPORTED` must NOT carry `text`** (`400` if it does). |
 | `mediaId` | Required (a uuid from the upload) for `IMAGE`, `STICKER`, `DOCUMENT`, `AUDIO`; forbidden for the rest. |
@@ -438,6 +440,7 @@ Answer `200`:
 | `401`, `403 INSUFFICIENT_SCOPE`, `403 FORBIDDEN` | Credential, scope (`conversation:write`) or `X-Branch-Id`. | Stop and alert; retrying is pointless until the credential is fixed. |
 | `409 MESSAGE_ID_CONFLICT` | A `waMessageId` of this batch is already stored in **another** chat (a reused wamid: a bug), including when two chats post the same id at the same moment (never a 500). Nothing was stored. | Park and alert. |
 | `413 BATCH_TOO_LARGE` | Over 50 messages. | Split and resend. |
+| `422 REPLY_NOT_FOUND` | A `staffReplyId` is not the reply id of a **answered clarification of this branch and of this chat** (unknown id, another chat's reply, another branch's, a request that is still open). Nothing of the batch was stored. | Park and alert (a bug: the id must come from the item you delivered). |
 | `422 MEDIA_NOT_FOUND` | A `mediaId` does not exist for this branch, its file was already purged, or it is past its retention time / being purged right now (only possible for a file about 12 months old: a file is kept until the newest message that shows it is due). | Upload the file again (new key if the old media is gone) and resend. |
 | `422 MEDIA_TYPE_MISMATCH` | The file kind does not match the type (`IMAGE`/`STICKER` need an image, `DOCUMENT` a PDF, `AUDIO` audio). | Park and alert (a bug in the mapping). |
 | `429 RATE_LIMITED` | The `write` budget; `Retry-After` in seconds. | Wait `Retry-After`, then retry. |
@@ -504,7 +507,7 @@ For each inbound or outbound WhatsApp message of a chat, in the chat's outbox or
 
 - `GET /chatbot-api/conversations/:ref/state` and `POST …/session-ack` (live sessions, unit 11). `messages:batch` takes **no `epoch`** (§11.2).
 - A customer message does not yet update the 24 h window of an open request: the request keeps the `lastCustomerMessageAt` you sent when you created it (or merged into it). Updating the window from the mirror needs the request's version and audit semantics and arrives with unit 11.
-- Echoing a staff message back to the mirror: unit 11 stores the wamid from the delivery outcome you already report.
+- Echoing a **live** staff message (unit 11) back to the mirror: unit 11 stores the wamid from the delivery outcome you already report. The **clarification reply** of unit 10 is different: you mirror it yourself with `staffReplyId` (below).
 
 ### Deploy checklist for unit 9
 
@@ -513,3 +516,78 @@ For each inbound or outbound WhatsApp message of a chat, in the chat's outbox or
 3. Spaces: the same `SPACES_*` configuration as receipts (`RECEIPTS_SPACES_BUCKET` or `SPACES_BUCKET`); objects live under `conversation-media/<tenantId>/`.
 4. `main.ts` mounts `installConversationBatchBodyParser(app)` (from `src/conversations/presentation/conversation-body-parser.ts`) next to the other `install*BodyParser` calls, before `app.listen` (done: it is mounted, with a 3 MiB limit for that route only).
 5. The retention purge runs hourly on every replica (no setup).
+
+## Clarification replies (unit 10)
+
+Contract: proposal §2.2, §3.3, §3.8, §4.5, §6.2, §12.14 and the v1.8 note (§19). A staff member answers a customer's question (a `CLARIFICATION` request, subtype `UNKNOWN_QUESTION`) from the inbox with `POST /chatbot-requests/:id/reply {expectedVersion, text}` (FE handoff `19-clarification-replies.md`). That **closes the request** (`RESOLVED`) and, in the same transaction, adds one `request.answered` item to your feed. Nothing else changes for you: same cursor, same `deliveryId`, same ACK route.
+
+### The feed item
+
+```json
+{
+  "cursor": "000000001900", "deliveryId": "c3a1…", "type": "request.answered",
+  "requestId": "2b7c…", "conversationRef": "wa:5215512345678",
+  "payload": {
+    "kind": "CLARIFICATION", "subtype": "UNKNOWN_QUESTION", "action": "REPLY",
+    "replyId": "7d1f0c52-3a8e-4b6f-9c21-5e4d3c2b1a09",
+    "text": "Sí, es apto desde las 8 semanas.",
+    "prefix": "Le comparto la respuesta del equipo:",
+    "staffText": "Sí, es apto desde las 8 semanas."
+  },
+  "notBefore": null, "expiresAt": null
+}
+```
+
+- **You compose the wording** with the customer's tú/usted (owner decision, L38): relay **`staffText` as written** after your own team prefix. `text` (= `staffText`) and `prefix` (`"Le comparto la respuesta del equipo:"`, usted) are only the fallback if you cannot compose. Do not rewrite or summarise `staffText` and do not pass it through the model (§4.4: staff text goes out as is). It is plain text of up to 1500 characters, line breaks included.
+- There is **no `legacyId`**: a clarification has no wrapped row. Track it by the item's `requestId` (the `id` your create call returned). Forget the pending question when this item arrives.
+- `replyId` is the id of the message you are about to send. Keep it: you send it back as `staffReplyId` when you mirror the message (below).
+- **At most one per request, ever** (a unique index backs it). The request is already `RESOLVED` when you see it, so a customer's `POST /requests/:id/cancel` answers `409 ALREADY_RESOLVED` with `resolution {action: "REPLY", replyId, text}`: deliver that text if you have not (same `deliveryId` rules: do not send twice).
+- `conversationRef` is the request's (`null` if the question was created without one: use `pending-deliveries?requestId=`).
+
+### ACK
+
+Same route and body as every `request.answered` (`POST /chatbot-api/deliveries/:deliveryId/outcome`); **all five outcomes are allowed**:
+
+| You did | Report |
+| --- | --- |
+| Sent it, Meta accepted | `PROVIDER_ACCEPTED` + `providerMessageId` |
+| Cannot tell whether it went out | `DELIVERY_UNKNOWN` (do not retry) |
+| **The 24 h window is closed** (Meta rejects, or you know) | `DEFERRED_WINDOW_CLOSED`: non-terminal, the delivery stays pending |
+| The conversation is in a human session | `DEFERRED_HUMAN_SESSION`: non-terminal |
+| The customer already got this answer another way, or you decided not to send | `STALE` |
+
+Unlike `request.cancelled` and `request.overdue_notice`, a reply **may be deferred**: the answer is worth sending days later, because the customer asked for it. A deferral is audited (`DELIVERY_OUTCOME`) and shown to staff as "pending: it will be sent when the customer writes again".
+
+### Deferred: what happens next
+
+1. `DEFERRED_WINDOW_CLOSED` leaves the item pending (`ackedAt` empty). It is served by `GET /chatbot-api/requests/pending-deliveries?conversationRef=…` (or `?requestId=…`) with `deferredReason: "WINDOW_CLOSED"`, and by the recovery route (`pendingDeliveries` of the **closed** request, `status=open&updatedSince=`).
+2. **The backend does nothing on its own when the customer writes again.** You do: when the customer's message opens the window, call `pending-deliveries` for that conversation and send what is there (this is the §4.5 flow, no feed walk).
+3. Send it and ACK with a **new `attemptId`**: `PROVIDER_ACCEPTED` ends it (`ackedAt` set, no longer served anywhere). A later attempt after a terminal outcome is `409 OUTCOME_ALREADY_RECORDED`. A deferral can repeat (a new `attemptId` each time) for either reason.
+4. `DEFERRED_HUMAN_SESSION` is replayed the same way when the session ends (`conversation.ended`, unit 11) or on the next bot-mode turn.
+5. The backend does **not** correct the request's 24 h window from your `DEFERRED_WINDOW_CLOSED` (§4.5 last bullet): the request is already closed, so the estimate no longer drives anything. Meta stays the source of truth; you decide when the window is open.
+
+There is no expiry for a pending reply other than the 30-day retention of the feed (`410 CURSOR_EXPIRED` / recovery as usual). The text is also kept on the request (`resolution`), so it can always be recovered from `ALREADY_RESOLVED`.
+
+### Mirror attribution: `staffReplyId`
+
+The conversation mirror shows a message as the staff member's (`author: STAFF`, with their name) only when **you mirror the message you sent for this reply** and say which reply it was:
+
+```json
+{ "waMessageId": "wamid.HBgN…", "direction": "OUT", "type": "TEXT",
+  "text": "Le comparto la respuesta del equipo: Sí, es apto desde las 8 semanas.",
+  "staffReplyId": "7d1f0c52-3a8e-4b6f-9c21-5e4d3c2b1a09",
+  "providerTimestamp": "…", "observedAt": "…" }
+```
+
+- Send it in the normal `messages:batch` of that chat, in outbox order, **after** Meta accepted it (you need the wamid). `text` is what you actually sent (your composed prefix plus `staffText`); it is stored as is.
+- The backend looks `staffReplyId` up in its own record: the request must be an answered clarification **of this branch and this chat**. The staff user, the author `STAFF` and the id come from that record, never from your body (`author: "STAFF"` and `staffUserId` stay `400`). Unknown, foreign or other-chat id: `422 REPLY_NOT_FOUND`, nothing stored.
+- The stored message has `id = clientMessageId = replyId` and starts as `SENT` (statuses move it forward as for every `OUT` message). `accepted[].messageId` in the answer is the `replyId`.
+- A replay is a `duplicate` (same `waMessageId`). The same reply under **another** wamid is `409 MESSAGE_ID_CONFLICT` (one message per reply).
+- A message **without** `staffReplyId` is stored as yours (`BOT`), even if it carries the staff's words. Do not mirror a deferred reply until it was really sent: until then it is not in the conversation.
+- The reply's own request is already closed, so the live `conversation.message` event is also sent for it (staff keep seeing their message arrive).
+
+### Deploy checklist for unit 10
+
+- Migration `20261112050000_clarification_replies`: one function body (realtime trigger announces `REPLIED` as `request.resolved`) and two partial UNIQUE indexes (`chatbot_requests_reply_id_uq`, `chatbot_feed_items_clarification_answer_uq`); no table or column changes, builds over zero matching rows. Apply the migration before the new code (the code needs the unique indexes only as a guard; the new realtime mapping needs the new function).
+- Deploy the backend before the bot starts handling `kind: "CLARIFICATION"` items. Until your handler lands you can ACK unknown payload kinds `STALE` (as for unknown types): the staff UI then shows the delivery as `STALE`, and the customer is **not** answered, so ship the handler before staff start replying on dev.
+- `staffReplyId` needs no scope beyond `conversation:write`.

@@ -4,6 +4,8 @@
  *   POST /chatbot-requests/:id/claim     read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/release   read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/cancel    read + update:ChatbotRequest
+ *   POST /chatbot-requests/:id/reply     read + update:ChatbotRequest (the
+ *                                        state machine requires the assignee)
  *   POST /chatbot-requests/:id/reassign  read:ChatbotRequest +
  *                                        update:ChatbotRequestAssignment
  *   POST /chatbot-requests/:id/resolve   read + update:ChatbotRequest, and the
@@ -51,8 +53,10 @@ import {
   ExpectedVersionDto,
   IdempotencyKey,
   ReassignDto,
+  ReplyDto,
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
+import { parseReplyText } from '../domain/clarification-reply';
 import { canResolveSubtype } from '../domain/resolve-permissions';
 import { parseResolveBody } from './chatbot-request-resolve.body';
 
@@ -128,6 +132,23 @@ export class ChatbotRequestCommandsController {
       reason: body.reason,
       note: body.note,
       customerNote: body.customerNote,
+    });
+  }
+
+  /** Unit 10: answer a clarification; closes it and feeds the bot (§3.8). */
+  @Post(':id/reply')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  reply(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() body: ReplyDto,
+    @Req() req: StaffRequest,
+  ) {
+    return this.run(req, id, key, body.expectedVersion, {
+      kind: 'reply',
+      text: parseReplyText(body.text),
     });
   }
 

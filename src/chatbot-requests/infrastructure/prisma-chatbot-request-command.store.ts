@@ -23,7 +23,11 @@ import {
   enqueueClosedNotice,
   enqueueNotice,
 } from '../../notifications/infrastructure/chatbot-request-notice.writer';
-import { enqueueAnswered, enqueueCancelled } from './chatbot-feed-writes';
+import {
+  enqueueAnswered,
+  enqueueCancelled,
+  enqueueClarificationAnswer,
+} from './chatbot-feed-writes';
 import { assignableUserWhere } from './assignable-users';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
@@ -185,6 +189,20 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
       requestId,
       reason,
       customerNote,
+    );
+  }
+
+  enqueueClarificationAnswer(
+    requestId: string,
+    replyId: string,
+    text: string,
+  ): Promise<void> {
+    return enqueueClarificationAnswer(
+      this.tx,
+      this.tenantId,
+      requestId,
+      replyId,
+      text,
     );
   }
 

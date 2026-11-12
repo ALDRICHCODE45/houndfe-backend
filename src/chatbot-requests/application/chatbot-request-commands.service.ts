@@ -21,7 +21,7 @@
  * in sorted `customerKey` order.
  */
 import { Inject, Injectable } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   cancelByStaff,
   claim,
@@ -29,6 +29,7 @@ import {
   displayStatus,
   reassign,
   release,
+  reply,
   resolve,
   type ChatbotRequestError,
   type ChatbotRequestEventDraft,
@@ -137,7 +138,9 @@ export type StaffCommand =
       note?: string;
       customerNote?: string;
     }
-  | { kind: 'resolve'; action: ResolveAction };
+  | { kind: 'resolve'; action: ResolveAction }
+  /** Unit 10: `text` is already cleaned by `parseReplyText`. */
+  | { kind: 'reply'; text: string };
 
 export interface StaffCommandInput {
   requestId: string;
@@ -232,6 +235,12 @@ export interface ChatbotRequestCommandStore {
     reason: StaffCancelReason,
     customerNote?: string,
   ): Promise<void>;
+  /** `request.answered` of a staff clarification reply (unit 10). */
+  enqueueClarificationAnswer(
+    requestId: string,
+    replyId: string,
+    text: string,
+  ): Promise<void>;
   /**
    * Takes the postal-code lock of a DELIVERY_ZONE request (a no-op for any
    * other id). It must run before `lockRequest`: the legacy zone resolve and
@@ -275,6 +284,7 @@ export type ChatbotRequestCommandErrorCode =
   // Conversation mirror and media (unit 9).
   | 'BATCH_TOO_LARGE'
   | 'MESSAGE_ID_CONFLICT'
+  | 'REPLY_NOT_FOUND'
   | 'MEDIA_NOT_FOUND'
   | 'MEDIA_TYPE_MISMATCH'
   | 'MEDIA_TOO_LARGE'
@@ -483,6 +493,16 @@ export class ChatbotRequestCommandsService {
           input.command.customerNote,
         );
         await this.store.refreshGroups([row.customerKey]);
+      } else if (input.command.kind === 'reply') {
+        // Unit 10: the answer for the bot joins the same transaction, after
+        // the state change and before the group refresh (feed rule 6).
+        await this.store.applyPatch(row, result.patch, result.event);
+        await this.store.enqueueClarificationAnswer(
+          row.id,
+          result.event.data.messageId as string,
+          input.command.text,
+        );
+        await this.store.refreshGroups([row.customerKey]);
       } else {
         await this.store.apply(row, result.patch, result.event);
       }
@@ -612,6 +632,14 @@ export class ChatbotRequestCommandsService {
           reason: command.reason,
           note: command.note,
           customerNote: command.customerNote,
+          now,
+        });
+      case 'reply':
+        return reply(state, {
+          actor,
+          expectedVersion,
+          replyId: randomUUID(),
+          text: command.text,
           now,
         });
       case 'resolve':

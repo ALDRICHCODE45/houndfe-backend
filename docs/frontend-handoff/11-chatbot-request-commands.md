@@ -7,7 +7,7 @@ Shapes in this document come from the controller, DTOs, scoped filter and their 
 **Not in this slice:**
 - The read routes (`GET /chatbot-requests/groups`, `/counts`, `/:id`, `/history`, `/assignable-users`) are documented in `14-chatbot-request-inbox.md`; the `version` to send comes from there.
 - `resolve` is documented in `12-chatbot-request-resolve.md` (unit 3). It needs one more permission per subtype on top of `read`/`update:ChatbotRequest`.
-- `reply`, `messages`, `template`, `finish` and `reschedule` arrive in later units.
+- `reply` (answering a clarification) is documented in `19-clarification-replies.md` (unit 10). `messages`, `template`, `finish` and `reschedule` arrive in later units.
 - Phone masking (`toStaffPhone`) arrives with unit 4. The command response carries no phone and no `customerKey`.
 
 ## 1. Who can do what
@@ -19,6 +19,7 @@ Every route uses `JWT → tenant context → active user → CASL`. The tenant a
 | `POST /chatbot-requests/:id/claim` | `read:ChatbotRequest` + `update:ChatbotRequest` | — |
 | `POST /chatbot-requests/:id/release` | `read:ChatbotRequest` + `update:ChatbotRequest` | Releasing **someone else's** request also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
 | `POST /chatbot-requests/:id/cancel` | `read:ChatbotRequest` + `update:ChatbotRequest` | Cancelling a request **held by someone else** also needs `update:ChatbotRequestAssignment`; without it: `403 NOT_ASSIGNEE` |
+| `POST /chatbot-requests/:id/reply` | `read:ChatbotRequest` + `update:ChatbotRequest` | Replying to a `NEW` clarification claims it for the replier in the same step (S13); a request held by **someone else** only by its holder, no override (`403 NOT_ASSIGNEE`); only `kind = CLARIFICATION`. See `19-clarification-replies.md` |
 | `POST /chatbot-requests/:id/reassign` | `read:ChatbotRequest` + `update:ChatbotRequestAssignment` | `toUserId` must be an active member of this sucursal with `read:ChatbotRequest` and `update:ChatbotRequest` |
 
 `merge` and `link-customer` are in sections 3.5 and 3.6 (both `read:ChatbotRequest` + `update:ChatbotRequest`; no extra permission, §3.10).
@@ -82,7 +83,7 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 401 | `UNAUTHORIZED` | No or expired JWT, inactive user | — |
 | 403 | `INSUFFICIENT_PERMISSIONS` | Missing a permission from §1 | — |
 | 403 | `FORBIDDEN` | No membership in the JWT's sucursal | — |
-| 403 | `NOT_ASSIGNEE` | Release or cancel of someone else's request without `update:ChatbotRequestAssignment` | ✓ |
+| 403 | `NOT_ASSIGNEE` | Release or cancel of someone else's request without `update:ChatbotRequestAssignment`; `reply` of a clarification **held by someone else** (no permission lifts it) | ✓ |
 | 404 | `NOT_FOUND` | No such request **in this sucursal** (another sucursal's id answers the same) | — |
 | 409 | `VERSION_CONFLICT` | `expectedVersion` is stale, or you claim a request you already hold (second tab) | ✓ |
 | 409 | `REQUEST_CLAIMED_BY_OTHER` | Claim of a request someone else holds | ✓ |
@@ -106,6 +107,7 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | `release` | `404` → `REQUEST_CLOSED` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`) → `CANCEL`-style live-session refusal (from unit 11) |
 | `reassign` | `422 USER_NOT_ASSIGNABLE` (checked first, before the request is even looked up) → `404` → `REQUEST_CLOSED` → `VERSION_CONFLICT` → `422 ACTION_NOT_ALLOWED` (not `IN_PROGRESS`, or `toUserId` is already the assignee) |
 | `cancel` | `404` → `REQUEST_CLOSED` → `422 CANCEL_NOT_ALLOWED` for a `DECISION` → `400 VALIDATION_ERROR` for `OTHER` without `note` → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT` → live-session `CANCEL_NOT_ALLOWED` (409 while it runs, 422 once ended; from unit 11) |
+| `reply` | `404` → `REQUEST_CLOSED` → `422 ACTION_NOT_ALLOWED` (not a clarification) → `403 NOT_ASSIGNEE` → `VERSION_CONFLICT`; `400` for the text is answered before any of them |
 
 `merge` and `link-customer` list their own order of checks in sections 3.5 and 3.6; a target-side `409` of `merge` carries `current` of the target plus `intoRequestId`.
 

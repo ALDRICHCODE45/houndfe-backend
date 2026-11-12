@@ -8,6 +8,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsDefined,
   IsOptional,
   IsString,
   IsUUID,
@@ -77,6 +78,16 @@ export class CancelDto extends ExpectedVersionDto {
   @IsString()
   @Length(1, 500)
   customerNote?: string;
+}
+
+/**
+ * Unit 10 (§3.8 `reply {text ≤ 1500}`). `text` is `unknown` here on purpose:
+ * `parseReplyText` (domain) owns the rules (sanitising, trim, 1..1500
+ * characters), so the DTO only requires that the key is present.
+ */
+export class ReplyDto extends ExpectedVersionDto {
+  @IsDefined()
+  text!: unknown;
 }
 
 /** §12.11: the target is the request that stays; both versions are checked. */

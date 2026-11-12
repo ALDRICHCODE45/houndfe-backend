@@ -137,21 +137,24 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
       assigneeDisplayName: 'Ana',
     });
     const [a, b, c] = await rows([record(), mine, theirs], CASHIER);
-    expect(a.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    // Unit 10 / S13: a clarification nobody holds yet can be answered (the
+    // reply claims it).
+    expect(a.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
     expect(a.deniedActions).toEqual([]);
-    expect(b.allowedActions).toEqual(['RELEASE', 'CANCEL']);
+    expect(b.allowedActions).toEqual(['RELEASE', 'REPLY', 'CANCEL']);
     expect(c.allowedActions).toEqual([]);
     expect(c.deniedActions).toEqual([
       { action: 'CLAIM', code: 'REQUEST_CLAIMED_BY_OTHER' },
       { action: 'RELEASE', code: 'NOT_ASSIGNEE' },
       { action: 'REASSIGN', code: 'INSUFFICIENT_PERMISSIONS' },
+      { action: 'REPLY', code: 'NOT_ASSIGNEE' },
       { action: 'CANCEL', code: 'NOT_ASSIGNEE' },
     ]);
   });
 
   it('a row never shows MERGE or LINK_CUSTOMER, even for a manager with candidates around', async () => {
     const [row] = await rows([record()], MANAGER);
-    expect(row.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    expect(row.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
     const all = JSON.stringify([row.allowedActions, row.deniedActions]);
     expect(all).not.toContain('MERGE');
     expect(all).not.toContain('LINK_CUSTOMER');
@@ -162,6 +165,7 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
     expect(row.allowedActions).toEqual([]);
     expect(row.deniedActions).toEqual([
       { action: 'CLAIM', code: 'INSUFFICIENT_PERMISSIONS' },
+      { action: 'REPLY', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'CANCEL', code: 'INSUFFICIENT_PERMISSIONS' },
     ]);
   });
@@ -201,7 +205,7 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
       customerKey: sealer.seal(TENANT, KEY),
       tab: 'open',
     });
-    expect(list.items[0].allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    expect(list.items[0].allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
     const detail: DetailRecord = {
       request: {
         ...record(),
@@ -226,9 +230,10 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
     }).detail(as(MANAGER), 'r-1');
     expect(out.otherOpenRequests[0].allowedActions).toEqual([
       'CLAIM',
+      'REPLY',
       'CANCEL',
     ]);
-    expect(out.allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    expect(out.allowedActions).toEqual(['CLAIM', 'REPLY', 'CANCEL']);
     expect(out.deniedActions).toEqual([]);
   });
 
@@ -257,6 +262,7 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
     }).detail(as(READ_ONLY), 'r-1');
     expect(out.deniedActions).toEqual([
       { action: 'CLAIM', code: 'INSUFFICIENT_PERMISSIONS' },
+      { action: 'REPLY', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'MERGE', code: 'INSUFFICIENT_PERMISSIONS' },
       { action: 'CANCEL', code: 'INSUFFICIENT_PERMISSIONS' },
     ]);
@@ -267,7 +273,11 @@ describe('rows: allowedActions and deniedActions (S8 item 1 and 4)', () => {
       mergeCandidates: jest.fn().mockResolvedValue([record({ id: 'r-2' })]),
     });
     const withReader = await service.mergeCandidates('r-1', as(MANAGER));
-    expect(withReader.items[0].allowedActions).toEqual(['CLAIM', 'CANCEL']);
+    expect(withReader.items[0].allowedActions).toEqual([
+      'CLAIM',
+      'REPLY',
+      'CANCEL',
+    ]);
   });
 });
 

@@ -52,6 +52,8 @@ const MESSAGES: Record<string, string> = {
   BATCH_TOO_LARGE: 'Too many items in one call',
   MESSAGE_ID_CONFLICT:
     'A message id of this batch already belongs to another conversation',
+  REPLY_NOT_FOUND:
+    'A staffReplyId does not match a staff reply of this conversation',
   MEDIA_NOT_FOUND: 'A referenced media file does not exist',
   MEDIA_TYPE_MISMATCH: 'The media file does not match the message type',
   MEDIA_TOO_LARGE: 'The file is larger than 10 MB',

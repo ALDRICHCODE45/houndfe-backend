@@ -1587,6 +1587,14 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
           reason: 'DUPLICATE',
         }),
       );
+      // Unit 10: the reply's answer (and its error, whichever state the walk
+      // left the question in) must not leak a phone either.
+      R('POST', ':id/reply', () =>
+        call('post', `/chatbot-requests/${id()}/reply`, {
+          expectedVersion: 1,
+          text: 'Sí, es apto desde las 8 semanas.',
+        }),
+      );
       R('POST', ':id/resolve', () =>
         call('post', `/chatbot-requests/${ids.restock}/resolve`, {
           expectedVersion: 1,

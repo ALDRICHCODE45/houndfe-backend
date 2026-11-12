@@ -108,8 +108,10 @@ describe('computeAllowedActions', () => {
       kind: 'CLARIFICATION',
       subtype: 'UNKNOWN_QUESTION',
     });
+    // Unit 10 / S13: a NEW clarification can be answered (replying claims it).
     expect(computeAllowedActions(question, CASHIER, ME)).toEqual([
       'CLAIM',
+      'REPLY',
       'CANCEL',
     ]);
     expect(computeAllowedActions(state(), CASHIER, ME)).not.toContain('CANCEL');
@@ -240,7 +242,7 @@ describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
 
   it('offers MERGE only with update, a mergeable open request and a candidate', () => {
     expect(computeAllowedActions(question, CASHIER, ME, withCandidate)).toEqual(
-      ['CLAIM', 'MERGE', 'CANCEL'],
+      ['CLAIM', 'REPLY', 'MERGE', 'CANCEL'],
     );
     expect(computeAllowedActions(question, CASHIER, ME)).not.toContain('MERGE');
     expect(
@@ -289,6 +291,7 @@ describe('computeAllowedActions: MERGE and LINK_CUSTOMER', () => {
     const link = { customer: unlinked, hasLinkCandidate: true };
     expect(computeAllowedActions(question, CASHIER, ME, link)).toEqual([
       'CLAIM',
+      'REPLY',
       'LINK_CUSTOMER',
       'CANCEL',
     ]);

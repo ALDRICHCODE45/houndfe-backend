@@ -208,6 +208,7 @@ The row (section 3) plus:
 - `needs` and `context` are bot-untrusted text/JSON: show as text.
 - `customer.id = null` and `displayName = null` when no customer is linked; `recentOrders` is then `[]`, `priceList` `null`, `isTrusted` `false`. `recentOrders` are the last five confirmed or canceled sales of the customer, newest first (drafts are not shown).
 - **`customer.candidates[]`** (R1, for `LINK_CUSTOMER`): only while the request is open and has **no** customer. The tenant's customers whose canonical phone is this request's phone (`521…` and `52…` count as the same number; the match is exact in SQL, so a busy sucursal never hides one behind a page), at most 10, oldest first: `{id, displayName, phone, isTrusted, customerSince, lastOrderAt}`. `phone` follows the same mask as everywhere (full only with `read:CustomerPhone`). **`customer.ambiguous`** is `true` when the bot found several customers with that phone and left the request unlinked: the user picks one and sends it to `POST …/link-customer` (handoff 11). It can also hold one customer that was created after the request. It is `[]` once linked, for a closed request and for a legacy request with no phone.
+- **`reply`** (unit 10, additive): `null` until a clarification is answered; then `{id, text, repliedBy {id, displayName}, repliedAt}`. Always `null` for other kinds. Details in `19-clarification-replies.md`.
 - **`decision`** is `null` for `CLARIFICATION` and `CONVERSATION`. For decisions it is discriminated by `subtype`:
 
   | `subtype` | Shape |
@@ -221,7 +222,7 @@ The row (section 3) plus:
 - **`zoneImpact`** exists only on `DELIVERY_ZONE` that has a validation (same value as `GET …/zone-impact`, including `validationId`; send its `setVersion` as `expectedZoneSetVersion` when resolving). `requests` and `customers` count only the **open** requesters (what resolving would settle), while `decision.requesterCount` counts **every** requester of the validation, whatever its state, like the old zone screen.
 - **`deliveries[]`** are the answers queued for the bot, newest first (at most 50): `outcome` is `PENDING` until the bot reports, then `PROVIDER_ACCEPTED | DELIVERY_UNKNOWN | DEFERRED_WINDOW_CLOSED | DEFERRED_HUMAN_SESSION | STALE`. `needsReconciliation` is true for `DELIVERY_UNKNOWN` (the "entrega dudosa"). `providerStatus` is `null` until the statuses unit.
 - **`audit[]`** is the 20 most recent events, newest first. `actor.kind` is `USER | SERVICE | SYSTEM` (for `SYSTEM`, `id` and `displayName` are `null`). `data` is small and never customer text (except the `customerNote` that staff wrote on a cancel). More: `GET …/audit?cursor=` with `auditNextCursor`.
-- **`allowedActions`** is computed by the server from the state machine, the caller's permissions and whether the caller is the assignee. Offer a button only if its action is in the list; the command can still answer `409` if the request changed meanwhile. Today it can contain `CLAIM`, `RELEASE`, `REASSIGN`, `RESOLVE`, `MERGE`, `LINK_CUSTOMER`, `CANCEL` (in this order):
+- **`allowedActions`** is computed by the server from the state machine, the caller's permissions and whether the caller is the assignee. Offer a button only if its action is in the list; the command can still answer `409` if the request changed meanwhile. Today it can contain `CLAIM`, `RELEASE`, `REASSIGN`, `RESOLVE`, `REPLY`, `MERGE`, `LINK_CUSTOMER`, `CANCEL` (in this order):
 
   | Action | Offered when |
   | --- | --- |
@@ -229,13 +230,14 @@ The row (section 3) plus:
   | `RELEASE` | `update:ChatbotRequest`, request `IN_PROGRESS`, and it is yours or you also have `update:ChatbotRequestAssignment`; not for a live conversation |
   | `REASSIGN` | `update:ChatbotRequestAssignment`, request `IN_PROGRESS` |
   | `RESOLVE` | `update:ChatbotRequest` **and** the legacy permission of the subtype (`update:HumanDecision` for stock and expiry, `validate:DeliveryZone`, `update:ReceiptEvidence`), `kind = DECISION`, open and not held by someone else; for `DELIVERY_ZONE` also only when it has a validation (without one the resolve route answers `404`) |
+  | `REPLY` | `update:ChatbotRequest`, `kind = CLARIFICATION`, open, and **not held by someone else** (unit 10, owner decision S13: replying to a `NEW` clarification claims it for the replier). One held by someone else (also by a manager) is denied `NOT_ASSIGNEE`: see `19-clarification-replies.md` |
   | `MERGE` | `update:ChatbotRequest`, request open, subtype `UNKNOWN_QUESTION`, `TALK_TO_HUMAN` or `COMPLAINT` with no started session, **and** at least one merge candidate (section 10). If it is held by someone else you also need `update:ChatbotRequestAssignment` (the same rule as `CANCEL`) |
   | `LINK_CUSTOMER` | `update:ChatbotRequest`, request open, no customer linked yet, a phone identity (not a legacy `unknown:` request) **and at least one candidate customer** (`customer.candidates` is not empty). Held by someone else does not hide it |
   | `CANCEL` | `update:ChatbotRequest`, open, not a `DECISION`, and (if held by someone else) you have `update:ChatbotRequestAssignment` |
 
   **`deniedActions`** (S8) is computed by the same evaluation: section 14.4.
 
-  `RESCHEDULE`, `REPLY`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request whose phone has no customer gets `["CLAIM","RESOLVE"]`, and `["CLAIM","RESOLVE","LINK_CUSTOMER"]` when a customer with that phone exists; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","CANCEL"]`, plus `MERGE` when that customer has another open question in the same conversation. A Cashier looking at a colleague's request gets neither `MERGE` nor `CANCEL` (a Manager gets both).
+  `RESCHEDULE`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request whose phone has no customer gets `["CLAIM","RESOLVE"]`, and `["CLAIM","RESOLVE","LINK_CUSTOMER"]` when a customer with that phone exists; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","REPLY","CANCEL"]` (and `["CLAIM","REPLY","CANCEL"]` while it is still `NEW`), plus `MERGE` when that customer has another open question in the same conversation. A Cashier looking at a colleague's request gets neither `MERGE` nor `CANCEL` (a Manager gets both).
 
 ## 9. `GET /chatbot-requests/:id/audit`
 
@@ -371,7 +373,7 @@ Computed on every read **in business time** (the clock pauses outside the openin
 | `AUTO_RELEASED` | `SYSTEM` | not emitted yet (live conversations, unit 11) |
 | `REASSIGNED` | `USER` | `{fromUser: {id, displayName}, toUser: {id, displayName}, note?}` |
 | `RESOLVED` | `USER` | `{action, …}`: `action` is the resolve option, `"SIBLING_RESOLVED"` with `viaRequestId` when a shared zone validation closed it, or `{action, via: "LEGACY_ROUTE"}` when the old staff screen resolved it |
-| `REPLIED` | `USER` | not emitted yet (conversation, unit 9/11) |
+| `REPLIED` | `USER` | `{messageId}`: the reply's id (the id of the mirrored message, `reply.id` of the detail). **No text** (unit 10; the request goes `IN_PROGRESS → RESOLVED`, or `NEW → RESOLVED` with the replier as new assignee, in this one event: no `CLAIMED` before it, like `RESOLVED` of a decision) |
 | `TEMPLATE_SENT` | `USER` | not emitted yet (unit 11) |
 | `FINISHED` | `USER` | not emitted yet (unit 11) |
 | `CANCELLED` | `USER` (staff) or `SERVICE` (customer withdrew) | staff: `{reason, note?, customerNote?}` with `reason` one of the four staff reasons; customer: `{reason: "CUSTOMER_WITHDREW" \| "AUTO_RESOLVED"}`. `note` is internal and `customerNote` is what the bot relays; both are written by staff and shown only here |
