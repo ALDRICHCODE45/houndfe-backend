@@ -16,10 +16,12 @@ import { buildStaffMessagePayload, FEED_TYPE } from '../domain/chatbot-feed';
 import {
   decideSessionAck,
   staffFirstName,
+  type StaffMessageContent,
   whatsappWindowClosesAt,
 } from '../domain/live-session';
+import { mediaMatchesMessageType } from '../../conversations/domain/conversation-media';
 import { insertFeedItems } from './chatbot-feed-writes';
-import { lockRequestRow } from './chatbot-request-writes';
+import { lockRequestRow, type TenantClient } from './chatbot-request-writes';
 import {
   bumpVersion,
   emitSessionEvent,
@@ -43,13 +45,22 @@ export interface StaffMessageResult {
     seq: number;
     direction: 'OUT';
     author: 'STAFF';
-    type: 'TEXT';
+    type: 'TEXT' | 'IMAGE' | 'DOCUMENT';
+    /** The text, or the caption of a media message (`''` when none). */
     text: string;
+    /** IMAGE/DOCUMENT only. */
+    media?: { id: string; mimeType: string; filename: string | null };
     deliveryStatus: string;
     clientMessageId: string;
     staff: { id: string; displayName: string };
     createdAt: string;
   };
+}
+
+interface StoredMedia {
+  id: string;
+  mimeType: string;
+  filename: string | null;
 }
 
 const MAX_ACK_ATTEMPTS = 3;
@@ -271,9 +282,13 @@ export class PrismaLiveConversationStore {
     actorUserId: string;
     clientMessageId: string;
     expectedEpoch: number;
-    text: string;
+    content: StaffMessageContent;
     templateAllowed: boolean;
   }): Promise<StaffMessageResult> {
+    const { content } = input;
+    // What the stored `text` column holds: the text, or the caption.
+    const storedText =
+      content.type === 'TEXT' ? content.text : (content.caption ?? null);
     const tenantId = this.tenantPrisma.getTenantId();
     return this.tenantPrisma.runInTransaction(async () => {
       const tx = this.tenantPrisma.getClient();
@@ -312,6 +327,8 @@ export class PrismaLiveConversationStore {
         {
           id: string;
           seq: number;
+          type: string;
+          mediaId: string | null;
           text: string | null;
           staffUserId: string | null;
           deliveryStatus: string | null;
@@ -319,7 +336,8 @@ export class PrismaLiveConversationStore {
           requestMatches: boolean;
         }[]
       >(Prisma.sql`
-        SELECT m."id", m."seq", m."text", m."staffUserId",
+        SELECT m."id", m."seq", m."type"::text AS "type", m."mediaId", m."text",
+               m."staffUserId",
                m."deliveryStatus"::text AS "deliveryStatus", m."receivedAt",
                (c."conversationRef" = ${request.conversationRef}) AS "requestMatches"
         FROM "conversation_messages" m
@@ -330,11 +348,22 @@ export class PrismaLiveConversationStore {
         if (
           !existing.requestMatches ||
           existing.staffUserId !== input.actorUserId ||
-          existing.text !== input.text
+          existing.text !== storedText ||
+          existing.type !== content.type ||
+          existing.mediaId !==
+            (content.type === 'TEXT' ? null : content.mediaId)
         ) {
           throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
         }
-        return this.toResult(existing, input.clientMessageId, staff);
+        const replayMedia = existing.mediaId
+          ? await this.mediaOf(tx, tenantId, existing.mediaId)
+          : null;
+        return this.toResult(
+          existing,
+          input.clientMessageId,
+          staff,
+          replayMedia ?? undefined,
+        );
       }
 
       const session = await lockLatestSession(tx, tenantId, request.id);
@@ -373,6 +402,21 @@ export class PrismaLiveConversationStore {
         });
       }
 
+      // T11c: the media must be this attendee's upload for THIS request. The
+      // row is locked FOR SHARE so a concurrent purge cannot slip between this
+      // check and the insert.
+      let media: StoredMedia | null = null;
+      if (content.type !== 'TEXT') {
+        media = await this.lockOwnedMedia(
+          tx,
+          tenantId,
+          content.mediaId,
+          request.id,
+          input.actorUserId,
+          content.type,
+        );
+      }
+
       const messageId = randomUUID();
       const seq = conversation.nextSeq;
       await tx.$executeRaw(Prisma.sql`
@@ -382,11 +426,13 @@ export class PrismaLiveConversationStore {
       const [stored] = await tx.$queryRaw<{ receivedAt: Date }[]>(Prisma.sql`
         INSERT INTO "conversation_messages"
           ("id", "tenantId", "conversationId", "seq", "direction", "author",
-           "staffUserId", "clientMessageId", "type", "text", "receivedAt",
-           "deliveryStatus", "purgeAfter")
+           "staffUserId", "clientMessageId", "type", "text", "mediaId",
+           "receivedAt", "deliveryStatus", "purgeAfter")
         VALUES (${messageId}, ${tenantId}, ${conversation.id}, ${seq}, 'OUT',
-                'STAFF', ${input.actorUserId}, ${input.clientMessageId}, 'TEXT',
-                ${input.text}, now(), 'QUEUED', now() + interval '12 months')
+                'STAFF', ${input.actorUserId}, ${input.clientMessageId},
+                ${content.type}::"ConversationMessageType", ${storedText},
+                ${media?.id ?? null}, now(), 'QUEUED',
+                now() + interval '12 months')
         RETURNING "receivedAt"`);
       await tx.$executeRaw(Prisma.sql`
         UPDATE "chatbot_live_sessions"
@@ -402,7 +448,17 @@ export class PrismaLiveConversationStore {
             handoffEpoch: session.epoch,
             seq,
             messageId,
-            text: input.text,
+            ...(media && content.type !== 'TEXT'
+              ? {
+                  media: {
+                    type: content.type,
+                    mediaId: media.id,
+                    mimeType: media.mimeType,
+                    filename: media.filename,
+                    caption: content.caption,
+                  },
+                }
+              : { text: storedText ?? '' }),
           }),
         },
       ]);
@@ -419,26 +475,116 @@ export class PrismaLiveConversationStore {
         {
           id: messageId,
           seq,
-          text: input.text,
+          type: content.type,
+          text: storedText,
           deliveryStatus: 'QUEUED',
           receivedAt: stored.receivedAt,
         },
         input.clientMessageId,
         staff,
+        media ?? undefined,
       );
     });
+  }
+
+  /**
+   * T11c: may this user upload a file for this request right now? The request
+   * is a conversation of this tenant (404), the caller is its assignee (403)
+   * and its latest session is ACTIVE (409), the same gates as a text message.
+   */
+  async assertCanUpload(requestId: string, actorUserId: string): Promise<void> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const tx = this.tenantPrisma.getClient();
+    const [request] = await tx.$queryRaw<
+      {
+        kind: string;
+        assigneeUserId: string | null;
+      }[]
+    >(Prisma.sql`
+      SELECT "kind"::text AS "kind", "assigneeUserId" FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}`);
+    if (!request) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+    if (request.kind !== 'CONVERSATION') {
+      throw new ChatbotRequestCommandError('ACTION_NOT_ALLOWED', 422);
+    }
+    if (request.assigneeUserId !== actorUserId) {
+      throw new ChatbotRequestCommandError('NOT_ASSIGNEE', 403);
+    }
+    const [session] = await tx.$queryRaw<{ state: string }[]>(Prisma.sql`
+      SELECT "state" FROM "chatbot_live_sessions"
+      WHERE "tenantId" = ${tenantId} AND "requestId" = ${requestId}
+      ORDER BY "epoch" DESC LIMIT 1`);
+    if (!session || session.state !== 'ACTIVE') {
+      throw new ChatbotRequestCommandError(
+        'SESSION_NOT_ACTIVE',
+        409,
+        undefined,
+        {
+          sessionState: session?.state ?? null,
+        },
+      );
+    }
+  }
+
+  private async mediaOf(
+    tx: TenantClient,
+    tenantId: string,
+    mediaId: string,
+  ): Promise<StoredMedia | null> {
+    const [row] = await tx.$queryRaw<StoredMedia[]>(Prisma.sql`
+      SELECT "id", "mimeType", "filename" FROM "conversation_media"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${mediaId}`);
+    return row ?? null;
+  }
+
+  private async lockOwnedMedia(
+    tx: TenantClient,
+    tenantId: string,
+    mediaId: string,
+    requestId: string,
+    actorUserId: string,
+    messageType: 'IMAGE' | 'DOCUMENT',
+  ): Promise<StoredMedia> {
+    const [row] = await tx.$queryRaw<
+      (StoredMedia & {
+        requestId: string | null;
+        uploadedByUserId: string | null;
+        purgedAt: Date | null;
+      })[]
+    >(Prisma.sql`
+      SELECT "id", "mimeType", "filename", "requestId", "uploadedByUserId",
+             "purgedAt"
+      FROM "conversation_media"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${mediaId}
+      FOR SHARE`);
+    if (
+      !row ||
+      row.requestId !== requestId ||
+      row.uploadedByUserId !== actorUserId
+    ) {
+      throw new ChatbotRequestCommandError('MEDIA_NOT_FOUND', 404);
+    }
+    if (row.purgedAt) {
+      throw new ChatbotRequestCommandError('MEDIA_PURGED', 422);
+    }
+    if (!mediaMatchesMessageType(messageType, row.mimeType)) {
+      throw new ChatbotRequestCommandError('MEDIA_TYPE_MISMATCH', 422);
+    }
+    return { id: row.id, mimeType: row.mimeType, filename: row.filename };
   }
 
   private toResult(
     row: {
       id: string;
       seq: number;
+      type?: string;
       text: string | null;
       deliveryStatus: string | null;
       receivedAt: Date;
     },
     clientMessageId: string,
     staff: { id: string; displayName: string },
+    media?: StoredMedia,
   ): StaffMessageResult {
     return {
       message: {
@@ -446,8 +592,17 @@ export class PrismaLiveConversationStore {
         seq: row.seq,
         direction: 'OUT',
         author: 'STAFF',
-        type: 'TEXT',
+        type: (row.type ?? 'TEXT') as 'TEXT' | 'IMAGE' | 'DOCUMENT',
         text: row.text ?? '',
+        ...(media
+          ? {
+              media: {
+                id: media.id,
+                mimeType: media.mimeType,
+                filename: media.filename,
+              },
+            }
+          : {}),
         deliveryStatus: row.deliveryStatus ?? 'QUEUED',
         clientMessageId,
         staff,

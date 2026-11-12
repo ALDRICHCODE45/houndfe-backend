@@ -38,6 +38,11 @@ import { PrismaServiceCredentialRepository } from '../chatbot-api/infrastructure
 import { BotRateLimitModule } from '../chatbot-api/presentation/guards/bot-rate-limit.module';
 import { ServiceAuthGuard } from '../chatbot-api/presentation/guards/service-auth.guard';
 import {
+  CONVERSATION_MEDIA_STORAGE,
+  CONVERSATION_MEDIA_STORE,
+  ConversationMediaService,
+} from '../conversations/application/conversation-media.service';
+import {
   CONVERSATION_MIRROR_STORE,
   ConversationMirrorService,
 } from '../conversations/application/conversation-mirror.service';
@@ -45,10 +50,14 @@ import {
   CONVERSATION_READ_STORE,
   ConversationReadsService,
 } from '../conversations/application/conversation-reads.service';
+import { PrismaConversationMediaStore } from '../conversations/infrastructure/prisma-conversation-media.store';
 import { PrismaConversationMirrorStore } from '../conversations/infrastructure/prisma-conversation-mirror.store';
 import { PrismaConversationReadStore } from '../conversations/infrastructure/prisma-conversation-read.store';
 import { BotConversationController } from '../conversations/presentation/bot-conversation.controller';
+import { BotMediaController } from '../conversations/presentation/bot-media.controller';
+import { ConversationMediaController } from '../conversations/presentation/conversation-media.controller';
 import { ConversationReadsController } from '../conversations/presentation/conversation-reads.controller';
+import { FakeMediaStorage } from '../conversations/test-support/fake-media-storage';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
 import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
@@ -186,6 +195,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
   const credentials: string[] = [];
   const users = { ana: randomUUID(), luis: randomUUID() };
   let seq = 0;
+  const mediaStorage = new FakeMediaStorage();
 
   const sweepScheduler = () =>
     new LiveSessionSweepScheduler(
@@ -210,6 +220,8 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         BotRecoveryController,
         BotConversationController,
         ConversationReadsController,
+        BotMediaController,
+        ConversationMediaController,
       ],
       providers: [
         ServiceAuthGuard,
@@ -225,6 +237,12 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         ChatbotRecoveryService,
         ConversationMirrorService,
         ConversationReadsService,
+        ConversationMediaService,
+        {
+          provide: CONVERSATION_MEDIA_STORE,
+          useClass: PrismaConversationMediaStore,
+        },
+        { provide: CONVERSATION_MEDIA_STORAGE, useValue: mediaStorage },
         PrismaLiveConversationStore,
         PgFeedWakeup,
         { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
@@ -317,6 +335,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
           'feed:read',
           'feed:ack',
           'conversation:write',
+          'media:read',
         ],
         rateLimit: 600,
       },
@@ -2430,6 +2449,522 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await statuses(b, [failed131047(wamid)]).expect(200);
       expect((await messageOf(id)).deliveryStatus).toBe('FAILED');
       expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+    });
+  });
+
+  describe('T11c (S15 Q5, S16 9): staff media in a live session', () => {
+    const JPEG = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      Buffer.from('staff-photo-bytes'),
+    ]);
+    const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n');
+    const OGG = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(32, 1)]);
+
+    const upload = (
+      b: Branch,
+      id: string,
+      file: Buffer | null,
+      opts: {
+        idem?: string | null;
+        filename?: string;
+        role?: string;
+        userId?: string;
+      } = {},
+    ) => {
+      let req = server()
+        .post(`/chatbot-requests/${id}/media`)
+        .set(as(b, opts.role, opts.userId));
+      if (opts.idem !== null) {
+        req = req.set('Idempotency-Key', opts.idem ?? randomUUID());
+      }
+      return file
+        ? req.attach('file', file, {
+            filename: opts.filename ?? 'foto.jpg',
+            contentType: 'application/octet-stream',
+          })
+        : req.field('sha256', 'x');
+    };
+    const sendMedia = (
+      b: Branch,
+      id: string,
+      body: Record<string, unknown>,
+      opts: { role?: string; userId?: string } = {},
+    ) => {
+      const clientMessageId = (body.clientMessageId as string) ?? randomUUID();
+      return staffPost(
+        b,
+        `/chatbot-requests/${id}/messages`,
+        { clientMessageId, expectedEpoch: 1, ...body },
+        { key: clientMessageId, ...opts },
+      );
+    };
+    const mediaRow = (id: string) =>
+      prisma.conversationMedia.findUniqueOrThrow({ where: { id } });
+    const countMessages = async (b: Branch, ref: string) =>
+      (await msgs(b, ref)).length;
+    const collect = (
+      res: any,
+      cb: (err: Error | null, body: Buffer) => void,
+    ) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => cb(null, Buffer.concat(chunks)));
+    };
+    const download = (b: Branch, id: string, token = b.token) =>
+      server()
+        .get(`/chatbot-api/media/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Branch-Id', b.tenantId)
+        .buffer(true)
+        .parse(collect);
+    /** An ACTIVE session and one uploaded JPEG. */
+    async function withMedia(b: Branch) {
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      const up = await upload(b, l.id, JPEG).expect(201);
+      return { l, mediaId: up.body.mediaId as string };
+    }
+
+    describe('1. POST /chatbot-requests/:id/media', () => {
+      it('stores a private, tenant-scoped object owned by the request and the attendee; 201 then 200 on a replay; never returns a key', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        const idem = randomUUID();
+        const res = await upload(b, l.id, JPEG, {
+          idem,
+          filename: '../../Mi  Foto <1>.jpg',
+        }).expect(201);
+        expect(res.headers['cache-control']).toBe('no-store');
+        expect(res.body).toEqual({
+          mediaId: expect.any(String),
+          mimeType: 'image/jpeg',
+          sizeBytes: JPEG.length,
+          sha256: createHash('sha256').update(JPEG).digest('hex'),
+          filename: 'Mi Foto 1.jpg',
+        });
+        const stored = await mediaRow(res.body.mediaId);
+        expect(stored).toMatchObject({
+          tenantId: b.tenantId,
+          requestId: l.id,
+          uploadedByUserId: users.ana,
+          filename: 'Mi Foto 1.jpg',
+          mimeType: 'image/jpeg',
+        });
+        expect(stored.storageKey).toBe(
+          `conversation-media/${b.tenantId}/${stored.id}.jpg`,
+        );
+        expect(
+          mediaStorage.objects.get(stored.storageKey as string),
+        ).toBeDefined();
+        expect(JSON.stringify(res.body)).not.toContain('conversation-media/');
+
+        const again = await upload(b, l.id, JPEG, { idem }).expect(200);
+        expect(again.body.mediaId).toBe(res.body.mediaId);
+        const clash = await upload(b, l.id, PDF, { idem }).expect(409);
+        expect(clash.body.code).toBe('IDEMPOTENCY_CONFLICT');
+      });
+
+      it('a PDF gets a generic name when none usable is sent; the type comes from the bytes, not the declared one', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        const res = await upload(b, l.id, PDF, { filename: '   ' }).expect(201);
+        expect(res.body).toMatchObject({
+          mimeType: 'application/pdf',
+          filename: 'documento.pdf',
+        });
+      });
+
+      it('refuses audio and unknown bytes (415), an empty or missing file and a bad key (400), more than 10 MB (413); nothing is stored', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        const before = await prisma.conversationMedia.count({
+          where: { tenantId: b.tenantId },
+        });
+        const audio = await upload(b, l.id, OGG).expect(415);
+        expect(audio.body.code).toBe('MEDIA_TYPE_NOT_ALLOWED');
+        await upload(b, l.id, Buffer.from('<html>x</html>')).expect(415);
+        await upload(b, l.id, null).expect(400);
+        await upload(b, l.id, JPEG, { idem: null }).expect(400);
+        await upload(b, l.id, JPEG, { idem: 'not-a-uuid' }).expect(400);
+        const big = await upload(
+          b,
+          l.id,
+          Buffer.concat([JPEG, Buffer.alloc(10 * 1024 * 1024, 1)]),
+        ).expect(413);
+        expect(big.body.code).toBe('MEDIA_TOO_LARGE');
+        expect(
+          await prisma.conversationMedia.count({
+            where: { tenantId: b.tenantId },
+          }),
+        ).toBe(before);
+      });
+
+      it('only the attendee, only while the session is ACTIVE, only for a conversation request of this tenant', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await claim(b, l.id).expect(200);
+        // STARTING: the bot has not confirmed the mute yet
+        const starting = await upload(b, l.id, JPEG).expect(409);
+        expect(starting.body.code).toBe('SESSION_NOT_ACTIVE');
+        await sessionAck(b, l.ref, { epoch: 1, state: 'STARTED' }).expect(200);
+        const notMine = await upload(b, l.id, JPEG, {
+          role: 'manager',
+          userId: users.luis,
+        }).expect(403);
+        expect(notMine.body.code).toBe('NOT_ASSIGNEE');
+        const other = await branch();
+        await upload(other, l.id, JPEG).expect(404);
+        await upload(b, randomUUID(), JPEG).expect(404);
+        await upload(b, l.id, JPEG).expect(201);
+        const v = await versionOf(l.id);
+        await finish(b, l.id, v).expect(200);
+        const ended = await upload(b, l.id, JPEG).expect(409);
+        expect(ended.body.code).toBe('SESSION_NOT_ACTIVE');
+      });
+    });
+
+    describe('2. POST /chatbot-requests/:id/messages with media', () => {
+      it('IMAGE with a caption: stored as an OUT STAFF message with the media link, one conversation.staff_message with type/mediaId/mimeType/filename/caption, the bot receives it', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        const clientMessageId = randomUUID();
+        const res = await sendMedia(b, l.id, {
+          clientMessageId,
+          type: 'IMAGE',
+          mediaId,
+          caption: '  Así quedó tu pedido  ',
+        }).expect(200);
+        expect(res.body.message).toMatchObject({
+          direction: 'OUT',
+          author: 'STAFF',
+          type: 'IMAGE',
+          text: 'Así quedó tu pedido',
+          deliveryStatus: 'QUEUED',
+          clientMessageId,
+          media: { id: mediaId, mimeType: 'image/jpeg', filename: 'foto.jpg' },
+        });
+        const stored = await prisma.conversationMessage.findUniqueOrThrow({
+          where: { id: res.body.message.id },
+        });
+        expect(stored).toMatchObject({
+          direction: 'OUT',
+          author: 'STAFF',
+          staffUserId: users.ana,
+          type: 'IMAGE',
+          mediaId,
+          text: 'Así quedó tu pedido',
+          deliveryStatus: 'QUEUED',
+        });
+        const feedItems = await items(b, l.id, 'conversation.staff_message');
+        expect(feedItems).toHaveLength(1);
+        expect(feedItems[0].payload).toEqual({
+          requestId: l.id,
+          handoffEpoch: 1,
+          seq: stored.seq,
+          messageId: stored.id,
+          type: 'IMAGE',
+          mediaId,
+          mimeType: 'image/jpeg',
+          filename: 'foto.jpg',
+          caption: 'Así quedó tu pedido',
+        });
+        const feed = await asBot(
+          b,
+          server().get('/chatbot-api/feed?waitSeconds=0'),
+        ).expect(200);
+        const delivered = feed.body.items.filter(
+          (i: any) => i.type === 'conversation.staff_message',
+        );
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0].payload).toMatchObject({
+          type: 'IMAGE',
+          mediaId,
+          caption: 'Así quedó tu pedido',
+        });
+        const evs = await prisma.$queryRaw<Array<{ payload: any }>>`
+          SELECT "payload" FROM "realtime_events"
+          WHERE "tenantId" = ${b.tenantId} AND "requestId" = ${l.id}
+            AND "type" = 'conversation.message'`;
+        expect(evs.map((e) => e.payload.messageId)).toContain(stored.id);
+      });
+
+      it('DOCUMENT without caption (caption null); a replay of the same clientMessageId answers the same message, another body is 409', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        const up = await upload(b, l.id, PDF, {
+          filename: 'Cotización.pdf',
+        }).expect(201);
+        const clientMessageId = randomUUID();
+        const body = {
+          clientMessageId,
+          type: 'DOCUMENT',
+          mediaId: up.body.mediaId,
+        };
+        const first = await sendMedia(b, l.id, body).expect(200);
+        expect(first.body.message).toMatchObject({
+          type: 'DOCUMENT',
+          text: '',
+          media: { id: up.body.mediaId, mimeType: 'application/pdf' },
+        });
+        const [item] = await items(b, l.id, 'conversation.staff_message');
+        expect(item.payload).toMatchObject({
+          type: 'DOCUMENT',
+          caption: null,
+          mimeType: 'application/pdf',
+        });
+        const replay = await sendMedia(b, l.id, body).expect(200);
+        expect(replay.body.message.id).toBe(first.body.message.id);
+        expect(replay.body.message.media).toEqual(first.body.message.media);
+        const clash = await sendMedia(b, l.id, {
+          ...body,
+          caption: 'otro',
+        }).expect(409);
+        expect(clash.body.code).toBe('IDEMPOTENCY_CONFLICT');
+        expect(await items(b, l.id, 'conversation.staff_message')).toHaveLength(
+          1,
+        );
+      });
+
+      it('a mediaId that is unknown, from another tenant, of another request is 404 MEDIA_NOT_FOUND; purged is 422 MEDIA_PURGED; a type that does not fit is 422 MEDIA_TYPE_MISMATCH; nothing is enqueued', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        const foreign = await branch();
+        const fl = await liveRequest(foreign);
+        await activeSession(foreign, fl);
+        const foreignMedia = (await upload(foreign, fl.id, JPEG).expect(201))
+          .body.mediaId;
+        const other = await liveRequest(b);
+        await activeSession(b, other);
+        const otherMedia = (await upload(b, other.id, JPEG).expect(201)).body
+          .mediaId;
+        const purged = (await upload(b, l.id, JPEG).expect(201)).body.mediaId;
+        // the retention purge deletes the object and clears the key
+        await prisma.conversationMedia.update({
+          where: { id: purged },
+          data: { storageKey: null, purgedAt: new Date() },
+        });
+        const before = await countMessages(b, l.ref);
+        for (const bad of [randomUUID(), foreignMedia, otherMedia]) {
+          const res = await sendMedia(b, l.id, {
+            type: 'IMAGE',
+            mediaId: bad,
+          }).expect(404);
+          expect(res.body.code).toBe('MEDIA_NOT_FOUND');
+        }
+        const gone = await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId: purged,
+        }).expect(422);
+        expect(gone.body.code).toBe('MEDIA_PURGED');
+        const mismatch = await sendMedia(b, l.id, {
+          type: 'DOCUMENT',
+          mediaId,
+        }).expect(422);
+        expect(mismatch.body.code).toBe('MEDIA_TYPE_MISMATCH');
+        expect(await countMessages(b, l.ref)).toBe(before);
+        expect(await items(b, l.id, 'conversation.staff_message')).toEqual([]);
+      });
+
+      it('same checks as text: stale epoch 409, closed window 409, not the assignee 403, session not active 409; nothing is enqueued', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        const stale = await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+          expectedEpoch: 7,
+        }).expect(409);
+        expect(stale.body.code).toBe('STALE_EPOCH');
+        const notMine = await sendMedia(
+          b,
+          l.id,
+          { type: 'IMAGE', mediaId },
+          { role: 'manager', userId: users.luis },
+        ).expect(403);
+        expect(notMine.body.code).toBe('NOT_ASSIGNEE');
+        const c = await conversation(b, l.ref);
+        const old = new Date(Date.now() - 25 * 60 * MIN);
+        await prisma.chatbotConversation.update({
+          where: { id: c.id },
+          data: { lastCustomerMessageAt: old },
+        });
+        await prisma.chatbotRequest.update({
+          where: { id: l.id },
+          data: { lastCustomerMessageAt: old },
+        });
+        const closed = await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+        }).expect(409);
+        expect(closed.body.code).toBe('WINDOW_CLOSED');
+        expect(await items(b, l.id, 'conversation.staff_message')).toEqual([]);
+
+        const l2 = await liveRequest(b);
+        await claim(b, l2.id).expect(200);
+        const starting = await sendMedia(b, l2.id, {
+          type: 'IMAGE',
+          mediaId,
+        }).expect(409);
+        expect(starting.body.code).toBe('SESSION_NOT_ACTIVE');
+        expect(await items(b, l2.id, 'conversation.staff_message')).toEqual([]);
+      });
+
+      it('the body is validated: TEXT unchanged, IMAGE/DOCUMENT need mediaId and take no text, TEXT takes no mediaId, caption is printable and ≤ 1024', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        await sendMedia(b, l.id, { text: 'hola' }).expect(200);
+        await sendMedia(b, l.id, { type: 'TEXT', text: 'hola 2' }).expect(200);
+        await sendMedia(b, l.id, { type: 'IMAGE' }).expect(400);
+        await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+          text: 'no',
+        }).expect(400);
+        await sendMedia(b, l.id, { type: 'TEXT', text: 'x', mediaId }).expect(
+          400,
+        );
+        await sendMedia(b, l.id, { text: 'x', caption: 'y' }).expect(400);
+        await sendMedia(b, l.id, { type: 'IMAGE', mediaId: 'nope' }).expect(
+          400,
+        );
+        await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+          caption: 'x'.repeat(1025),
+        }).expect(400);
+        await sendMedia(b, l.id, { type: 'AUDIO', mediaId }).expect(400);
+        await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+          caption: 'ok',
+        }).expect(200);
+        expect(await items(b, l.id, 'conversation.staff_message')).toHaveLength(
+          3,
+        );
+      });
+    });
+
+    describe('3. GET /chatbot-api/media/:id (bot, scope media:read)', () => {
+      it('streams the bytes of a media attached to a staff message with Content-Type, Content-Disposition filename and no-store', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        await sendMedia(b, l.id, { type: 'IMAGE', mediaId }).expect(200);
+        const res = await download(b, mediaId).expect(200);
+        expect(Buffer.isBuffer(res.body) && res.body.equals(JPEG)).toBe(true);
+        expect(res.headers['content-type']).toMatch(/^image\/jpeg/);
+        expect(res.headers['content-disposition']).toBe(
+          'attachment; filename="foto.jpg"',
+        );
+        expect(res.headers['cache-control']).toBe('no-store');
+        expect(res.headers['x-content-type-options']).toBe('nosniff');
+      });
+
+      it('404 for an unknown id, another tenant, a purged file, a file no staff message carries (not sent yet, or a customer file); 403 without media:read', async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        // uploaded but never sent
+        await download(b, mediaId).expect(404);
+        await sendMedia(b, l.id, { type: 'IMAGE', mediaId }).expect(200);
+        await download(b, mediaId).expect(200);
+
+        await download(b, randomUUID()).expect(404);
+        const foreign = await branch();
+        await download(foreign, mediaId).expect(404);
+
+        // a customer file (unit 9): attached to an IN message, never downloadable
+        const customer = await prisma.conversationMedia.create({
+          data: {
+            tenantId: b.tenantId,
+            storageKey: `conversation-media/${b.tenantId}/c.jpg`,
+            mimeType: 'image/jpeg',
+            sizeBytes: 3,
+            sha256: 'a'.repeat(64),
+            idempotencyKey: randomUUID(),
+            purgeAfter: new Date(Date.now() + 1e9),
+          },
+        });
+        mediaStorage.objects.set(`conversation-media/${b.tenantId}/c.jpg`, {
+          bytes: JPEG,
+          mimeType: 'image/jpeg',
+        });
+        const c = await conversation(b, l.ref);
+        await prisma.conversationMessage.create({
+          data: {
+            tenantId: b.tenantId,
+            conversationId: c.id,
+            seq: 9000,
+            direction: 'IN',
+            author: 'CUSTOMER',
+            type: 'IMAGE',
+            mediaId: customer.id,
+            purgeAfter: new Date(Date.now() + 1e9),
+          },
+        });
+        await download(b, customer.id).expect(404);
+
+        // purged after being sent
+        await prisma.conversationMedia.update({
+          where: { id: mediaId },
+          data: { storageKey: null, purgedAt: new Date() },
+        });
+        await download(b, mediaId).expect(404);
+
+        const token = `svc_${randomUUID()}`;
+        const credential = await prisma.serviceCredential.create({
+          data: {
+            tenantId: b.tenantId,
+            name: 'bot-no-media',
+            hashedKey: createHash('sha256').update(token).digest('hex'),
+            scopes: ['requests:read'],
+            rateLimit: 600,
+          },
+        });
+        credentials.push(credential.id);
+        await download(b, mediaId, token).expect(403);
+      });
+    });
+
+    describe('4. staff read', () => {
+      it("the attendee's conversation read shows the media message as staff media (type, caption, media descriptor, QUEUED) and the proxy opens it for them", async () => {
+        const b = await branch();
+        const { l, mediaId } = await withMedia(b);
+        const sent = await sendMedia(b, l.id, {
+          type: 'IMAGE',
+          mediaId,
+          caption: 'Mira',
+        }).expect(200);
+        const read = await server()
+          .get(`/chatbot-requests/${l.id}/conversation`)
+          .set(as(b))
+          .expect(200);
+        const mine = read.body.items.find(
+          (m: any) => m.id === sent.body.message.id,
+        );
+        expect(mine).toMatchObject({
+          direction: 'OUT',
+          author: 'STAFF',
+          type: 'IMAGE',
+          text: 'Mira',
+          deliveryStatus: 'QUEUED',
+          staff: { id: users.ana },
+          media: { id: mediaId, mimeType: 'image/jpeg', purged: false },
+        });
+        const file = await server()
+          .get(`/chatbot-media/${mediaId}`)
+          .set(as(b))
+          .buffer(true)
+          .parse(collect)
+          .expect(200);
+        expect(file.headers['content-type']).toMatch(/^image\/jpeg/);
+        // another user of the tenant, not the attendee, cannot open it
+        await server()
+          .get(`/chatbot-media/${mediaId}`)
+          .set(as(b, 'attendee', users.luis))
+          .expect(403);
+      });
     });
   });
 

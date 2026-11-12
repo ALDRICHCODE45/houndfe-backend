@@ -4304,6 +4304,12 @@ model ConversationMedia {
   purgeAttempts    Int       @default(0)
   lastPurgeErrorAt DateTime?
   purgeLeaseUntil  DateTime?
+  // Unit 11 T11c: staff uploads only (NULL for the bot's customer media). The
+  // request and the user that uploaded the file; a staff message may carry only
+  // media of its own request and sender. `filename` is sanitized (≤ 120).
+  requestId        String?
+  uploadedByUserId String?
+  filename         String?   @db.VarChar(120)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 

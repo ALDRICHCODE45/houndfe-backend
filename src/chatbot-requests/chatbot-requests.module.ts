@@ -13,6 +13,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { ConversationsModule } from '../conversations/conversations.module';
 import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
 import { EXPIRATION_INTAKE_REPOSITORY } from '../human-decisions/domain/expiration-intake.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from '../human-decisions/domain/restock-intake.repository';
@@ -87,6 +88,7 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     AuthModule,
     WrappedRequestResolutionModule,
     ChatbotApiModule,
+    ConversationsModule,
     ChatbotRequestWrapperModule,
     DeliveryZonesModule,
     RealtimeModule,

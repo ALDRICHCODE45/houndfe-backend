@@ -18,6 +18,8 @@ import {
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
 import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
+import { ConversationMediaService } from '../conversations/application/conversation-media.service';
+import { ConversationsModule } from '../conversations/conversations.module';
 import { HumanDecisionsModule } from '../human-decisions/human-decisions.module';
 import { ReceiptsModule } from '../receipts/receipts.module';
 import { SalesModule } from '../sales/sales.module';
@@ -68,6 +70,14 @@ class IsolatedChatbotApiModule {}
 })
 class IsolatedZonesModule {}
 
+// T11c: the staff upload reuses the conversations module's media service,
+// whose storage needs the Spaces settings of the whole application.
+@Module({
+  providers: [{ provide: ConversationMediaService, useValue: {} }],
+  exports: [ConversationMediaService],
+})
+class IsolatedConversationsModule {}
+
 describe('ChatbotRequestsModule wiring', () => {
   it('resolves the controller and the service without database access', async () => {
     const pass = { canActivate: () => true };
@@ -92,6 +102,8 @@ describe('ChatbotRequestsModule wiring', () => {
       .useModule(IsolatedChatbotApiModule)
       .overrideModule(DeliveryZonesModule)
       .useModule(IsolatedZonesModule)
+      .overrideModule(ConversationsModule)
+      .useModule(IsolatedConversationsModule)
       .overrideGuard(JwtAuthGuard)
       .useValue(pass)
       .overrideGuard(TenantContextGuard)

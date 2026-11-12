@@ -86,8 +86,21 @@ export class CancelDto extends ExpectedVersionDto {
  * characters), so the DTO only requires that the key is present.
  */
 export class ReplyDto extends ExpectedVersionDto {
-  @IsDefined()
-  text!: unknown;
+  @IsOptional()
+  @IsIn(['TEXT', 'IMAGE', 'DOCUMENT'])
+  type?: string;
+
+  /** Required for TEXT; refused for IMAGE/DOCUMENT (the domain decides). */
+  @IsOptional()
+  text?: unknown;
+
+  /** S15 Q5: a media this attendee uploaded for this request. */
+  @IsOptional()
+  @IsUUID()
+  mediaId?: string;
+
+  @IsOptional()
+  caption?: unknown;
 }
 
 /** §12.11: the target is the request that stays; both versions are checked. */
@@ -121,7 +134,8 @@ export class FinishDto extends ExpectedVersionDto {
 }
 
 /**
- * Unit 11 (§4.4 `messages {clientMessageId, expectedEpoch, text}`). The header
+ * Unit 11 (§4.4 `messages {clientMessageId, expectedEpoch, text}` or, S15 Q5,
+ * `{…, type: IMAGE|DOCUMENT, mediaId, caption?}`). The header
  * `Idempotency-Key` must equal `clientMessageId`. `text` is `unknown`:
  * `parseStaffMessageText` owns the rules.
  */
@@ -133,6 +147,19 @@ export class StaffMessageDto {
   @Min(1)
   expectedEpoch!: number;
 
-  @IsDefined()
-  text!: unknown;
+  @IsOptional()
+  @IsIn(['TEXT', 'IMAGE', 'DOCUMENT'])
+  type?: string;
+
+  /** Required for TEXT; refused for IMAGE/DOCUMENT (the domain decides). */
+  @IsOptional()
+  text?: unknown;
+
+  /** S15 Q5: a media this attendee uploaded for this request. */
+  @IsOptional()
+  @IsUUID()
+  mediaId?: string;
+
+  @IsOptional()
+  caption?: unknown;
 }

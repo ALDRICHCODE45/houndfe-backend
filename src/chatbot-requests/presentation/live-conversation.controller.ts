@@ -27,9 +27,12 @@ import {
   Query,
   Req,
   Res,
+  UploadedFile,
   UseFilters,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { RequirePermissions } from '../../auth/authorization/decorators/require-permissions.decorator';
 import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
@@ -43,7 +46,13 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import { BOT_SCOPES } from '../domain/bot-scopes';
-import { parseStaffMessageText } from '../domain/live-session';
+import {
+  ConversationMediaService,
+  type MediaUploadView,
+} from '../../conversations/application/conversation-media.service';
+import { BotMediaHttpFilter } from '../../conversations/presentation/bot-media.controller';
+import { CONVERSATION_MEDIA_MAX_BYTES } from '../../conversations/domain/conversation-media';
+import { parseStaffMessageContent } from '../domain/live-session';
 import {
   PrismaLiveConversationStore,
   type SessionAckResult,
@@ -138,7 +147,57 @@ type StaffRequest = Request & { user?: AuthenticatedUser };
 @UseGuards(JwtAuthGuard, TenantContextGuard, ActiveUserGuard, PermissionsGuard)
 @UseFilters(ChatbotRequestHttpFilter)
 export class LiveConversationStaffController {
-  constructor(private readonly store: PrismaLiveConversationStore) {}
+  constructor(
+    private readonly store: PrismaLiveConversationStore,
+    private readonly media: ConversationMediaService,
+  ) {}
+
+  /**
+   * S15 Q5: the attendee uploads a photo or PDF for the live session. Multipart
+   * `file`; `Idempotency-Key` (uuid) makes a retry answer the same media. Same
+   * gates as a text message (assignee, session ACTIVE). The answer carries the
+   * `mediaId` to send with `POST …/messages {type, mediaId, caption?}`; no
+   * storage key or URL ever leaves.
+   */
+  @Post(':id/media')
+  // Multer's size abort answers `413 MEDIA_TOO_LARGE`, as for the bot's upload.
+  @UseFilters(BotMediaHttpFilter)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: {
+        // One byte above the cap so exactly 10 MB passes and 10 MB + 1 aborts.
+        fileSize: CONVERSATION_MEDIA_MAX_BYTES + 1,
+        files: 1,
+        fields: 4,
+        fieldSize: 1024,
+      },
+    }),
+  )
+  async upload(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() fields: unknown,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Req() req: StaffRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<MediaUploadView> {
+    if (!req.user) throw new ForbiddenException();
+    await this.store.assertCanUpload(id, req.user.userId);
+    const { created, media } = await this.media.upload({
+      idempotencyKey: key,
+      file: file?.buffer,
+      fields,
+      staff: {
+        requestId: id,
+        userId: req.user.userId,
+        filename: file?.originalname,
+      },
+    });
+    response.status(created ? 201 : 200);
+    return media;
+  }
 
   @Post(':id/messages')
   @HttpCode(HttpStatus.OK)
@@ -162,7 +221,7 @@ export class LiveConversationStaffController {
       actorUserId: req.user.userId,
       clientMessageId: body.clientMessageId.toLowerCase(),
       expectedEpoch: body.expectedEpoch,
-      text: parseStaffMessageText(body.text),
+      content: parseStaffMessageContent(body),
       // The paid-template command is not part of the first slice of unit 11.
       templateAllowed: false,
     });

@@ -43,7 +43,7 @@ A `TALK_TO_HUMAN` or `COMPLAINT` request goes live when someone **claims** it ("
 }
 ```
 
-`text`: plain text, 1 to 4096 characters, line breaks allowed, trimmed; control characters are `400`. It goes to the customer **as written**: no prefix, no rewriting. `200`:
+(Photos and PDFs: section 3b.) `text`: plain text, 1 to 4096 characters, line breaks allowed, trimmed; control characters are `400`. It goes to the customer **as written**: no prefix, no rewriting. `200`:
 
 ```json
 {
@@ -75,6 +75,56 @@ The message is stored in the same transaction as the item the bot reads, so it e
 
 **Delivery status** arrives by SSE `message.status {requestId, messageId, seq, deliveryStatus}`: `QUEUED` → `SENT` (the bot's Meta ACK) → `DELIVERED` → `READ`; `DEFERRED` (the bot found the window closed: show "No enviado, ventana cerrada"); `UNKNOWN` ("Entrega dudosa": a resend is a **new** message); `FAILED`. Show "Pendiente de envío" yourself after 30 s with no `SENT` (§4.7). The attendee's own message also arrives as `conversation.message` (reconcile with `clientMessageId`).
 
+## 3b. Photos and PDFs (S15 Q5): upload, then send
+
+Two calls. Only the assignee, only while the session is `ACTIVE`, same permissions as text (`read` + `update:ChatbotRequest`).
+
+**1. Upload: `POST /chatbot-requests/:id/media`**, `multipart/form-data`, one part `file` (JPEG, PNG, WebP or PDF, **at most 10 MB**; the type is decided by the file's bytes, not by its name or declared type). Header `Idempotency-Key: <uuid>` (a retry with the same key and file answers the same media; the same key with another file is `409 IDEMPOTENCY_CONFLICT`). `201` (first time) or `200` (replay):
+
+```json
+{
+  "mediaId": "…",
+  "mimeType": "image/jpeg",
+  "sizeBytes": 183422,
+  "sha256": "…",
+  "filename": "foto.jpg"
+}
+```
+
+`filename` is the name the customer will see, cleaned by the backend (ASCII, no path, max 100; a missing or unusable name becomes `imagen.<ext>` or `documento.pdf`). Errors: `415 MEDIA_TYPE_NOT_ALLOWED` (audio, video, anything else), `413 MEDIA_TOO_LARGE`, `400` (no file, bad key), `403 NOT_ASSIGNEE`, `409 SESSION_NOT_ACTIVE`, `404`, `422 ACTION_NOT_ALLOWED`. An uploaded file belongs to this request and to you: nobody else can send it.
+
+**2. Send: `POST /chatbot-requests/:id/messages`** with the same envelope as text (`clientMessageId` = `Idempotency-Key`, `expectedEpoch`) and, instead of `text`:
+
+```json
+{
+  "clientMessageId": "…",
+  "expectedEpoch": 3,
+  "type": "IMAGE",
+  "mediaId": "…",
+  "caption": "Así quedó tu pedido"
+}
+```
+
+`type` is `IMAGE` (the file must be an image) or `DOCUMENT` (a PDF); `caption` is optional (trimmed, printable, at most 1024); `text` is not allowed with media and `mediaId`/`caption` are not allowed with `TEXT` (all `400`). `type` defaults to `TEXT`, so the text call is unchanged. `200` has the shape of section 3 plus `media`:
+
+```json
+{
+  "message": {
+    "id": "…",
+    "seq": 18,
+    "type": "IMAGE",
+    "text": "Así quedó tu pedido",
+    "media": { "id": "…", "mimeType": "image/jpeg", "filename": "foto.jpg" },
+    "deliveryStatus": "QUEUED",
+    "…": "…"
+  }
+}
+```
+
+(`text` carries the caption, `""` when there is none.) The checks and errors are those of text (`403 NOT_ASSIGNEE`, `409 SESSION_NOT_ACTIVE`, `409 STALE_EPOCH`, `409 WINDOW_CLOSED`), plus `404 MEDIA_NOT_FOUND` (unknown id, another branch, another request or another person's upload), `422 MEDIA_PURGED` and `422 MEDIA_TYPE_MISMATCH` (an `IMAGE` pointing at a PDF or the reverse). Nothing is sent to the customer when the call fails. Delivery status, `DEFERRED` and `FAILED` work exactly as for text. You may send the same uploaded file again in a new message.
+
+**Showing it.** In the conversation (`GET …/conversation`) and in `conversation.message`, the item has `type` `IMAGE`/`DOCUMENT`, `text` = caption and `media {id, mimeType, sizeBytes, purged, …}`. Open the bytes with `GET /chatbot-media/:id` (authenticated, `Authorization` header): the attendee may open the files of **their session's** messages without `read:ChatbotConversation` (others still need it).
+
 ## 4. Finish: `POST /chatbot-requests/:id/finish`
 
 `read` + `update:ChatbotRequest`; `Idempotency-Key`; body `{ "expectedVersion": 5, "note": "Resuelto por teléfono", "complaintOutcome": "NO_ACTION" }`. `note` is internal, 1 to 1000 characters, required. `complaintOutcome` (`RETURN | REPLACEMENT | REFUND | NO_ACTION`) is **stored only**: nothing is triggered (D19). It is optional here; making it mandatory for `COMPLAINT` belongs to unit 12.
@@ -96,5 +146,5 @@ The message is stored in the same transaction as the item the bot reads, so it e
 - **Release.** `release` of a live request is `422 ACTION_NOT_ALLOWED`: a live conversation never goes back to `NEW` while the bot is muted. The way out is `finish`; a reassigner can force it. (The proposal's §4.2 sentence "release ≡ return to bot" is implemented as that.)
 - **Reassign** (STARTING or ACTIVE) keeps the epoch and the session and moves it to the new attendee: the previous attendee can no longer write (`403 NOT_ASSIGNEE`), the new one can. The bot tells the customer "Ahora te atiende <nombre>" (owner decision Q2, first name only). You get the usual `request.reassigned` SSE event; the session state does not change, so there is **no** `session.*` event for it.
 - **Cancel** stays `WAITING`-only (`409 CANCEL_NOT_ALLOWED` while a session runs), as before.
-- **Not built yet:** the template command and `templateCostText` in the detail (the `templateLanguageCode` setting already exists, handoff 16); staff photos and PDFs (owner said yes; `type` is `TEXT` only for now); the "5/15 minutes unanswered" and "customer wrote" notices; the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
+- **Not built yet:** the template command and `templateCostText` in the detail (the `templateLanguageCode` setting already exists, handoff 16); the "5/15 minutes unanswered" and "customer wrote" notices; the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
 - **Revert notice.** When the start reverts (start timeout) you get `request.released` + `session.ended` (state `WAITING`); there is no persistent notification yet.

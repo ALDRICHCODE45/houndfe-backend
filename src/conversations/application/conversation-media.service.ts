@@ -35,6 +35,7 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   CONVERSATION_MEDIA_MAX_BYTES,
   detectConversationMedia,
+  sanitizeStaffFilename,
 } from '../domain/conversation-media';
 
 export const CONVERSATION_MEDIA_STORE = Symbol('CONVERSATION_MEDIA_STORE');
@@ -48,6 +49,10 @@ export interface MediaRow {
   sizeBytes: number;
   sha256: string;
   purgedAt: Date | null;
+  /** Unit 11 T11c: staff uploads only (NULL for the bot's customer files). */
+  filename?: string | null;
+  requestId?: string | null;
+  uploadedByUserId?: string | null;
 }
 
 export interface ConversationMediaStore {
@@ -65,8 +70,25 @@ export interface ConversationMediaStore {
     sizeBytes: number;
     sha256: string;
     idempotencyKey: string;
+    requestId?: string;
+    uploadedByUserId?: string;
+    filename?: string;
   }): Promise<boolean>;
   findById(id: string): Promise<MediaRow | null>;
+  /** T11c: the row only if a STAFF message of this tenant carries it. */
+  findStaffAttached(id: string): Promise<MediaRow | null>;
+  /**
+   * T11c: an attendee without `read:ChatbotConversation` may open a file only
+   * of a message of THEIR session (same bound as the conversation read).
+   */
+  attendeeSeesMedia(id: string, userId: string): Promise<boolean>;
+}
+
+/** Who a staff upload belongs to (T11c): the request and its attendee. */
+export interface StaffUploadOwner {
+  requestId: string;
+  userId: string;
+  filename: unknown;
 }
 
 export interface MediaUploadView {
@@ -74,12 +96,15 @@ export interface MediaUploadView {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+  /** Staff uploads only: the sanitized name the customer will see. */
+  filename?: string;
 }
 
 export interface MediaOpened {
   body: ReceiptStoredObject['body'];
   contentLength: number | null;
   mimeType: string;
+  filename?: string | null;
 }
 
 const KEY =
@@ -105,9 +130,15 @@ export class ConversationMediaService {
     idempotencyKey: unknown;
     file: Buffer | undefined;
     fields: unknown;
+    /** T11c: set by the staff route; the bot's upload leaves it out. */
+    staff?: StaffUploadOwner;
   }): Promise<{ created: boolean; media: MediaUploadView }> {
-    const key = input.idempotencyKey;
-    if (typeof key !== 'string' || !KEY.test(key)) return invalid();
+    const clientKey = input.idempotencyKey;
+    if (typeof clientKey !== 'string' || !KEY.test(clientKey)) return invalid();
+    const { staff } = input;
+    // Staff keys live in their own namespace (per request): a staff key can
+    // never replay, or collide with, a key of the bot's customer uploads.
+    const key = staff ? `staff:${staff.requestId}:${clientKey}` : clientKey;
     const declaredSha = parseFields(input.fields);
     const bytes = input.file;
     if (!bytes || bytes.length === 0) return invalid();
@@ -119,12 +150,22 @@ export class ConversationMediaService {
 
     // A retry of an upload that already succeeded needs no storage at all.
     const existing = await this.store.findByKey(key);
-    if (existing) return { created: false, media: replay(existing, sha256) };
+    if (existing) {
+      if (staff && existing.uploadedByUserId !== staff.userId) {
+        throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
+      }
+      return { created: false, media: replay(existing, sha256) };
+    }
 
     const detected = detectConversationMedia(bytes);
-    if (!detected) {
+    // Staff send photos and PDFs only (S15 Q5); the bot's customer media also
+    // takes audio.
+    if (!detected || (staff && detected.kind === 'audio')) {
       throw new ChatbotRequestCommandError('MEDIA_TYPE_NOT_ALLOWED', 415);
     }
+    const filename = staff
+      ? sanitizeStaffFilename(staff.filename, detected)
+      : undefined;
 
     const id = randomUUID();
     const storageKey = `conversation-media/${this.store.tenantId()}/${id}.${detected.extension}`;
@@ -166,6 +207,13 @@ export class ConversationMediaService {
         sizeBytes: bytes.length,
         sha256,
         idempotencyKey: key,
+        ...(staff && filename
+          ? {
+              requestId: staff.requestId,
+              uploadedByUserId: staff.userId,
+              filename,
+            }
+          : {}),
       });
     } catch (error) {
       // AMBIGUOUS: a connection reset after the autocommitted INSERT leaves the
@@ -189,6 +237,7 @@ export class ConversationMediaService {
           mimeType: detected.mimeType,
           sizeBytes: bytes.length,
           sha256,
+          ...(filename ? { filename } : {}),
         },
       };
     }
@@ -197,6 +246,9 @@ export class ConversationMediaService {
     const winner = await this.store.findByKey(key);
     if (!winner) {
       throw new ChatbotRequestCommandError('MEDIA_STORAGE_FAILED', 503);
+    }
+    if (staff && winner.uploadedByUserId !== staff.userId) {
+      throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
     }
     return { created: false, media: replay(winner, sha256) };
   }
@@ -227,6 +279,39 @@ export class ConversationMediaService {
         `Conversation media ${id} intent not dropped (${errorClass(error)})`,
       );
     }
+  }
+
+  /** T11c: whether an attendee without the chat permission may open the file. */
+  attendeeSeesMedia(id: string, userId: string): Promise<boolean> {
+    return this.store.attendeeSeesMedia(id, userId);
+  }
+
+  /**
+   * T11c (S16 9): the bot downloads the file of a STAFF message. Unknown, other
+   * tenant, not carried by a staff message (customer files never are) and
+   * purged are all the same `404`.
+   */
+  async openForBot(mediaId: string): Promise<MediaOpened> {
+    const row = await this.store.findStaffAttached(mediaId);
+    if (!row || row.purgedAt || !row.storageKey) {
+      throw new ChatbotRequestCommandError('MEDIA_NOT_FOUND', 404);
+    }
+    let object: ReceiptStoredObject | null;
+    try {
+      object = await this.storage.getPrivate(row.storageKey);
+    } catch (error) {
+      this.logger.error(
+        `Conversation media read failed for ${mediaId} (${errorClass(error)})`,
+      );
+      throw new ChatbotRequestCommandError('MEDIA_STORAGE_FAILED', 503);
+    }
+    if (!object) throw new ChatbotRequestCommandError('MEDIA_NOT_FOUND', 404);
+    return {
+      body: object.body,
+      contentLength: object.contentLength,
+      mimeType: row.mimeType,
+      filename: row.filename ?? null,
+    };
   }
 
   /** `variant`: absent or `original`; `thumb` has no file yet (no image library). */
@@ -286,6 +371,7 @@ function replay(row: MediaRow, sha256: string): MediaUploadView {
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
     sha256: row.sha256,
+    ...(row.filename ? { filename: row.filename } : {}),
   };
 }
 

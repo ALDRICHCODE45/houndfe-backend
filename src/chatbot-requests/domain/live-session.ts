@@ -223,6 +223,48 @@ function printable(raw: unknown, max: number): string {
 export const parseStaffMessageText = (raw: unknown): string =>
   printable(raw, STAFF_MESSAGE_MAX_CHARS);
 
+export const STAFF_CAPTION_MAX_CHARS = 1024;
+
+export type StaffMessageContent =
+  | { type: 'TEXT'; text: string }
+  | {
+      type: 'IMAGE' | 'DOCUMENT';
+      mediaId: string;
+      caption: string | null;
+    };
+
+/**
+ * The body of `POST …/messages` (S15 Q5): TEXT (the default) needs `text` and
+ * takes neither `mediaId` nor `caption`; IMAGE/DOCUMENT need `mediaId`, take
+ * no `text` and may carry a printable caption (≤ 1024, trimmed, never empty).
+ */
+export function parseStaffMessageContent(body: {
+  type?: unknown;
+  text?: unknown;
+  mediaId?: unknown;
+  caption?: unknown;
+}): StaffMessageContent {
+  const type = body.type ?? 'TEXT';
+  if (type === 'TEXT') {
+    if (body.mediaId !== undefined || body.caption !== undefined) {
+      return invalid();
+    }
+    return { type, text: parseStaffMessageText(body.text) };
+  }
+  if (type !== 'IMAGE' && type !== 'DOCUMENT') return invalid();
+  if (body.text !== undefined || typeof body.mediaId !== 'string') {
+    return invalid();
+  }
+  return {
+    type,
+    mediaId: body.mediaId.toLowerCase(),
+    caption:
+      body.caption === undefined || body.caption === null
+        ? null
+        : printable(body.caption, STAFF_CAPTION_MAX_CHARS),
+  };
+}
+
 /** The internal closing note (§4.8): 1..1000. */
 export const parseFinishNote = (raw: unknown): string =>
   printable(raw, FINISH_NOTE_MAX_CHARS);

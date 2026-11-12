@@ -98,5 +98,7 @@ import { ChatbotRequestHttpFilter } from '../chatbot-requests/presentation/chatb
         ),
     },
   ],
+  // T11c: the live conversation's staff upload reuses the unit 9 media service.
+  exports: [ConversationMediaService],
 })
 export class ConversationsModule {}

@@ -6,6 +6,11 @@
  * lowercase uuid). Scope `media:write`, `write` budget. `201` stores, `200`
  * replays. Never returns a storage key or a URL. Every answer is `no-store`.
  *
+ * `GET /chatbot-api/media/:id` (unit 11, S16 9): the bot downloads the file of a
+ * STAFF image/PDF message. Scope `media:read`, `read` budget; `no-store`.
+ * Only a file a staff message carries is served (404 for unknown, other tenant,
+ * purged, or a customer's file).
+ *
  * Multer aborts the stream once the file passes 10 MB (`413 MEDIA_TOO_LARGE`,
  * mapped by `BotMediaHttpFilter`); the global body parser is not involved in
  * multipart.
@@ -14,10 +19,14 @@ import {
   type ArgumentsHost,
   Catch,
   Controller,
+  Get,
   Headers,
+  Param,
+  ParseUUIDPipe,
   PayloadTooLargeException,
   Post,
   Res,
+  StreamableFile,
   UploadedFile,
   UseFilters,
   UseGuards,
@@ -88,5 +97,24 @@ export class BotMediaController {
     });
     response.status(created ? 201 : 200);
     return media;
+  }
+
+  @Get(':id')
+  @RequiredScopes(BOT_SCOPES.mediaRead)
+  @BotRouteClass('read')
+  async download(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<StreamableFile> {
+    const file = await this.media.openForBot(id);
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('X-Content-Type-Options', 'nosniff');
+    // The stored name is already sanitized (ASCII, no quotes or separators).
+    const name = file.filename ?? 'archivo';
+    return new StreamableFile(file.body, {
+      type: file.mimeType,
+      disposition: `attachment; filename="${name}"`,
+      ...(file.contentLength !== null ? { length: file.contentLength } : {}),
+    });
   }
 }

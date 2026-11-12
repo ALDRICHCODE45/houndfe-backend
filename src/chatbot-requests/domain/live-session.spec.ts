@@ -4,6 +4,7 @@ import {
   dueSessionAction,
   messageStatusForOutcome,
   parseFinishNote,
+  parseStaffMessageContent,
   parseStaffMessageText,
   staffFirstName,
   whatsappWindowClosesAt,
@@ -191,5 +192,51 @@ describe('parseFinishNote', () => {
     expect(() => parseFinishNote('')).toThrow();
     expect(() => parseFinishNote('x'.repeat(1001))).toThrow();
     expect(() => parseFinishNote(undefined)).toThrow();
+  });
+});
+
+describe('parseStaffMessageContent (S15 Q5)', () => {
+  const id = '2f6b1c1e-6c1d-4a0c-9d0a-0f4a5b6c7d8e';
+  it('TEXT is the default and takes no media fields', () => {
+    expect(parseStaffMessageContent({ text: ' hola ' })).toEqual({
+      type: 'TEXT',
+      text: 'hola',
+    });
+    expect(() =>
+      parseStaffMessageContent({ type: 'TEXT', text: 'x', mediaId: id }),
+    ).toThrow();
+    expect(() =>
+      parseStaffMessageContent({ text: 'x', caption: 'y' }),
+    ).toThrow();
+    expect(() => parseStaffMessageContent({})).toThrow();
+  });
+  it('IMAGE/DOCUMENT need a mediaId, take no text, and the caption is trimmed, printable and <= 1024', () => {
+    expect(
+      parseStaffMessageContent({ type: 'IMAGE', mediaId: id.toUpperCase() }),
+    ).toEqual({ type: 'IMAGE', mediaId: id, caption: null });
+    expect(
+      parseStaffMessageContent({
+        type: 'DOCUMENT',
+        mediaId: id,
+        caption: ' a ',
+      }),
+    ).toEqual({ type: 'DOCUMENT', mediaId: id, caption: 'a' });
+    expect(() => parseStaffMessageContent({ type: 'IMAGE' })).toThrow();
+    expect(() =>
+      parseStaffMessageContent({ type: 'IMAGE', mediaId: id, text: 'x' }),
+    ).toThrow();
+    expect(() =>
+      parseStaffMessageContent({ type: 'IMAGE', mediaId: id, caption: ' ' }),
+    ).toThrow();
+    expect(() =>
+      parseStaffMessageContent({
+        type: 'IMAGE',
+        mediaId: id,
+        caption: 'x'.repeat(1025),
+      }),
+    ).toThrow();
+    expect(() =>
+      parseStaffMessageContent({ type: 'AUDIO', mediaId: id }),
+    ).toThrow();
   });
 });
