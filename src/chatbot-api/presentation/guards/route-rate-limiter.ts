@@ -10,7 +10,8 @@ export const ROUTE_RATE_LIMITER = Symbol('ROUTE_RATE_LIMITER');
 
 /**
  * Per-minute budget of each new route class when the credential has no
- * override (`ServiceCredential.rateLimits`). Dimensioned for 60 inbound
+ * override (`ServiceCredential.rateLimits`; the key of the unit 11 `control`
+ * class works the same way). Dimensioned for 60 inbound
  * messages per minute per branch with headroom (§6.4, §11.1): the mirror and
  * statuses run at 300 per minute, outbound and ACKs at 180, so `write` and
  * `read` start at 300. `feed` is the long-poll's own budget (§10.1 R2): a
@@ -21,7 +22,7 @@ export const ROUTE_RATE_LIMITER = Symbol('ROUTE_RATE_LIMITER');
 export const DEFAULT_CLASS_LIMITS: Record<
   Exclude<BotRouteClassName, 'default' | 'humanDecisions'>,
   number
-> = { write: 300, read: 300, feed: 120 };
+> = { write: 300, read: 300, feed: 120, control: 120 };
 
 export interface RouteRateCheck {
   credentialId: string;

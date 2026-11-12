@@ -340,6 +340,11 @@ function legacyAllowedActions(
   return offered.filter(([, ok]) => ok).map(([action]) => action);
 }
 
+/** Unit 11 adds these; the differential covers the rules that existed before. */
+const LIVE_ACTIONS = ['SEND_MESSAGE', 'FINISH', 'FINISH_IDLE'];
+const withoutLive = <T extends string>(actions: T[]): T[] =>
+  actions.filter((action) => !LIVE_ACTIONS.includes(action));
+
 describe('computeAllowedActions is unchanged (differential vs the pre-S8 rules, plus unit 10 REPLY)', () => {
   const kinds: Array<[ChatbotRequestKind, ChatbotRequestSubtype]> = [
     ['DECISION', 'RESTOCK'],
@@ -428,13 +433,15 @@ describe('computeAllowedActions is unchanged (differential vs the pre-S8 rules, 
                 const expected = legacyAllowedActions(s, ability, ME, options);
                 expect({
                   label,
-                  got: computeAllowedActions(s, ability, ME, options),
+                  got: withoutLive(
+                    computeAllowedActions(s, ability, ME, options),
+                  ),
                 }).toEqual({
                   label,
                   got: expected,
                 });
                 const both = computeActionAvailability(s, ability, ME, options);
-                expect(both.allowedActions).toEqual(expected);
+                expect(withoutLive(both.allowedActions)).toEqual(expected);
                 const deniedNames = both.deniedActions.map((d) => d.action);
                 for (const action of expected) {
                   expect(deniedNames).not.toContain(action);

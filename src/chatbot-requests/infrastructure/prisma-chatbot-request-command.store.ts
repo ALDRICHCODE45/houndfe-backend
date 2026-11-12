@@ -28,6 +28,14 @@ import {
   enqueueCancelled,
   enqueueClarificationAnswer,
 } from './chatbot-feed-writes';
+import {
+  beginSessionEnding,
+  emitSessionEvent,
+  type FailedMessage,
+  lockLatestSession,
+  reassignLiveSession,
+  startLiveSession,
+} from './live-session-writes';
 import { assignableUserWhere } from './assignable-users';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
@@ -134,20 +142,51 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
     event: ChatbotRequestEventDraft,
   ): Promise<void> {
     await this.applyPatch(row, patch, event);
-    // Unit 6: "reassigned to me" goes to the new assignee, never to the person
-    // who reassigned (the writer drops a notice addressed to its actor).
-    if (event.type === 'REASSIGNED' && patch.assigneeUserId) {
-      await enqueueNotice(this.tx, this.tenantId, {
-        type: 'REQUEST_REASSIGNED',
-        requestId: row.id,
-        folio: row.folio,
-        subtype: row.subtype,
-        dedupKey: `reassigned:${row.id}:${patch.version}`,
-        recipientUserId: patch.assigneeUserId,
-        actorUserId: event.actorId,
-      });
-    }
+    await this.notifyReassigned(row, patch, event);
     await refreshCustomerGroup(this.tx, this.tenantId, row.customerKey);
+  }
+
+  /**
+   * Unit 6: "reassigned to me" goes to the new assignee, never to the person
+   * who reassigned (the writer drops a notice addressed to its actor).
+   */
+  private async notifyReassigned(
+    row: ChatbotRequestRow,
+    patch: ChatbotRequestPatch,
+    event: ChatbotRequestEventDraft,
+  ): Promise<void> {
+    if (event.type !== 'REASSIGNED' || !patch.assigneeUserId) return;
+    await enqueueNotice(this.tx, this.tenantId, {
+      type: 'REQUEST_REASSIGNED',
+      requestId: row.id,
+      folio: row.folio,
+      subtype: row.subtype,
+      dedupKey: `reassigned:${row.id}:${patch.version}`,
+      recipientUserId: patch.assigneeUserId,
+      actorUserId: event.actorId,
+    });
+  }
+
+  /**
+   * Unit 11 (S15 Q2): reassign of a live request. The patch, the unit 6
+   * notice and the session hand-over (`conversation.reassigned`), WITHOUT the
+   * group refresh (the caller does it after: feed rule 6).
+   */
+  async reassignLiveSession(
+    row: ChatbotRequestRow,
+    patch: ChatbotRequestPatch,
+    event: ChatbotRequestEventDraft,
+    toUser: StaffActor,
+  ): Promise<void> {
+    await this.applyPatch(row, patch, event);
+    await this.notifyReassigned(row, patch, event);
+    await reassignLiveSession(
+      this.tx,
+      this.tenantId,
+      row.id,
+      row.conversationRef as string,
+      toUser,
+    );
   }
 
   async applyPatch(
@@ -203,6 +242,61 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
       requestId,
       replyId,
       text,
+    );
+  }
+
+  async startLiveSession(
+    row: ChatbotRequestRow,
+    actor: StaffActor,
+  ): Promise<void> {
+    const [window] = await this.tx.$queryRaw<
+      { lastCustomerMessageAt: Date | null }[]
+    >(Prisma.sql`
+      SELECT "lastCustomerMessageAt" FROM "chatbot_requests"
+      WHERE "tenantId" = ${this.tenantId} AND "id" = ${row.id}`);
+    await startLiveSession(
+      this.tx,
+      this.tenantId,
+      {
+        id: row.id,
+        conversationRef: row.conversationRef as string,
+        version: row.version,
+        requestLastCustomerMessageAt: window?.lastCustomerMessageAt ?? null,
+      },
+      actor,
+    );
+  }
+
+  async beginLiveSessionEnding(
+    row: ChatbotRequestRow,
+    reason: 'FINISHED' | 'FORCED',
+  ): Promise<FailedMessage[]> {
+    const session = await lockLatestSession(this.tx, this.tenantId, row.id);
+    if (!session || row.conversationRef === null) {
+      throw new Error('finish: the ACTIVE session vanished under the lock');
+    }
+    return beginSessionEnding(
+      this.tx,
+      this.tenantId,
+      session,
+      row.conversationRef,
+      reason,
+    );
+  }
+
+  emitSessionEvent(
+    requestId: string,
+    type: 'session.starting' | 'session.ending',
+    version: number,
+    failedMessages: FailedMessage[] = [],
+  ): Promise<void> {
+    return emitSessionEvent(
+      this.tx,
+      this.tenantId,
+      requestId,
+      type,
+      version,
+      failedMessages,
     );
   }
 

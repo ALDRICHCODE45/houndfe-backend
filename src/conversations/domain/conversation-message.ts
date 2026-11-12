@@ -274,7 +274,19 @@ export type BotDeliveryStatus = (typeof BOT_DELIVERY_STATUSES)[number];
 export interface ParsedStatus {
   providerMessageId: string;
   status: BotDeliveryStatus;
+  /** When Meta reported it (validated: not in the far future). */
+  occurredAt: Date;
+  /** Meta's error code of a `FAILED` status, when the bot sent one. */
+  errorCode: string | null;
 }
+
+/**
+ * S16 4: Meta error 131047 ("re-engagement message": the 24 h window is
+ * closed). A `FAILED` status carrying it on a STAFF message is not a failure
+ * of the message but a closed window: the message waits (DEFERRED) like
+ * `DEFERRED_WINDOW_CLOSED` and is resent when the customer writes again.
+ */
+export const WINDOW_CLOSED_ERROR_CODE = '131047';
 
 const STATUS_KEYS = new Set([
   'providerMessageId',
@@ -298,8 +310,8 @@ export function parseStatusBatch(body: unknown, now: Date): ParsedStatus[] {
     if (!(BOT_DELIVERY_STATUSES as readonly unknown[]).includes(status)) {
       return invalid();
     }
-    parseTimestamp(raw.occurredAt, now);
-    // Accepted and dropped: no column stores a provider error code.
+    const occurredAt = parseTimestamp(raw.occurredAt, now);
+    // The code is only read for the window rule (no column stores it).
     if (
       raw.errorCode !== undefined &&
       (typeof raw.errorCode !== 'string' ||
@@ -311,6 +323,8 @@ export function parseStatusBatch(body: unknown, now: Date): ParsedStatus[] {
     return {
       providerMessageId: parseWaId(raw.providerMessageId),
       status: status as BotDeliveryStatus,
+      occurredAt,
+      errorCode: typeof raw.errorCode === 'string' ? raw.errorCode : null,
     };
   });
 }

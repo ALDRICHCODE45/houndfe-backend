@@ -130,6 +130,22 @@ describe('POST /chatbot-requests/:id/reply', () => {
     ],
     ['an unknown field', { expectedVersion: 2, text: 'x', tenantId: 't' }, KEY],
     [
+      'a mediaId (media belongs to the live conversation, not to reply)',
+      {
+        expectedVersion: 2,
+        text: 'x',
+        mediaId: '8c9d0e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f',
+      },
+      KEY,
+    ],
+    [
+      'a mediaId and no text',
+      { expectedVersion: 2, mediaId: '8c9d0e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f' },
+      KEY,
+    ],
+    ['a type key', { expectedVersion: 2, text: 'x', type: 'IMAGE' }, KEY],
+    ['a caption key', { expectedVersion: 2, text: 'x', caption: 'c' }, KEY],
+    [
       'a smuggled assignee',
       { expectedVersion: 2, text: 'x', assigneeUserId: 'u' },
       KEY,

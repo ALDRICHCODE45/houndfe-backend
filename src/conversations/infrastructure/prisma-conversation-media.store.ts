@@ -19,6 +19,9 @@ const SELECT = {
   sizeBytes: true,
   sha256: true,
   purgedAt: true,
+  filename: true,
+  requestId: true,
+  uploadedByUserId: true,
 } as const;
 
 @Injectable()
@@ -41,6 +44,42 @@ export class PrismaConversationMediaStore implements ConversationMediaStore {
       where: { id, tenantId: this.tenantId() },
       select: SELECT,
     });
+  }
+
+  async findStaffAttached(id: string): Promise<MediaRow | null> {
+    const [row] = await this.tenantPrisma.getClient().$queryRaw<MediaRow[]>(
+      Prisma.sql`
+      SELECT m."id", m."storageKey", m."mimeType", m."sizeBytes", m."sha256",
+             m."purgedAt", m."filename", m."requestId", m."uploadedByUserId"
+      FROM "conversation_media" m
+      WHERE m."tenantId" = ${this.tenantId()} AND m."id" = ${id}
+        AND EXISTS (
+          SELECT 1 FROM "conversation_messages" x
+          WHERE x."tenantId" = m."tenantId" AND x."mediaId" = m."id"
+            AND x."author" = 'STAFF' AND x."direction" = 'OUT')`,
+    );
+    return row ?? null;
+  }
+
+  async attendeeSeesMedia(id: string, userId: string): Promise<boolean> {
+    const rows = await this.tenantPrisma.getClient().$queryRaw<unknown[]>(
+      Prisma.sql`
+      SELECT 1
+      FROM "conversation_messages" x
+      JOIN "chatbot_conversations" c
+        ON c."tenantId" = x."tenantId" AND c."id" = x."conversationId"
+      JOIN "chatbot_requests" r
+        ON r."tenantId" = c."tenantId" AND r."conversationRef" = c."conversationRef"
+       AND r."assigneeUserId" = ${userId} AND r."status"::text = 'IN_PROGRESS'
+      JOIN LATERAL (
+        SELECT s."startSeq" FROM "chatbot_live_sessions" s
+        WHERE s."tenantId" = r."tenantId" AND s."requestId" = r."id"
+        ORDER BY s."epoch" DESC LIMIT 1) s ON true
+      WHERE x."tenantId" = ${this.tenantId()} AND x."mediaId" = ${id}
+        AND x."seq" >= s."startSeq"
+      LIMIT 1`,
+    );
+    return rows.length > 0;
   }
 
   /**
@@ -72,16 +111,21 @@ export class PrismaConversationMediaStore implements ConversationMediaStore {
     sizeBytes: number;
     sha256: string;
     idempotencyKey: string;
+    requestId?: string;
+    uploadedByUserId?: string;
+    filename?: string;
   }): Promise<boolean> {
     const inserted = await this.tenantPrisma.getClient().$queryRaw<
       Array<{ id: string }>
     >(Prisma.sql`
       INSERT INTO "conversation_media"
         ("id", "tenantId", "storageKey", "mimeType", "sizeBytes", "sha256",
-         "idempotencyKey", "createdAt", "purgeAfter")
+         "idempotencyKey", "createdAt", "purgeAfter", "requestId",
+         "uploadedByUserId", "filename")
       VALUES (${row.id}, ${this.tenantId()}, ${row.storageKey}, ${row.mimeType},
               ${row.sizeBytes}, ${row.sha256}, ${row.idempotencyKey}, now(),
-              now() + interval '12 months')
+              now() + interval '12 months', ${row.requestId ?? null},
+              ${row.uploadedByUserId ?? null}, ${row.filename ?? null})
       ON CONFLICT ("tenantId", "idempotencyKey") DO NOTHING
       RETURNING "id"`);
     return inserted.length > 0;

@@ -13,6 +13,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { ConversationsModule } from '../conversations/conversations.module';
 import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
 import { EXPIRATION_INTAKE_REPOSITORY } from '../human-decisions/domain/expiration-intake.repository';
 import { RESTOCK_INTAKE_REPOSITORY } from '../human-decisions/domain/restock-intake.repository';
@@ -67,6 +68,13 @@ import { LegacyIntakeAdapter } from './infrastructure/legacy-intake.adapter';
 import { PrismaBotIntakeStore } from './infrastructure/prisma-bot-intake.store';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
+import {
+  BotLiveConversationController,
+  LiveConversationStaffController,
+} from './presentation/live-conversation.controller';
+import { PrismaLiveConversationStore } from './infrastructure/prisma-live-conversation.store';
+import { LiveSessionSweepScheduler } from './infrastructure/live-session-sweep.scheduler';
+import { LiveSessionSweepStore } from './infrastructure/live-session-sweep.store';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
@@ -80,6 +88,7 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     AuthModule,
     WrappedRequestResolutionModule,
     ChatbotApiModule,
+    ConversationsModule,
     ChatbotRequestWrapperModule,
     DeliveryZonesModule,
     RealtimeModule,
@@ -91,6 +100,8 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     BotRequestsController,
     BotFeedController,
     BotRecoveryController,
+    LiveConversationStaffController,
+    BotLiveConversationController,
   ],
   providers: [
     ActiveUserGuard,
@@ -124,6 +135,10 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     // §5.4 SLA sweep (unit 7c): @Interval 30 s, SKIP LOCKED, multi-replica safe.
     ChatbotSlaSweepStore,
     ChatbotSlaSweepScheduler,
+    // Unit 11: live conversation requests, and the session timeouts sweep.
+    PrismaLiveConversationStore,
+    LiveSessionSweepStore,
+    LiveSessionSweepScheduler,
     { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
     { provide: CHATBOT_FEED_STORE, useClass: PrismaChatbotFeedStore },
     { provide: CHATBOT_RECOVERY_STORE, useClass: PrismaChatbotRecoveryStore },

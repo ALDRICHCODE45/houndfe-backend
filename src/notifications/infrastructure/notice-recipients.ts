@@ -8,7 +8,7 @@
 import type { Prisma } from '@prisma/client';
 import {
   AUDIENCE_GRANTS,
-  audienceOf,
+  audienceFor,
   type ChatbotRequestNotice,
   type NoticeReason,
 } from '../domain/chatbot-request-notice';
@@ -59,7 +59,7 @@ export async function resolveRecipients(
   tenantId: string,
   notice: ChatbotRequestNotice,
 ): Promise<NoticeRecipient[]> {
-  const audience = audienceOf(notice.type);
+  const audience = audienceFor(notice);
   if (audience === 'USER') {
     const membership = await tx.tenantMembership.findFirst({
       where: {

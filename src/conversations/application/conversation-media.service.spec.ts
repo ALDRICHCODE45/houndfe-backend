@@ -46,6 +46,12 @@ class FakeStore implements ConversationMediaStore {
   findById(id: string): Promise<MediaRow | null> {
     return Promise.resolve(this.rows.get(id) ?? null);
   }
+  findStaffAttached(): Promise<MediaRow | null> {
+    return Promise.resolve(null);
+  }
+  attendeeSeesMedia(): Promise<boolean> {
+    return Promise.resolve(false);
+  }
   recordIntent(row: { id: string; storageKey: string }): Promise<void> {
     this.intents.set(row.id, row.storageKey);
     return Promise.resolve();

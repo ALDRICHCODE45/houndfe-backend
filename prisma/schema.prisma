@@ -536,6 +536,9 @@ model Tenant {
   // human-intervention / unit 9 — conversation mirror and its media.
   chatbotConversations        ChatbotConversation[]
   conversationMedia           ConversationMedia[]
+  // human-intervention / unit 11 — live conversation sessions.
+  chatbotLiveSessions         ChatbotLiveSession[]
+  chatbotSessionTemplates     ChatbotSessionTemplate[]
   // human-intervention / unit 6 — in-app notices.
   notifications               Notification[]
   // human-intervention / unit 7a — chatbot attention settings and their audit.
@@ -3697,6 +3700,11 @@ model ChatbotAttentionSettings {
   templateCostText          String
   enabledSubtypes           ChatbotRequestSubtype[]
   receiptCloseMarginMinutes Int
+  // Unit 11 slice 2 (S16 1a): seconds to wait for `session-ack STARTED`
+  // before a claim reverts; CHECK 30..600 (migration-authoritative).
+  startTimeoutSeconds       Int                     @default(120)
+  // Unit 11 slice 2 (S16 8): language code of `template.requested`.
+  templateLanguageCode      String                  @default("es_MX")
   schedulingEnabled         Boolean
   slotMinutes               Int
   slotsOffered              Int
@@ -3891,6 +3899,8 @@ model ChatbotRequest {
   receiptEvidence     ReceiptEvidence?     @relation(fields: [receiptEvidenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   events              ChatbotRequestEvent[]
   feedItems           ChatbotFeedItem[]
+  liveSessions        ChatbotLiveSession[]
+  sessionTemplates    ChatbotSessionTemplate[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, folio])
@@ -4169,6 +4179,11 @@ model ChatbotConversation {
   conversationRef       String           @db.VarChar(200)
   customerKey           String?
   lastCustomerMessageAt DateTime?
+  // S16 4: Meta's own verdict that the 24 h window is closed (error 131047 or a
+  // DEFERRED_WINDOW_CLOSED outcome), the instant it was reported. Only moves
+  // forward; a customer message newer than it reopens the window. Kept on the
+  // chat row so the statuses path never locks the request row.
+  windowClosedAt        DateTime?
   mode                  ConversationMode @default(BOT)
   handoffEpoch          Int              @default(0)
   nextSeq               Int              @default(1)
@@ -4181,8 +4196,9 @@ model ChatbotConversation {
   createdAt             DateTime         @default(now())
   updatedAt             DateTime         @updatedAt
 
-  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  messages ConversationMessage[]
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  messages     ConversationMessage[]
+  liveSessions ChatbotLiveSession[]
 
   @@unique([tenantId, conversationRef])
   @@unique([tenantId, id])
@@ -4288,6 +4304,12 @@ model ConversationMedia {
   purgeAttempts    Int       @default(0)
   lastPurgeErrorAt DateTime?
   purgeLeaseUntil  DateTime?
+  // Unit 11 T11c: staff uploads only (NULL for the bot's customer media). The
+  // request and the user that uploaded the file; a staff message may carry only
+  // media of its own request and sender. `filename` is sanitized (≤ 120).
+  requestId        String?
+  uploadedByUserId String?
+  filename         String?   @db.VarChar(120)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
@@ -4326,4 +4348,74 @@ model ConversationMediaOrphanSweep {
   updatedAt  DateTime  @default(now())
 
   @@map("conversation_media_orphan_sweep")
+}
+
+// ============================================================================
+// LIVE CONVERSATION (human-intervention / unit 11 — contract §4, §12.10, §12.15)
+// ============================================================================
+// One row per time a conversation goes to a human (one per `handoffEpoch`;
+// epochs are never reused). `state` STARTING -> ACTIVE -> ENDING -> ENDED, or
+// STARTING -> ENDED when the start reverts (`endReason` START_TIMEOUT). The
+// request-level `WAITING` state of §4.2 is derived: an open request whose
+// latest session ENDED. `startSeq` is the conversation's `nextSeq` at the
+// claim: the first message an attendee without `read:ChatbotConversation` may
+// read. Migration-only: CHECK on `state`/`endReason`, the partial unique index
+// `chatbot_live_sessions_one_live_uq` (one non-ENDED session per conversation),
+// and the three partial sweep indexes. The one live session is also what
+// serializes a second claim on another request of the same chat.
+model ChatbotLiveSession {
+  id                  String    @id @default(uuid())
+  tenantId            String
+  requestId           String
+  conversationId      String
+  epoch               Int
+  state               String
+  endReason           String?
+  staffUserId         String
+  startSeq            Int
+  startedAt           DateTime  @default(now())
+  // S16 1a: `startedAt + the tenant's startTimeoutSeconds`, snapshotted at the
+  // claim. NULL (created before slice 2) means `startedAt + 120 s`.
+  startDeadlineAt     DateTime?
+  activeAt            DateTime?
+  endingAt            DateTime?
+  endedAt             DateTime?
+  lastStaffActivityAt DateTime  @default(now())
+  // T11d (§4.6): written only by the live session sweep. The customer message
+  // (its instant) the "customer wrote" / "unanswered" notices were issued for,
+  // and the unanswered level already issued for it (0, 5 or 15; CHECK in the
+  // migration 20261113030000_live_conversation_notices).
+  customerNoticeAt    DateTime?
+  unansweredLevel     Int       @default(0) @db.SmallInt
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request      ChatbotRequest      @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  conversation ChatbotConversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, conversationId, epoch])
+  @@unique([tenantId, id])
+  @@index([tenantId, requestId, epoch(sort: Desc)])
+  @@map("chatbot_live_sessions")
+}
+
+// The paid template (§4.5): at most one per `(request, closed window)`, because
+// it costs money. `windowClosedAt` is the instant the window closed when the
+// template was requested. A template Meta refused (message FAILED) may be
+// retried: the command replaces `messageId` on the same row.
+model ChatbotSessionTemplate {
+  id             String   @id @default(uuid())
+  tenantId       String
+  requestId      String
+  sessionId      String
+  windowClosedAt DateTime
+  messageId      String
+  createdAt      DateTime @default(now())
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, requestId, windowClosedAt])
+  @@map("chatbot_session_templates")
 }

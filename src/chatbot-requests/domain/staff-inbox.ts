@@ -10,6 +10,7 @@ import {
   cancelByStaff,
   canMergeSource,
   claim,
+  finish,
   heldByOther,
   linkCustomer,
   reassign,
@@ -51,7 +52,12 @@ export type AllowedAction =
   | 'REPLY'
   | 'MERGE'
   | 'LINK_CUSTOMER'
-  | 'CANCEL';
+  | 'CANCEL'
+  // Unit 11: live conversation (§4.8, §4.6). `FINISH_IDLE` accompanies
+  // `FINISH` once the customer has been silent for 30 min (no confirmation).
+  | 'SEND_MESSAGE'
+  | 'FINISH'
+  | 'FINISH_IDLE';
 
 export interface AllowedActionsOptions {
   /**
@@ -72,6 +78,8 @@ export interface AllowedActionsOptions {
    * only answer CUSTOMER_PHONE_MISMATCH, so `LINK_CUSTOMER` is not offered.
    */
   hasLinkCandidate?: boolean;
+  /** Unit 11: the customer has been silent for 30 min (`FINISH_IDLE`). */
+  finishIdle?: boolean;
 }
 
 /**
@@ -249,6 +257,38 @@ export function computeActionAvailability(
       ),
     ],
   ];
+
+  // Unit 11. SEND_MESSAGE is the assignee of an ACTIVE session (the server
+  // also checks the epoch and the window at send time); FINISH is the real
+  // command (the assignee, or a reassigner who forces it).
+  const finishAnswer = answerOf(
+    finish(state, {
+      actor,
+      actorCanReassign: canReassign,
+      expectedVersion,
+      note: 'candidate',
+      now,
+    }),
+  );
+  evaluated.push(
+    [
+      'SEND_MESSAGE',
+      canUpdate,
+      state.kind === 'CONVERSATION' &&
+      state.liveSessionState === 'ACTIVE' &&
+      state.assignee?.userId === userId
+        ? 'OK'
+        : 'NOT_APPLICABLE',
+    ],
+    ['FINISH', canUpdate, finishAnswer],
+    [
+      'FINISH_IDLE',
+      canUpdate,
+      finishAnswer === 'OK' && options.finishIdle === true
+        ? 'OK'
+        : 'NOT_APPLICABLE',
+    ],
+  );
 
   const allowedActions: AllowedAction[] = [];
   const deniedActions: DeniedAction[] = [];

@@ -19,14 +19,26 @@ import {
 import { isCalendarDate } from '../../chatbot-requests/domain/business-hours-calendar';
 import {
   collectFieldErrors,
+  DEFAULT_START_TIMEOUT_SECONDS,
+  DEFAULT_TEMPLATE_LANGUAGE_CODE,
   MAX_CLOSED_DATES,
   MAX_REASON_LENGTH,
   MAX_SLA_MINUTES,
   SettingsValidationError,
+  START_TIMEOUT_MAX_SECONDS,
+  START_TIMEOUT_MIN_SECONDS,
+  TEMPLATE_LANGUAGE_CODE,
   type FieldError,
 } from './chatbot-settings-validation';
 
-export { MAX_CLOSED_DATES, MAX_SLA_MINUTES };
+export {
+  DEFAULT_START_TIMEOUT_SECONDS,
+  DEFAULT_TEMPLATE_LANGUAGE_CODE,
+  MAX_CLOSED_DATES,
+  MAX_SLA_MINUTES,
+  START_TIMEOUT_MAX_SECONDS,
+  START_TIMEOUT_MIN_SECONDS,
+};
 
 export const ALL_SUBTYPES = [
   'RESTOCK',
@@ -64,6 +76,10 @@ export interface AttentionSettings {
   templateCostText: string;
   enabledSubtypes: SettingsSubtype[];
   receiptCloseMarginMinutes: number;
+  /** S16 1a: seconds a claim waits for `session-ack STARTED` (30..600). */
+  startTimeoutSeconds: number;
+  /** S16 8: language code `template.requested` carries (`es_MX`). */
+  templateLanguageCode: string;
   scheduling: SchedulingSettings;
 }
 
@@ -82,6 +98,9 @@ export interface AttentionSettingsInput {
   templateCostText: string;
   enabledSubtypes: SettingsSubtype[];
   receiptCloseMarginMinutes: number;
+  /** Optional (additive, S16): absent keeps the stored value, else the default. */
+  startTimeoutSeconds?: number | null;
+  templateLanguageCode?: string | null;
   scheduling: SchedulingSettings;
 }
 
@@ -123,6 +142,8 @@ export function defaultSettings(): AttentionSettings {
     templateCostText: DEFAULT_TEMPLATE_COST_TEXT,
     enabledSubtypes: [...ALL_SUBTYPES],
     receiptCloseMarginMinutes: 60,
+    startTimeoutSeconds: DEFAULT_START_TIMEOUT_SECONDS,
+    templateLanguageCode: DEFAULT_TEMPLATE_LANGUAGE_CODE,
     scheduling: {
       enabled: false,
       slotMinutes: 30,
@@ -316,6 +337,15 @@ function normalizeCore(input: AttentionSettingsInput): AttentionSettings {
     );
   }
 
+  const templateLanguageCode =
+    input.templateLanguageCode ?? DEFAULT_TEMPLATE_LANGUAGE_CODE;
+  if (
+    typeof templateLanguageCode !== 'string' ||
+    !TEMPLATE_LANGUAGE_CODE.test(templateLanguageCode)
+  ) {
+    throw invalid('templateLanguageCode must look like es_MX');
+  }
+
   const enabled: SettingsSubtype[] = [];
   for (const subtype of input.enabledSubtypes) {
     if (!isSubtype(subtype))
@@ -344,6 +374,13 @@ function normalizeCore(input: AttentionSettingsInput): AttentionSettings {
       1440,
       'receiptCloseMarginMinutes',
     ),
+    startTimeoutSeconds: integerIn(
+      input.startTimeoutSeconds ?? DEFAULT_START_TIMEOUT_SECONDS,
+      START_TIMEOUT_MIN_SECONDS,
+      START_TIMEOUT_MAX_SECONDS,
+      'startTimeoutSeconds',
+    ),
+    templateLanguageCode,
     scheduling: {
       enabled: scheduling.enabled === true,
       slotMinutes: integerIn(

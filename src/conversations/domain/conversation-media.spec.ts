@@ -3,6 +3,7 @@ import {
   assertMediaFits,
   detectConversationMedia,
   mediaMatchesMessageType,
+  sanitizeStaffFilename,
 } from './conversation-media';
 
 const bytes = (...values: number[]) => Buffer.from(values);
@@ -101,5 +102,33 @@ describe('mediaMatchesMessageType', () => {
     ['AUDIO', 'image/png', false],
   ])('%s with %s -> %s', (type, mime, ok) => {
     expect(mediaMatchesMessageType(type, mime)).toBe(ok);
+  });
+});
+
+describe('sanitizeStaffFilename (T11c)', () => {
+  const jpg = {
+    mimeType: 'image/jpeg',
+    extension: 'jpg',
+    kind: 'image',
+  } as const;
+  const pdf = {
+    mimeType: 'application/pdf',
+    extension: 'pdf',
+    kind: 'document',
+  } as const;
+  it.each([
+    ['../../Mi  Foto <1>.png', jpg, 'Mi Foto 1.jpg'],
+    ['C:\\temp\\Cotización "final".pdf', pdf, 'Cotizacion final.pdf'],
+    ['   ', pdf, 'documento.pdf'],
+    [undefined, jpg, 'imagen.jpg'],
+    ['...', jpg, 'imagen.jpg'],
+    ['\u0000\u202e.exe', jpg, 'imagen.jpg'],
+  ])('%j -> %s', (raw, media, expected) => {
+    expect(sanitizeStaffFilename(raw, media)).toBe(expected);
+  });
+  it('is at most 100 characters and keeps the detected extension', () => {
+    const name = sanitizeStaffFilename('a'.repeat(300) + '.pdf', pdf);
+    expect(name.length).toBeLessThanOrEqual(100);
+    expect(name.endsWith('.pdf')).toBe(true);
   });
 });

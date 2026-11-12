@@ -83,7 +83,9 @@ export class CancelDto extends ExpectedVersionDto {
 /**
  * Unit 10 (§3.8 `reply {text ≤ 1500}`). `text` is `unknown` here on purpose:
  * `parseReplyText` (domain) owns the rules (sanitising, trim, 1..1500
- * characters), so the DTO only requires that the key is present.
+ * characters), so the DTO only requires that the key is present. No other key
+ * is accepted (a `mediaId`, `type` or `caption` is 400): media belongs to the
+ * live conversation's own body, `StaffMessageDto`.
  */
 export class ReplyDto extends ExpectedVersionDto {
   @IsDefined()
@@ -104,4 +106,60 @@ export class MergeDto extends ExpectedVersionDto {
 export class LinkCustomerDto extends ExpectedVersionDto {
   @IsUUID()
   customerId!: string;
+}
+
+/**
+ * Unit 11 (§4.8 `finish {expectedVersion, note ≤ 1000, complaintOutcome?}`).
+ * `note` is `unknown` on purpose: `parseFinishNote` (domain) owns the rules.
+ * `complaintOutcome` is only recorded in this unit (unit 12 enforces it).
+ */
+export class FinishDto extends ExpectedVersionDto {
+  @IsDefined()
+  note!: unknown;
+
+  @IsOptional()
+  @IsIn(['RETURN', 'REPLACEMENT', 'REFUND', 'NO_ACTION'])
+  complaintOutcome?: string;
+}
+
+/**
+ * Unit 11 (§4.5): `POST …/template {expectedEpoch}`; the `Idempotency-Key`
+ * (uuid) identifies the template message. No other key is accepted: the
+ * template name and language come from the tenant's settings.
+ */
+export class TemplateRequestDto {
+  @IsInt()
+  @Min(1)
+  expectedEpoch!: number;
+}
+
+/**
+ * Unit 11 (§4.4 `messages {clientMessageId, expectedEpoch, text}` or, S15 Q5,
+ * `{…, type: IMAGE|DOCUMENT, mediaId, caption?}`). The header
+ * `Idempotency-Key` must equal `clientMessageId`. `text` is `unknown`:
+ * `parseStaffMessageText` owns the rules.
+ */
+export class StaffMessageDto {
+  @IsUUID()
+  clientMessageId!: string;
+
+  @IsInt()
+  @Min(1)
+  expectedEpoch!: number;
+
+  @IsOptional()
+  @IsIn(['TEXT', 'IMAGE', 'DOCUMENT'])
+  type?: string;
+
+  /** Required for TEXT; refused for IMAGE/DOCUMENT (the domain decides). */
+  @IsOptional()
+  text?: unknown;
+
+  /** S15 Q5: a media this attendee uploaded for this request. */
+  @IsOptional()
+  @IsUUID()
+  mediaId?: string;
+
+  @IsOptional()
+  caption?: unknown;
 }

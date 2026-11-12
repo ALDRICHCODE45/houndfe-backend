@@ -92,7 +92,8 @@ export interface ChatbotRequestEventDraft {
     | 'CANCELLED'
     | 'MERGED'
     | 'CUSTOMER_LINKED'
-    | 'REPLIED';
+    | 'REPLIED'
+    | 'FINISHED';
   actorKind: 'USER' | 'SERVICE';
   actorId: string;
   actorDisplayName: string | null;
@@ -111,6 +112,7 @@ export type ChatbotRequestErrorCode =
   | 'ACTION_NOT_ALLOWED'
   | 'CANCEL_NOT_ALLOWED'
   | 'MERGE_NOT_ALLOWED'
+  | 'SESSION_NOT_ACTIVE'
   | 'VALIDATION_ERROR';
 
 export interface ChatbotRequestError {
@@ -416,6 +418,68 @@ export function reply(
       type: 'REPLIED',
       ...userEvent(cmd.actor),
       data: { messageId: cmd.replyId },
+    },
+  );
+}
+
+/**
+ * Unit 11 (§4.8, §4.1): `finish` closes a live conversation. The assignee, or a
+ * reassigner (who FORCES it: "devolver al bot", §4.1), ends an ACTIVE session;
+ * the request is RESOLVED in the same write and the application moves the
+ * session to ENDING and tells the bot. Check order: closed, kind, nobody holds
+ * it, holder, version, session (a message or a finish while STARTING, ENDING
+ * or with no session is `SESSION_NOT_ACTIVE`). `complaintOutcome` is only
+ * recorded (unit 12 owns making it mandatory and measuring it); nothing is
+ * triggered by it (D19).
+ */
+export function finish(
+  state: ChatbotRequestState,
+  cmd: {
+    actor: StaffActor;
+    actorCanReassign: boolean;
+    expectedVersion: number;
+    note: string;
+    complaintOutcome?: string;
+    now: Date;
+  },
+): CommandResult {
+  if (isClosed(state)) return reject(state, 'REQUEST_CLOSED', 409);
+  if (state.kind !== 'CONVERSATION' || !state.assignee)
+    return reject(state, 'ACTION_NOT_ALLOWED', 422);
+  const forced = state.assignee.userId !== cmd.actor.userId;
+  if (forced && !cmd.actorCanReassign)
+    return reject(state, 'NOT_ASSIGNEE', 403);
+  if (state.version !== cmd.expectedVersion)
+    return reject(state, 'VERSION_CONFLICT', 409);
+  if (state.liveSessionState !== 'ACTIVE')
+    return reject(state, 'SESSION_NOT_ACTIVE', 409);
+  return accept(
+    state,
+    {
+      status: 'RESOLVED',
+      resolvedAt: cmd.now,
+      resolvedByActorId: cmd.actor.userId,
+      resolvedByDisplayName: cmd.actor.displayName,
+      closedAt: cmd.now,
+      nextSlaCheckAt: null,
+      resolution: {
+        action: 'FINISH',
+        note: cmd.note,
+        ...(cmd.complaintOutcome
+          ? { complaintOutcome: cmd.complaintOutcome }
+          : {}),
+      },
+    },
+    {
+      type: 'FINISHED',
+      ...userEvent(cmd.actor),
+      data: {
+        note: cmd.note,
+        forced,
+        ...(cmd.complaintOutcome
+          ? { complaintOutcome: cmd.complaintOutcome }
+          : {}),
+      },
     },
   );
 }

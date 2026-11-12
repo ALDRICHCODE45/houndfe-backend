@@ -27,6 +27,7 @@ import {
   claim,
   closeWrapped,
   displayStatus,
+  finish,
   reassign,
   release,
   reply,
@@ -40,9 +41,11 @@ import {
   type ChatbotRequestSubtype,
   type CommandResult,
   type DisplayStatus,
+  type LiveSessionState,
   type StaffActor,
   type StaffCancelReason,
 } from '../domain/chatbot-request.commands';
+import { isLiveSubtype } from '../domain/live-session';
 import { legacyResolvePermission } from '../domain/resolve-permissions';
 
 export const CHATBOT_REQUEST_COMMAND_STORE = Symbol(
@@ -140,7 +143,9 @@ export type StaffCommand =
     }
   | { kind: 'resolve'; action: ResolveAction }
   /** Unit 10: `text` is already cleaned by `parseReplyText`. */
-  | { kind: 'reply'; text: string };
+  | { kind: 'reply'; text: string }
+  /** Unit 11 (§4.8): `note` is already cleaned by `parseFinishNote`. */
+  | { kind: 'finish'; note: string; complaintOutcome?: string };
 
 export interface StaffCommandInput {
   requestId: string;
@@ -177,6 +182,8 @@ export interface ChatbotRequestRow {
   humanDecisionId: string | null;
   deliveryZoneRequestId: string | null;
   receiptEvidenceId: string | null;
+  /** Unit 11: the derived session state (§12.4); absent when not loaded. */
+  liveSessionState?: LiveSessionState | null;
 }
 
 /** `200 {request}` body; unit 4 extends it to the full inbox row (§3.8). */
@@ -192,6 +199,12 @@ export interface ChatbotRequestView {
   claimedAt: string | null;
   overdueAt: string | null;
   closedAt: string | null;
+}
+
+/** A window-deferred staff message that became terminal FAILED (S16 3). */
+export interface FailedStaffMessage {
+  messageId: string;
+  seq: number;
 }
 
 export interface ChatbotRequestCommandStore {
@@ -240,6 +253,35 @@ export interface ChatbotRequestCommandStore {
     requestId: string,
     replyId: string,
     text: string,
+  ): Promise<void>;
+  /**
+   * Unit 11 (§4.3): the claim of a live request starts epoch N+1, a STARTING
+   * session and `conversation.started`, on this transaction, after the claim
+   * patch and before the group refresh (feed rule 6).
+   */
+  startLiveSession(row: ChatbotRequestRow, actor: StaffActor): Promise<void>;
+  /**
+   * Unit 11 (S15 Q2): reassign of a live request: the patch, the unit 6 notice
+   * and `conversation.reassigned` for a STARTING/ACTIVE session (same epoch),
+   * without the group refresh.
+   */
+  reassignLiveSession(
+    row: ChatbotRequestRow,
+    patch: ChatbotRequestPatch,
+    event: ChatbotRequestEventDraft,
+    toUser: StaffActor,
+  ): Promise<void>;
+  /** Unit 11 (§4.8): ACTIVE -> ENDING and `conversation.ended` after a finish. */
+  beginLiveSessionEnding(
+    row: ChatbotRequestRow,
+    reason: 'FINISHED' | 'FORCED',
+  ): Promise<FailedStaffMessage[]>;
+  /** The LAST write of the transaction: `session.*` with the row (§12.8). */
+  emitSessionEvent(
+    requestId: string,
+    type: 'session.starting' | 'session.ending',
+    version: number,
+    failedMessages?: FailedStaffMessage[],
   ): Promise<void>;
   /**
    * Takes the postal-code lock of a DELIVERY_ZONE request (a no-op for any
@@ -291,7 +333,14 @@ export type ChatbotRequestCommandErrorCode =
   | 'MEDIA_TYPE_NOT_ALLOWED'
   | 'MEDIA_PURGED'
   | 'THUMB_UNAVAILABLE'
-  | 'MEDIA_STORAGE_FAILED';
+  | 'MEDIA_STORAGE_FAILED'
+  // Live conversation (unit 11).
+  | 'STALE_EPOCH'
+  | 'SESSION_NOT_ENDING'
+  | 'WINDOW_CLOSED'
+  | 'WINDOW_OPEN'
+  | 'TEMPLATE_ALREADY_SENT'
+  | 'TEMPLATE_NOT_CONFIGURED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -341,7 +390,7 @@ export function toState(
     | 'assigneeUserId'
     | 'assigneeDisplayName'
     | 'overdueAt'
-  >,
+  > & { liveSessionState?: LiveSessionState | null },
 ): ChatbotRequestState {
   return {
     kind: row.kind,
@@ -353,9 +402,7 @@ export function toState(
         ? { userId: row.assigneeUserId, displayName: row.assigneeDisplayName }
         : null,
     overdueAt: row.overdueAt,
-    // The live-session table arrives with unit 11; until then no request has
-    // a started session.
-    liveSessionState: null,
+    liveSessionState: row.liveSessionState ?? null,
   };
 }
 
@@ -493,6 +540,48 @@ export class ChatbotRequestCommandsService {
           input.command.customerNote,
         );
         await this.store.refreshGroups([row.customerKey]);
+      } else if (
+        input.command.kind === 'claim' &&
+        row.kind === 'CONVERSATION' &&
+        row.conversationRef !== null &&
+        isLiveSubtype(row.subtype)
+      ) {
+        // Unit 11: the claim of a live request starts the session (§4.3).
+        await this.store.applyPatch(row, result.patch, result.event);
+        await this.store.startLiveSession(row, actor);
+        await this.store.refreshGroups([row.customerKey]);
+        await this.store.emitSessionEvent(
+          row.id,
+          'session.starting',
+          result.patch.version,
+        );
+      } else if (
+        input.command.kind === 'reassign' &&
+        row.kind === 'CONVERSATION' &&
+        row.conversationRef !== null &&
+        isLiveSubtype(row.subtype)
+      ) {
+        // Unit 11 (S15 Q2): the bot tells the customer who attends now.
+        await this.store.reassignLiveSession(
+          row,
+          result.patch,
+          result.event,
+          toUser as StaffActor,
+        );
+        await this.store.refreshGroups([row.customerKey]);
+      } else if (input.command.kind === 'finish') {
+        await this.store.applyPatch(row, result.patch, result.event);
+        const failed = await this.store.beginLiveSessionEnding(
+          row,
+          result.event.data.forced === true ? 'FORCED' : 'FINISHED',
+        );
+        await this.store.refreshGroups([row.customerKey]);
+        await this.store.emitSessionEvent(
+          row.id,
+          'session.ending',
+          result.patch.version,
+          failed,
+        );
       } else if (input.command.kind === 'reply') {
         // Unit 10: the answer for the bot joins the same transaction, after
         // the state change and before the group refresh (feed rule 6).
@@ -640,6 +729,15 @@ export class ChatbotRequestCommandsService {
           expectedVersion,
           replyId: randomUUID(),
           text: command.text,
+          now,
+        });
+      case 'finish':
+        return finish(state, {
+          actor,
+          actorCanReassign,
+          expectedVersion,
+          note: command.note,
+          complaintOutcome: command.complaintOutcome,
           now,
         });
       case 'resolve':

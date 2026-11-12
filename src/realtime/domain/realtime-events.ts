@@ -33,6 +33,11 @@ export const REQUEST_STREAM_TYPES = [
   'request.cancelled',
   'request.overdue',
   'request.updated',
+  // Unit 11 (§12.8): session transitions carry the row like request events.
+  'session.starting',
+  'session.active',
+  'session.ending',
+  'session.ended',
 ] as const;
 export type RequestStreamType = (typeof REQUEST_STREAM_TYPES)[number];
 

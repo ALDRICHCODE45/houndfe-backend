@@ -15,6 +15,13 @@ export const FEED_TYPE = {
   merged: 'request.merged',
   /** Once per request, when the sweep first marks it overdue (§5.4). */
   overdueNotice: 'request.overdue_notice',
+  // Live conversation (unit 11, §4.3, §4.4, §4.5, §12.15).
+  conversationStarted: 'conversation.started',
+  staffMessage: 'conversation.staff_message',
+  templateRequested: 'template.requested',
+  conversationEnded: 'conversation.ended',
+  /** S15 Q2 / S16 10: an ACTIVE session was handed to another attendee. */
+  conversationReassigned: 'conversation.reassigned',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -255,7 +262,20 @@ export function classifyOutcome(
   if (
     isDeferredOutcome(input.outcome) &&
     (current.type === FEED_TYPE.cancelled ||
-      current.type === FEED_TYPE.overdueNotice)
+      current.type === FEED_TYPE.overdueNotice ||
+      // Unit 11: a greeting, a farewell or a template days later only annoys
+      // the customer, and the bot is in a human session by definition.
+      current.type === FEED_TYPE.conversationStarted ||
+      current.type === FEED_TYPE.conversationEnded ||
+      current.type === FEED_TYPE.conversationReassigned ||
+      current.type === FEED_TYPE.templateRequested)
+  ) {
+    return 'OUTCOME_NOT_ALLOWED';
+  }
+  // A staff message may wait for the window, never for a human session.
+  if (
+    current.type === FEED_TYPE.staffMessage &&
+    input.outcome === 'DEFERRED_HUMAN_SESSION'
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
@@ -524,5 +544,118 @@ export function buildOverdueNoticePayload(input: {
     clock: input.clock,
     overdueAt: input.deadlineAt.toISOString(),
     assigned: input.assigned,
+  };
+}
+
+// ------------------------------------------------------- live conversation
+
+/** `conversation.started` (§4.3): the claim committed, epoch N, session STARTING. */
+export function buildConversationStartedPayload(input: {
+  requestId: string;
+  handoffEpoch: number;
+  staffFirstName: string | null;
+  whatsappWindowClosesAt: Date | null;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    staffFirstName: input.staffFirstName,
+    whatsappWindowClosesAt: input.whatsappWindowClosesAt?.toISOString() ?? null,
+  };
+}
+
+/** The media of a staff IMAGE/DOCUMENT message (S15 Q5, S16 9). */
+export interface StaffMessageMedia {
+  type: 'IMAGE' | 'DOCUMENT';
+  mediaId: string;
+  mimeType: string;
+  filename: string | null;
+  caption: string | null;
+}
+
+/**
+ * `conversation.staff_message` (§4.4): TEXT carries `text`; IMAGE/DOCUMENT
+ * carry `mediaId`, `mimeType`, `filename` and `caption` (the bot downloads the
+ * file with `GET /chatbot-api/media/:id`, scope `media:read`).
+ */
+export function buildStaffMessagePayload(
+  input: {
+    requestId: string;
+    handoffEpoch: number;
+    seq: number;
+    messageId: string;
+  } & ({ text: string; media?: undefined } | { media: StaffMessageMedia }),
+): Record<string, unknown> {
+  const head = {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    seq: input.seq,
+    messageId: input.messageId,
+  };
+  if (input.media) {
+    return {
+      ...head,
+      type: input.media.type,
+      mediaId: input.media.mediaId,
+      mimeType: input.media.mimeType,
+      filename: input.media.filename,
+      caption: input.media.caption,
+    };
+  }
+  return { ...head, type: 'TEXT', text: input.text };
+}
+
+/** `template.requested` (§4.5): only the staff button creates it (S16 8). */
+export function buildTemplateRequestedPayload(input: {
+  requestId: string;
+  handoffEpoch: number;
+  seq: number;
+  messageId: string;
+  templateName: string;
+  languageCode: string;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    seq: input.seq,
+    messageId: input.messageId,
+    templateName: input.templateName,
+    languageCode: input.languageCode,
+  };
+}
+
+/** `conversation.reassigned` (S15 Q2): the bot says "Ahora te atiende <nombre>". */
+export function buildConversationReassignedPayload(input: {
+  requestId: string;
+  handoffEpoch: number;
+  staffFirstName: string | null;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    staffFirstName: input.staffFirstName,
+  };
+}
+
+/** `conversation.ended` (§4.8, §12.15): no farewell for the start revert. */
+export function buildConversationEndedPayload(input: {
+  requestId: string;
+  handoffEpoch: number;
+  reason: 'FINISHED' | 'FORCED' | 'IDLE_TIMEOUT' | 'START_TIMEOUT';
+}): {
+  requestId: string;
+  handoffEpoch: number;
+  reason: string;
+  farewell: boolean;
+  resumeNotice: boolean;
+} {
+  return {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    reason: input.reason,
+    farewell: input.reason !== 'START_TIMEOUT',
+    // S15 Q1: after a start revert the bot sends a short "seguimos por aquí"
+    // ONLY if it already told the customer it was handing over (it greeted).
+    resumeNotice: input.reason === 'START_TIMEOUT',
   };
 }

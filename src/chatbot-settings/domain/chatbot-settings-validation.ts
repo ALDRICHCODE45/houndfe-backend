@@ -12,6 +12,7 @@
  * Codes are a contract with the frontend (handoff 16 §4):
  *   REQUIRED, INVALID_TYPE, INVALID_VALUE, UNKNOWN_FIELD, OUT_OF_RANGE,
  *   INVALID_LENGTH, INVALID_TEXT, INVALID_TEMPLATE_NAME,
+ *   INVALID_LANGUAGE_CODE,
  *   INVALID_TIME, CROSSES_MIDNIGHT, EMPTY_RANGE, OVERLAP, TOO_MANY_RANGES,
  *   INVALID_TIMEZONE, INVALID_DAY, DUPLICATE_DAY, NO_OPEN_RANGE,
  *   INVALID_DATE, TOO_MANY_DATES, REASON_WITHOUT_DATE,
@@ -46,6 +47,20 @@ export const MAX_RANGES_PER_DAY = 6;
 export const MAX_CLOSED_DATES = 400;
 export const MAX_REASON_LENGTH = 80;
 export const MAX_SLA_MINUTES = 10_080;
+
+/**
+ * S16 1a: how long a claim waits for the bot's `session-ack STARTED`. The
+ * floor leaves the bot time to read the feed and answer under a slow poll;
+ * the ceiling stops a typo from leaving a customer muted for hours with
+ * nobody answering (the migration CHECK repeats both).
+ */
+export const START_TIMEOUT_MIN_SECONDS = 30;
+export const START_TIMEOUT_MAX_SECONDS = 600;
+export const DEFAULT_START_TIMEOUT_SECONDS = 120;
+
+/** S16 8: the WhatsApp template language code, `xx` or `xx_YY` (Meta's shape). */
+export const TEMPLATE_LANGUAGE_CODE = /^[a-z]{2,3}(_[A-Z]{2})?$/;
+export const DEFAULT_TEMPLATE_LANGUAGE_CODE = 'es_MX';
 
 const SUBTYPES = [
   'RESTOCK',
@@ -105,6 +120,27 @@ export function collectFieldErrors(input: unknown): FieldError[] {
   }
   if (!inRange(body.receiptCloseMarginMinutes, 0, 1440)) {
     add('receiptCloseMarginMinutes', 'OUT_OF_RANGE');
+  }
+
+  // Additive (S16): absent or null keeps the stored value (the service fills it).
+  if (
+    body.startTimeoutSeconds !== undefined &&
+    body.startTimeoutSeconds !== null &&
+    !inRange(
+      body.startTimeoutSeconds,
+      START_TIMEOUT_MIN_SECONDS,
+      START_TIMEOUT_MAX_SECONDS,
+    )
+  ) {
+    add('startTimeoutSeconds', 'OUT_OF_RANGE');
+  }
+  const language = body.templateLanguageCode;
+  if (
+    language !== undefined &&
+    language !== null &&
+    (typeof language !== 'string' || !TEMPLATE_LANGUAGE_CODE.test(language))
+  ) {
+    add('templateLanguageCode', 'INVALID_LANGUAGE_CODE');
   }
 
   const text = body.templateCostText;

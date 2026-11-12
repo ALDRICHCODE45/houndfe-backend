@@ -163,8 +163,18 @@ const REQUEST_ROW = Prisma.sql`
          cr."subtype"::text AS "subtype", cr."status"::text AS "status",
          cr."version", cr."customerKey", cr."conversationRef", cr."assigneeUserId",
          cr."assigneeDisplayName", cr."claimedAt", cr."overdueAt", cr."closedAt",
-         cr."humanDecisionId", cr."deliveryZoneRequestId", cr."receiptEvidenceId"
-  FROM "chatbot_requests" cr`;
+         cr."humanDecisionId", cr."deliveryZoneRequestId", cr."receiptEvidenceId",
+         -- Unit 11: the request-level session state of §4.2/§12.4. An ENDED
+         -- session on an open request is WAITING (reverted or released).
+         CASE WHEN ls."state" IS NULL THEN NULL
+              WHEN ls."state" <> 'ENDED' THEN ls."state"
+              WHEN cr."status" IN ('NEW', 'IN_PROGRESS') THEN 'WAITING'
+              ELSE 'ENDED' END AS "liveSessionState"
+  FROM "chatbot_requests" cr
+  LEFT JOIN LATERAL (
+    SELECT s."state" FROM "chatbot_live_sessions" s
+    WHERE s."tenantId" = cr."tenantId" AND s."requestId" = cr."id"
+    ORDER BY s."epoch" DESC LIMIT 1) ls ON TRUE`;
 
 /** `SELECT … FOR UPDATE` on one tenant request; `null` for a missing id. */
 export async function lockRequestRow(

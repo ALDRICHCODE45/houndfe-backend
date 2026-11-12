@@ -106,3 +106,34 @@ export function mediaMatchesMessageType(
       return false;
   }
 }
+
+export const STAFF_FILENAME_MAX = 100;
+
+/**
+ * The name the customer sees for a staff file (S16 9). Staff chooses it, so it
+ * is cleaned to a plain file name: no directories, quotes, control characters
+ * or non-ASCII (it goes into a quoted `Content-Disposition` and the bot's
+ * WhatsApp document), at most 100 characters, and the extension always matches
+ * the detected type. Nothing usable falls back to `imagen.<ext>` /
+ * `documento.pdf`.
+ */
+export function sanitizeStaffFilename(
+  raw: unknown,
+  media: DetectedMedia,
+): string {
+  const fallback = media.kind === 'document' ? 'documento' : 'imagen';
+  const text = typeof raw === 'string' ? raw : '';
+  const base = text.split(/[\\/]/).pop() ?? '';
+  const stem = base
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\.[A-Za-z0-9]{1,5}$/, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001F\u007F"';:*?<>|%\\]/g, '')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[. ]+|[. ]+$/g, '')
+    .slice(0, STAFF_FILENAME_MAX - media.extension.length - 1)
+    .trim();
+  return `${stem || fallback}.${media.extension}`;
+}

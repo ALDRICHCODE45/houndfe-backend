@@ -43,6 +43,9 @@ class Routes {
   @BotRouteClass('feed')
   feed(this: void) {}
 
+  @BotRouteClass('control')
+  control(this: void) {}
+
   @BotRouteClass('humanDecisions')
   humanDecisions(this: void) {}
 
@@ -96,7 +99,7 @@ describe('ServiceAuthGuard route classes', () => {
     });
   });
 
-  it.each(['write', 'feed'] as const)(
+  it.each(['write', 'feed', 'control'] as const)(
     'charges a %s route to its own class with the class default',
     async (name) => {
       await guard.canActivate(context(handlerOf(name)));
@@ -108,6 +111,16 @@ describe('ServiceAuthGuard route classes', () => {
       });
     },
   );
+
+  it('gives the control class (session-ack) its own bucket, so a mirror burst never starves it', async () => {
+    await guard.canActivate(context(handlerOf('control')));
+
+    expect(check).toHaveBeenCalledWith({
+      credentialId: 'cred-1',
+      routeClass: 'control',
+      defaultLimit: 120,
+    });
+  });
 
   it('charges the human-decision routes to their own class with the credential rateLimit', async () => {
     await guard.canActivate(context(handlerOf('humanDecisions')));

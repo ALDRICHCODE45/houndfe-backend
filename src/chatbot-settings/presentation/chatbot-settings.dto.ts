@@ -99,6 +99,16 @@ export class PutChatbotSettingsDto {
   @IsInt()
   receiptCloseMarginMinutes!: number;
 
+  /** Additive (S16 1a): absent keeps the stored value. Range in the domain. */
+  @IsOptional()
+  @IsInt()
+  startTimeoutSeconds?: number;
+
+  /** Additive (S16 8): absent keeps the stored value. Shape in the domain. */
+  @IsOptional()
+  @IsString()
+  templateLanguageCode?: string;
+
   @ValidateNested()
   @Type(() => SchedulingDto)
   scheduling!: SchedulingDto;

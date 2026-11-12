@@ -29,14 +29,14 @@ import {
 } from '../domain/chatbot-feed';
 import type { TenantClient } from './chatbot-request-writes';
 
-interface FeedDraft {
+export interface FeedDraft {
   requestId: string;
   type: string;
   conversationRef: string | null;
   payload: Record<string, unknown>;
 }
 
-async function insertFeedItems(
+export async function insertFeedItems(
   tx: TenantClient,
   tenantId: string,
   drafts: FeedDraft[],

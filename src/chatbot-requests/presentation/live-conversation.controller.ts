@@ -1,0 +1,319 @@
+/**
+ * Live conversation routes (human-intervention unit 11; contract §4.3, §4.4,
+ * §4.7, §3.9, §3.10).
+ *
+ * Staff (JWT + tenant + active user + `read` and `update:ChatbotRequest`):
+ *   POST /chatbot-requests/:id/messages   {clientMessageId, expectedEpoch, text}
+ *   POST /chatbot-requests/:id/template   {expectedEpoch}  (§4.5, the paid template)
+ *        `Idempotency-Key` MUST equal `clientMessageId` (§12.12).
+ * Bot (`svc_` credential; the tenant comes from the guard):
+ *   POST /chatbot-api/conversations/:conversationRef/session-ack  `conversation:write`, `control`
+ *   GET  /chatbot-api/conversations/:conversationRef/state        `requests:read`, `read`
+ *   GET  /chatbot-api/conversations/state?mode=HUMAN&limit=&cursor=   same scope (S16 7a)
+ *
+ * `@Body()` of the bot route is `unknown`: the exact parser below owns the
+ * validation (no other key is accepted).
+ */
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Header,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UseFilters,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Request, Response } from 'express';
+import { RequirePermissions } from '../../auth/authorization/decorators/require-permissions.decorator';
+import { PermissionsGuard } from '../../auth/authorization/guards/permissions.guard';
+import { ActiveUserGuard } from '../../auth/guards/active-user.guard';
+import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
+import { RequiredScopes } from '../../chatbot-api/presentation/decorators/required-scopes.decorator';
+import { BotRouteClass } from '../../chatbot-api/presentation/guards/route-class';
+import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
+import { InvalidArgumentError } from '../../shared/domain/domain-error';
+import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
+import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
+import { BOT_SCOPES } from '../domain/bot-scopes';
+import {
+  ConversationMediaService,
+  type MediaUploadView,
+} from '../../conversations/application/conversation-media.service';
+import { BotMediaHttpFilter } from '../../conversations/presentation/bot-media.controller';
+import { CONVERSATION_MEDIA_MAX_BYTES } from '../../conversations/domain/conversation-media';
+import { parseStaffMessageContent } from '../domain/live-session';
+import {
+  PrismaLiveConversationStore,
+  type SessionAckResult,
+  type StaffMessageResult,
+} from '../infrastructure/prisma-live-conversation.store';
+import {
+  IdempotencyKey,
+  StaffMessageDto,
+  TemplateRequestDto,
+} from './chatbot-request-commands.dto';
+import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
+
+const REF = /^[A-Za-z0-9:_.@+-]{1,200}$/;
+
+function parseRef(raw: string): string {
+  if (!REF.test(raw)) {
+    throw new InvalidArgumentError(
+      'Invalid conversationRef',
+      'VALIDATION_ERROR',
+    );
+  }
+  return raw;
+}
+
+/** Exactly `{epoch, state, providerMessageId?}` (bot contract, session-ack). */
+export function parseSessionAck(raw: unknown): {
+  epoch: number;
+  state: 'STARTED' | 'ENDED';
+} {
+  const bad = (): never => {
+    throw new InvalidArgumentError('Invalid session-ack', 'VALIDATION_ERROR');
+  };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) bad();
+  const body = raw as Record<string, unknown>;
+  const allowed = new Set(['epoch', 'state', 'providerMessageId']);
+  if (Object.keys(body).some((key) => !allowed.has(key))) bad();
+  const { epoch, state, providerMessageId } = body;
+  if (
+    typeof epoch !== 'number' ||
+    !Number.isInteger(epoch) ||
+    epoch < 1 ||
+    epoch > 2_147_483_647
+  ) {
+    bad();
+  }
+  if (state !== 'STARTED' && state !== 'ENDED') bad();
+  if (
+    providerMessageId !== undefined &&
+    (typeof providerMessageId !== 'string' ||
+      providerMessageId.length < 1 ||
+      providerMessageId.length > 512 ||
+      providerMessageId !== providerMessageId.trim())
+  ) {
+    bad();
+  }
+  return { epoch: epoch as number, state: state as 'STARTED' | 'ENDED' };
+}
+
+const BULK_LIMIT = { default: 100, max: 500 } as const;
+
+/** `mode=HUMAN` (the only mode), `limit` 1..500, opaque `cursor`. */
+function parseBulkQuery(query: Record<string, unknown>): {
+  limit: number;
+  after: string | null;
+} {
+  const bad = (): never => {
+    throw new InvalidArgumentError('Invalid request', 'VALIDATION_ERROR');
+  };
+  const known = new Set(['mode', 'limit', 'cursor']);
+  if (Object.keys(query).some((key) => !known.has(key))) bad();
+  if (query.mode !== 'HUMAN') bad();
+  let limit: number = BULK_LIMIT.default;
+  if (query.limit !== undefined) {
+    if (typeof query.limit !== 'string' || !/^\d{1,4}$/.test(query.limit)) {
+      bad();
+    }
+    limit = Number(query.limit);
+    if (limit < 1 || limit > BULK_LIMIT.max) bad();
+  }
+  let after: string | null = null;
+  if (query.cursor !== undefined) {
+    if (typeof query.cursor !== 'string' || query.cursor.length > 400) bad();
+    if (!/^[A-Za-z0-9_-]+$/.test(query.cursor as string)) bad();
+    after = Buffer.from(query.cursor as string, 'base64url').toString('utf8');
+    if (!REF.test(after)) bad();
+  }
+  return { limit, after };
+}
+
+type StaffRequest = Request & { user?: AuthenticatedUser };
+
+@Controller('chatbot-requests')
+@UseGuards(JwtAuthGuard, TenantContextGuard, ActiveUserGuard, PermissionsGuard)
+@UseFilters(ChatbotRequestHttpFilter)
+export class LiveConversationStaffController {
+  constructor(
+    private readonly store: PrismaLiveConversationStore,
+    private readonly media: ConversationMediaService,
+  ) {}
+
+  /**
+   * S15 Q5: the attendee uploads a photo or PDF for the live session. Multipart
+   * `file`; `Idempotency-Key` (uuid) makes a retry answer the same media. Same
+   * gates as a text message (assignee, session ACTIVE). The answer carries the
+   * `mediaId` to send with `POST …/messages {type, mediaId, caption?}`; no
+   * storage key or URL ever leaves.
+   */
+  @Post(':id/media')
+  // Multer's size abort answers `413 MEDIA_TOO_LARGE`, as for the bot's upload.
+  @UseFilters(BotMediaHttpFilter)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: {
+        // One byte above the cap so exactly 10 MB passes and 10 MB + 1 aborts.
+        fileSize: CONVERSATION_MEDIA_MAX_BYTES + 1,
+        files: 1,
+        fields: 4,
+        fieldSize: 1024,
+      },
+    }),
+  )
+  async upload(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() fields: unknown,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Req() req: StaffRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<MediaUploadView> {
+    if (!req.user) throw new ForbiddenException();
+    await this.store.assertCanUpload(id, req.user.userId);
+    const { created, media } = await this.media.upload({
+      idempotencyKey: key,
+      file: file?.buffer,
+      fields,
+      staff: {
+        requestId: id,
+        userId: req.user.userId,
+        filename: file?.originalname,
+      },
+    });
+    response.status(created ? 201 : 200);
+    return media;
+  }
+
+  @Post(':id/messages')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  async send(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() body: StaffMessageDto,
+    @Req() req: StaffRequest,
+  ): Promise<StaffMessageResult> {
+    if (!req.user) throw new ForbiddenException();
+    if (key !== body.clientMessageId.toLowerCase()) {
+      throw new InvalidArgumentError(
+        'Idempotency-Key must equal clientMessageId',
+        'VALIDATION_ERROR',
+      );
+    }
+    return this.store.sendStaffMessage({
+      requestId: id,
+      actorUserId: req.user.userId,
+      clientMessageId: body.clientMessageId.toLowerCase(),
+      expectedEpoch: body.expectedEpoch,
+      content: parseStaffMessageContent(body),
+    });
+  }
+
+  /**
+   * §4.5: "Enviar plantilla". `Idempotency-Key` (uuid) identifies the template
+   * message (a retry answers the same one). Refusals: `409 WINDOW_OPEN`,
+   * `422 TEMPLATE_NOT_CONFIGURED`, `409 TEMPLATE_ALREADY_SENT` (see the store).
+   */
+  @Post(':id/template')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  async requestTemplate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() body: TemplateRequestDto,
+    @Req() req: StaffRequest,
+  ): Promise<StaffMessageResult> {
+    if (!req.user) throw new ForbiddenException();
+    return this.store.requestTemplate({
+      requestId: id,
+      actorUserId: req.user.userId,
+      clientMessageId: key,
+      expectedEpoch: body.expectedEpoch,
+    });
+  }
+}
+
+@Controller('chatbot-api')
+@UseGuards(ServiceAuthGuard)
+@UseFilters(ChatbotRequestHttpFilter)
+export class BotLiveConversationController {
+  constructor(private readonly store: PrismaLiveConversationStore) {}
+
+  @Post('conversations/:conversationRef/session-ack')
+  @HttpCode(HttpStatus.OK)
+  @BotRouteClass('control')
+  @RequiredScopes(BOT_SCOPES.conversationWrite)
+  sessionAck(
+    @Param('conversationRef') conversationRef: string,
+    @Body() body: unknown,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<SessionAckResult> {
+    response.setHeader('Cache-Control', 'no-store');
+    const ack = parseSessionAck(body);
+    return this.store.sessionAck(
+      parseRef(conversationRef),
+      ack.epoch,
+      ack.state,
+    );
+  }
+
+  /**
+   * S16 7a: every conversation the backend holds in `HUMAN` mode, so the bot
+   * reconciles after an outage with one read instead of one per chat. Only
+   * `mode=HUMAN` exists (a list of every `BOT` chat has no use). Paged by an
+   * opaque `cursor`; `nextCursor` is `null` on the last page.
+   */
+  @Get('conversations/state')
+  @BotRouteClass('read')
+  @RequiredScopes(BOT_SCOPES.requestsRead)
+  async humanConversations(
+    @Query() query: Record<string, unknown>,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    response.setHeader('Cache-Control', 'no-store');
+    const { limit, after } = parseBulkQuery(query);
+    const { items, nextLast } = await this.store.listHumanConversations(
+      limit,
+      after,
+    );
+    return {
+      items,
+      nextCursor:
+        nextLast === null
+          ? null
+          : Buffer.from(nextLast, 'utf8').toString('base64url'),
+    };
+  }
+
+  @Get('conversations/:conversationRef/state')
+  @BotRouteClass('read')
+  @RequiredScopes(BOT_SCOPES.requestsRead)
+  async state(
+    @Param('conversationRef') conversationRef: string,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    response.setHeader('Cache-Control', 'no-store');
+    const state = await this.store.conversationState(parseRef(conversationRef));
+    if (!state) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+    return state;
+  }
+}

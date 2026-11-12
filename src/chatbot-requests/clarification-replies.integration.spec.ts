@@ -392,12 +392,17 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       // does not order them.
       orderBy: [{ version: 'asc' }, { createdAt: 'asc' }],
     });
-  const realtime = (b: Branch, requestId: string) =>
-    prisma.$queryRaw<
-      Array<{ type: string; payload: Record<string, unknown> }>
-    >`SELECT "type", "payload" FROM "realtime_events"
-      WHERE "tenantId" = ${b.tenantId} AND "requestId" = ${requestId}
-      ORDER BY "id"`;
+  const realtime = async (b: Branch, requestId: string) =>
+    (
+      await prisma.realtimeEvent.findMany({
+        where: { tenantId: b.tenantId, requestId },
+        orderBy: { id: 'asc' },
+        select: { type: true, payload: true },
+      })
+    ).map((e) => ({
+      type: e.type,
+      payload: e.payload as Record<string, unknown>,
+    }));
 
   // ------------------------------------------------------------------ staff
 
@@ -1291,6 +1296,8 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       expect(again.body).toEqual({
         accepted: [],
         duplicates: [message.waMessageId],
+        mode: 'BOT',
+        handoffEpoch: 0,
       });
       const plain = out();
       await mirror(b, q.conversationRef as string, [plain]).expect(200);
@@ -1336,6 +1343,8 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       expect(again.body).toEqual({
         accepted: [],
         duplicates: [forged.waMessageId],
+        mode: 'BOT',
+        handoffEpoch: 0,
       });
       expect(
         (

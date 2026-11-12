@@ -156,7 +156,7 @@ describe('botEnvelopeHash', () => {
 });
 
 describe('bot scopes (§3.1)', () => {
-  it('lists the seven scopes the new routes use', () => {
+  it('lists the eight scopes the new routes use', () => {
     expect([...BOT_SCOPE_LIST].sort()).toEqual(
       [
         'requests:create',
@@ -166,6 +166,7 @@ describe('bot scopes (§3.1)', () => {
         'feed:ack',
         'conversation:write',
         'media:write',
+        'media:read',
       ].sort(),
     );
     expect(BOT_SCOPES.requestsCreate).toBe('requests:create');

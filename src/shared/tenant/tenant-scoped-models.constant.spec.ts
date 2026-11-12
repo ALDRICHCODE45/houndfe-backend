@@ -67,3 +67,12 @@ describe('TENANT_SCOPED_MODELS — conversation media intents (human-interventio
     );
   });
 });
+
+describe('TENANT_SCOPED_MODELS — live conversation registration (human-intervention unit 11)', () => {
+  it.each(['ChatbotLiveSession', 'ChatbotSessionTemplate'])(
+    'scopes %s by tenant',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+});

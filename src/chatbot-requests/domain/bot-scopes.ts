@@ -13,6 +13,8 @@ export const BOT_SCOPES = {
   feedAck: 'feed:ack',
   conversationWrite: 'conversation:write',
   mediaWrite: 'media:write',
+  // Unit 11 (S16 9): the bot downloads the file of a staff IMAGE/DOCUMENT.
+  mediaRead: 'media:read',
 } as const;
 
 export const BOT_SCOPE_LIST: readonly string[] = Object.values(BOT_SCOPES);

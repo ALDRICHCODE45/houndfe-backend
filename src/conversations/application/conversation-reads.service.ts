@@ -49,7 +49,14 @@ export interface ConversationReadStore {
   page(
     conversationRef: string,
     query: ConversationPageQuery,
+    /** Unit 11: only messages with `seq >= minSeq` (an attendee's own session). */
+    minSeq?: number,
   ): Promise<ConversationPageRows>;
+  /**
+   * Unit 11: `startSeq` of the request's newest live session (the first message
+   * of the attendee's session, §2.5), or `null` when it never had one.
+   */
+  sessionStartSeq(requestId: string): Promise<number | null>;
   /**
    * S12: staff were shown the chat up to `seq`: advance the chat's read marker
    * (never back) and tell the open requests' screens when it moved.
@@ -123,14 +130,31 @@ export class ConversationReadsService {
         request.status === 'IN_PROGRESS' &&
         request.assigneeUserId === reader.userId;
       if (!attends) throw new InsufficientPermissionsError();
-      // Their session has no messages yet: sessions start with unit 11.
-      return EMPTY;
+      // §2.5: without `read:ChatbotConversation` the attendee sees only the
+      // messages of THEIR session (from its first `seq` on).
+      if (!request.conversationRef) return EMPTY;
+      const startSeq = await this.store.sessionStartSeq(request.id);
+      if (startSeq === null) return EMPTY;
+      return this.pageOf(request.conversationRef, query, startSeq, false);
     }
     if (!request.conversationRef) return EMPTY;
+    return this.pageOf(request.conversationRef, query, undefined, true);
+  }
 
+  /**
+   * One page of the chat. `minSeq` limits it to an attendee's own session
+   * (§2.5); only a reader of the whole chat (`opens`) moves the read marker.
+   */
+  private async pageOf(
+    conversationRef: string,
+    query: ConversationPageQuery,
+    minSeq: number | undefined,
+    opens: boolean,
+  ): Promise<ConversationPageView> {
     const { rows, hasMoreBefore } = await this.store.page(
-      request.conversationRef,
+      conversationRef,
       query,
+      minSeq,
     );
     if (rows.length === 0) return EMPTY;
     const items = await toMessageViews(this.store, rows);
@@ -138,11 +162,9 @@ export class ConversationReadsService {
     // newest message this page actually showed (an older page moves nothing; a
     // message that arrived while the page was being built stays unread). The
     // marker never blocks the read: a failure to move it is logged, not thrown.
+    if (!opens) return { items, hasMoreBefore };
     try {
-      await this.store.markRead(
-        request.conversationRef,
-        rows[rows.length - 1].seq,
-      );
+      await this.store.markRead(conversationRef, rows[rows.length - 1].seq);
     } catch (error) {
       this.logger.warn(
         `conversation read marker not moved (${error instanceof Error ? error.name : 'unknown'})`,

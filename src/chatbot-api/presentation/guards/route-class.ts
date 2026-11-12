@@ -11,13 +11,17 @@ import { SetMetadata } from '@nestjs/common';
  *     the two never spend from each other.
  *   - `write`, `read`, `feed`: the new routes; a long-poll never spends from
  *     `write` or `read`.
+ *   - `control` (unit 11, S16 1c): `session-ack` only. A tiny bucket of its
+ *     own so a mirror burst (`write`) can never starve the mute/unmute
+ *     confirmation the backend's 60 s revert waits for.
  */
 export type BotRouteClassName =
   | 'default'
   | 'humanDecisions'
   | 'write'
   | 'read'
-  | 'feed';
+  | 'feed'
+  | 'control';
 
 /** Classes whose budget is the credential's own `rateLimit`. */
 export const CREDENTIAL_LIMIT_CLASSES: readonly BotRouteClassName[] = [

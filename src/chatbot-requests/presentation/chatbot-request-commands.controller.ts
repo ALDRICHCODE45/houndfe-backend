@@ -6,6 +6,8 @@
  *   POST /chatbot-requests/:id/cancel    read + update:ChatbotRequest
  *   POST /chatbot-requests/:id/reply     read + update:ChatbotRequest (the
  *                                        state machine requires the assignee)
+ *   POST /chatbot-requests/:id/finish    read + update:ChatbotRequest (assignee,
+ *                                        or a reassigner: forced finish, unit 11)
  *   POST /chatbot-requests/:id/reassign  read:ChatbotRequest +
  *                                        update:ChatbotRequestAssignment
  *   POST /chatbot-requests/:id/resolve   read + update:ChatbotRequest, and the
@@ -51,12 +53,14 @@ import {
 import {
   CancelDto,
   ExpectedVersionDto,
+  FinishDto,
   IdempotencyKey,
   ReassignDto,
   ReplyDto,
 } from './chatbot-request-commands.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
 import { parseReplyText } from '../domain/clarification-reply';
+import { parseFinishNote } from '../domain/live-session';
 import { canResolveSubtype } from '../domain/resolve-permissions';
 import { parseResolveBody } from './chatbot-request-resolve.body';
 
@@ -149,6 +153,27 @@ export class ChatbotRequestCommandsController {
     return this.run(req, id, key, body.expectedVersion, {
       kind: 'reply',
       text: parseReplyText(body.text),
+    });
+  }
+
+  /**
+   * Unit 11 (§4.8): finish a live conversation. The assignee, or a reassigner
+   * who forces it (`actorCanReassign`); the state machine decides.
+   */
+  @Post(':id/finish')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(['read', 'ChatbotRequest'], ['update', 'ChatbotRequest'])
+  finish(
+    @Param('id', ParseUUIDPipe) id: string,
+    @IdempotencyKey() key: string,
+    @Body() body: FinishDto,
+    @Req() req: StaffRequest,
+  ) {
+    return this.run(req, id, key, body.expectedVersion, {
+      kind: 'finish',
+      note: parseFinishNote(body.note),
+      complaintOutcome: body.complaintOutcome,
     });
   }
 

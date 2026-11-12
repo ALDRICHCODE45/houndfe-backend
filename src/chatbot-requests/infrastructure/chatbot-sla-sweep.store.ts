@@ -486,8 +486,13 @@ export class ChatbotSlaSweepStore {
       // SAFETY: `enqueueOverdueNotice` only runs raw SQL with an explicit
       // tenantId, which the root transaction client supports like the
       // tenant-extended one it is typed against.
+      // Unit 11 (L69 note): while a live session runs the bot is silent and the
+      // attendee is already talking to the customer, so the customer notice is
+      // suppressed (`overdueAt`, the event and the staff notice stay). It is
+      // not postponed: `request.overdue_notice` is once per request, ever.
       const fed =
         plan.customerNotice === 'SENT' &&
+        !(await hasLiveSession(tx, row.tenantId, row.id)) &&
         (await enqueueOverdueNotice(
           tx as unknown as TenantClient,
           row.tenantId,
@@ -527,4 +532,17 @@ export class ChatbotSlaSweepStore {
         AND ${OPEN}`);
     return overdueMarked || columns !== null;
   }
+}
+
+/** A non-ENDED live session of the request (the partial index serves it). */
+async function hasLiveSession(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  requestId: string,
+): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ one: number }[]>(Prisma.sql`
+    SELECT 1 AS "one" FROM "chatbot_live_sessions"
+    WHERE "tenantId" = ${tenantId} AND "requestId" = ${requestId}
+      AND "state" <> 'ENDED' LIMIT 1`);
+  return rows.length > 0;
 }
