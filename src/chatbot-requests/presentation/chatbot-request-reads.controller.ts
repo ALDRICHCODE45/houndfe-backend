@@ -51,7 +51,7 @@ import {
   CustomerListQueryDto,
   GroupsQueryDto,
   HistoryQueryDto,
-  parseAssignee,
+  toInboxFilters,
 } from './chatbot-request-reads.dto';
 import { ChatbotRequestHttpFilter } from './chatbot-request-http.filter';
 
@@ -75,12 +75,7 @@ export class ChatbotRequestReadsController {
   groups(@Query() query: GroupsQueryDto, @Req() req: StaffRequest) {
     return this.reads.groups(this.reader(req), {
       tab: query.status ?? 'open',
-      filters: {
-        subtype: query.subtype,
-        assignee: parseAssignee(query.assignee),
-        overdue: query.overdue,
-        windowClosingSoon: query.windowClosingSoon,
-      },
+      filters: toInboxFilters(query),
       q: query.q,
       cursor: query.cursor,
       limit: query.limit,
@@ -111,6 +106,8 @@ export class ChatbotRequestReadsController {
     return this.reads.listByCustomer(this.reader(req), {
       customerKey: query.customerKey,
       tab: query.status ?? 'open',
+      filters: toInboxFilters(query),
+      q: query.q,
       cursor: query.cursor,
       limit: query.limit,
     });

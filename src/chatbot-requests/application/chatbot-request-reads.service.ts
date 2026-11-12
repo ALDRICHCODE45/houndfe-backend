@@ -145,6 +145,12 @@ export interface GroupRecord {
   openCount: number;
   lastClosedAt: Date | null;
   moreRequests: number;
+  /**
+   * S9: open requests of the customer with `overdueAt` set, exact (not limited
+   * to the loaded rows, not narrowed by the filters, like `openCount`). Optional
+   * so a store or fixture that does not select it reads as 0.
+   */
+  overdueCount?: number;
   requests: RequestRecord[];
 }
 
@@ -229,6 +235,8 @@ export interface InboxCounts {
   cancelled7d: number;
   /** S8: customers with at least one open request (the open tab's group count). */
   openGroups: number;
+  /** S9: open requests with no assignee (the «Sin responsable» filter's total). */
+  unassigned: number;
 }
 
 interface PageQuery {
@@ -262,6 +270,8 @@ export interface ChatbotRequestReadStore {
     query: PageQuery & {
       customerKey: string;
       tab: InboxTab;
+      /** S9: the same filters, and the same SQL, as the groups. */
+      filters: InboxFilters;
       cursor: Array<string | null> | null;
     },
   ): Promise<RequestRecord[]>;
@@ -398,20 +408,15 @@ export class ChatbotRequestReadsService {
   ) {
     const now = this.clock();
     const limit = input.limit ?? DEFAULT_PAGE;
-    // Phone search needs `read:CustomerPhone`; without it a digits-only q
-    // matches nothing, so the route is no oracle for phone numbers (R12).
-    const search = parseInboxSearch(input.q, {
-      canSearchPhone: reader.ability.can('read', 'CustomerPhone'),
-    });
-    if (search.kind === 'none') return { items: [], nextCursor: null };
+    const filters = this.withSearch(reader, input.filters, input.q);
+    if (!filters) return { items: [], nextCursor: null };
     const records = await this.store.groups({
       userId: reader.userId,
       now,
       cutoff: closedWindowCutoff(now),
       limit,
       tab: input.tab,
-      filters:
-        search.kind === 'absent' ? input.filters : { ...input.filters, search },
+      filters,
       cursor: this.openCursor(
         input.cursor,
         input.tab === 'resolved' || input.tab === 'cancelled'
@@ -444,6 +449,7 @@ export class ChatbotRequestReadsService {
           ? { lastClosedAt: iso(group.lastClosedAt) }
           : {}),
         openCount: group.openCount,
+        overdueCount: group.overdueCount ?? 0,
         requests: group.requests.map((r) => this.toRow(r, view, reader)),
         moreRequests: group.moreRequests,
       };
@@ -468,6 +474,9 @@ export class ChatbotRequestReadsService {
     input: {
       customerKey: string;
       tab: InboxTab;
+      /** S9: the filters of `groups`, with the same meaning. */
+      filters?: InboxFilters;
+      q?: string;
       cursor?: string;
       limit?: number;
     },
@@ -475,13 +484,18 @@ export class ChatbotRequestReadsService {
     const now = this.clock();
     const limit = input.limit ?? DEFAULT_PAGE;
     const open = input.tab === 'open' || input.tab === 'scheduled';
+    // A foreign token is a 400 before anything else, filters or not.
+    const customerKey = this.openKey(input.customerKey);
+    const filters = this.withSearch(reader, input.filters ?? {}, input.q);
+    if (!filters) return { items: [], nextCursor: null };
     const records = await this.store.listByCustomer({
       userId: reader.userId,
       now,
       cutoff: closedWindowCutoff(now),
       limit,
-      customerKey: this.openKey(input.customerKey),
+      customerKey,
       tab: input.tab,
+      filters,
       cursor: this.openCursor(
         input.cursor,
         open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
@@ -558,8 +572,17 @@ export class ChatbotRequestReadsService {
     // Closed requests are never paused: no calendar lookup.
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
+    // S9: the customer card of a group row, one lookup for the whole page.
+    const customers = await this.customerIndex(page);
     return {
-      items: page.map((r) => this.toRow(r, NO_VIEW, reader)),
+      items: page.map((r) => ({
+        ...this.toRow(r, NO_VIEW, reader),
+        customer: this.customerCard(
+          r,
+          r.customerId ? (customers.get(r.customerId) ?? null) : null,
+          reader,
+        ),
+      })),
       nextCursor:
         records.length > limit && last
           ? encodeCursor([iso(last.closedAt), last.id])
@@ -770,12 +793,7 @@ export class ChatbotRequestReadsService {
       : null;
     return {
       request: this.toRow(record, batch.view, reader, batch.tenantId),
-      customer: {
-        id: customer ? customer.id : null,
-        displayName: customer ? customerName(customer) : null,
-        phone: toStaffPhone(this.phoneOf(record, customer), reader.ability),
-        isTrusted: customer?.isTrusted ?? false,
-      },
+      customer: this.customerCard(record, customer, reader),
       previousCustomerKey: previousCustomerKey
         ? this.sealKey(previousCustomerKey, batch.tenantId)
         : null,
@@ -881,6 +899,38 @@ export class ChatbotRequestReadsService {
       toStatus: e.toStatus,
       version: e.version,
       data: e.data ?? {},
+    };
+  }
+
+  /**
+   * Parses `q` and merges it into the filters; `null` when the search can match
+   * nothing. Phone search needs `read:CustomerPhone`; without it a digits-only
+   * q matches nothing, so no route is an oracle for phone numbers (R12). One
+   * rule for `groups` and the by-customer list.
+   */
+  private withSearch(
+    reader: StaffReader,
+    filters: InboxFilters,
+    q: string | undefined,
+  ): InboxFilters | null {
+    const search = parseInboxSearch(q, {
+      canSearchPhone: reader.ability.can('read', 'CustomerPhone'),
+    });
+    if (search.kind === 'none') return null;
+    return search.kind === 'absent' ? filters : { ...filters, search };
+  }
+
+  /** `{id, displayName, phone, isTrusted}`: the phone only through R12. */
+  private customerCard(
+    request: Pick<RequestRecord, 'phoneCountryCode' | 'phone'>,
+    customer: CustomerRecord | null,
+    reader: StaffReader,
+  ) {
+    return {
+      id: customer ? customer.id : null,
+      displayName: customer ? customerName(customer) : null,
+      phone: toStaffPhone(this.phoneOf(request, customer), reader.ability),
+      isTrusted: customer?.isTrusted ?? false,
     };
   }
 

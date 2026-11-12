@@ -199,11 +199,59 @@ describe('ChatbotRequestReadsController', () => {
     expect(service.detail).not.toHaveBeenCalled();
   });
 
+  it('S9: the by-customer list takes the same filters as groups, parsed alike', async () => {
+    const query =
+      'status=scheduled&subtype=COMPLAINT&assignee=none&overdue=true&windowClosingSoon=false&q=S-000123&limit=7';
+    await get(`/chatbot-requests/groups?${query}`);
+    await get(`/chatbot-requests?customerKey=k1.abc&${query}`);
+    const [, grouped] = service.groups.mock.calls[0] as [unknown, object];
+    const [, listed] = service.listByCustomer.mock.calls[0] as [
+      unknown,
+      { filters: unknown; q: unknown; tab: unknown },
+    ];
+    expect(listed).toMatchObject({
+      filters: {
+        subtype: 'COMPLAINT',
+        assignee: { kind: 'unassigned' },
+        overdue: true,
+        windowClosingSoon: false,
+      },
+      q: 'S-000123',
+      tab: 'scheduled',
+    });
+    expect(grouped).toMatchObject({
+      filters: listed.filters,
+      q: listed.q,
+      tab: listed.tab,
+    });
+  });
+
+  it.each([
+    ['assignee=nobody'],
+    ['overdue=maybe'],
+    ['windowClosingSoon=1'],
+    ['subtype=BOGUS'],
+    [`q=${'x'.repeat(101)}`],
+  ])('S9: the by-customer list rejects %s like groups (400)', async (param) => {
+    expect((await get(`/chatbot-requests?customerKey=k&${param}`)).status).toBe(
+      400,
+    );
+    expect((await get(`/chatbot-requests/groups?${param}`)).status).toBe(400);
+  });
+
   it('routes the customer list, detail, audit and merge candidates', async () => {
     await get('/chatbot-requests?customerKey=k1.abc&status=resolved&limit=5');
     expect(service.listByCustomer).toHaveBeenCalledWith(expect.anything(), {
       customerKey: 'k1.abc',
       tab: 'resolved',
+      // S9: the filters of groups, all absent here.
+      filters: {
+        subtype: undefined,
+        assignee: undefined,
+        overdue: undefined,
+        windowClosingSoon: undefined,
+      },
+      q: undefined,
       cursor: undefined,
       limit: 5,
     });

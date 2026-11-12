@@ -102,6 +102,7 @@ Query (all optional; unknown parameters are `400`):
       "customer": { "id": "…", "displayName": "Juan Pérez", "phone": "55 **** 5678", "isTrusted": false },
       "mostUrgentAt": "2026-11-09T17:00:00.000Z",
       "openCount": 3,
+      "overdueCount": 1,
       "requests": [ /* up to 10 rows (section 3) */ ],
       "moreRequests": 0
     }
@@ -115,6 +116,7 @@ Query (all optional; unknown parameters are `400`):
   - **Customer name** — case and accent insensitive (`maria` finds `María`, `nandu` finds `Ñandú`); each word must be contained in `firstName lastName`, in any order, at most 4 words (`perez maria`). A prefix is just a short word. Only requests **linked to a customer** can match by name (an unlinked request has no name). `%` and `_` are literal.
   - **Phone digits** — digits with optional spaces, dashes, parentheses or `+` (`55 1234-5678`, `1234`), matched as a *contains* over the customer's full number. **Only for callers with `read:CustomerPhone`.** Without it a digits-only `q` finds **nothing at all** (`{"items": [], "nextCursor": null}`, exactly like a miss), so the box cannot be used to find out whether a number is a customer. Text that mixes letters and digits (`maria 0001`) is a name search and never matches a phone.
   - An empty or blank `q` is ignored. A `q` over 100 characters is `400`. The matching group shows only the requests that match (like any filter); `openCount` stays the customer's open total.
+- **`overdueCount` (S9, v1.5, additive).** Integer, never `null`: the customer's open requests that have `overdueAt` set, **exact** (not limited to the 10 loaded rows and not narrowed by the filters, like `openCount`). `0` on the `resolved` / `cancelled` tabs. Section 15.3.
 - **Order of the groups:** `mostUrgentAt` ascending (overdue first, because their deadline is in the past), groups with no deadline last, then by customer. The order is stable for the cursor, so pages never repeat a group.
 - **Inside a group:** the nearest deadline first (`NULL` last), then `createdAt`, then `id`. Up to 10 rows; `moreRequests` is how many matching rows are left. Page the rest with `GET /chatbot-requests?customerKey=` (section 5).
 - With a filter (`subtype`, `assignee`, `overdue`, `windowClosingSoon`, or the `scheduled` tab), a group appears only if it has a matching open request, and `requests` and `moreRequests` count only the matching ones. `openCount` is always the customer's open total.
@@ -133,14 +135,18 @@ Query (all optional; unknown parameters are `400`):
 
 Order is the same as inside a group (open: nearest deadline, then `createdAt`, `id`; closed tabs: `closedAt` descending). Use it for "Ver las N restantes".
 
+**Filters (S9, v1.5, additive).** It also accepts the five filters of `groups`, with the same values, the same meaning and the same validation (they are declared once and parsed by the same code): `subtype`, `assignee` (`me`, `unassigned` / `none`, or a user id), `overdue`, `windowClosingSoon` and `q`. Send the same query string you sent to `groups` plus the group's `customerKey` and you get exactly the rows that group counts (the group's `requests` are the first rows of this list, and `requests.length + moreRequests` is the total this list pages through). Without any filter nothing changes. Details and an example: section 15.1.
+
 ## 6. `GET /chatbot-requests/counts`
 
 ```json
 { "new": 7, "inProgress": 4, "mine": 2, "overdue": 1, "windowClosingSoon": 3, "scheduled": 0, "needsReschedule": 0,
-  "resolved7d": 12, "cancelled7d": 5, "openGroups": 9 }
+  "resolved7d": 12, "cancelled7d": 5, "openGroups": 9, "unassigned": 4 }
 ```
 
 The first seven are over open requests of the current sucursal. `new` and `inProgress` are by status; `mine` is the caller's `IN_PROGRESS` requests; `windowClosingSoon` uses the same 2-hour window as the filter. `new`/`inProgress` include scheduled requests.
+
+**`unassigned` (S9, v1.5, additive).** Open requests with no assignee: the total behind the «Sin responsable» filter (`assignee=unassigned`). Section 15.2.
 
 **S8 counts (v1.3, additive).** `resolved7d` and `cancelled7d` are the requests with `status = RESOLVED` / `CANCELLED` and `closedAt >= now − 7 days` (wall clock, the instant of the request, **the same window as the `resolved` and `cancelled` tabs of `groups`**, so each number equals the number of requests that tab lists). `openGroups` is the number of customers with at least one open request, i.e. the number of groups of the `open` tab with no filter (the tab filters do not change it). Same permission as the other counts (`read:ChatbotRequest`) and the same answer for every role: counts carry no phone and no per-person data except `mine`, so R12 does not apply. Another sucursal's requests are never counted. They come from the same index-backed statement (history index for the two closed counts, group table for `openGroups`), see `docs/perf/chatbot-inbox-load-results.md`.
 
@@ -159,6 +165,8 @@ Closed requests (`RESOLVED` or `CANCELLED`) with `closedAt` **older than 7 days*
 ```json
 { "items": [ /* rows (section 3) */ ], "nextCursor": "…" }
 ```
+
+**S9 (v1.5, additive):** every item of `history` also has a `customer` card, the same one a group header has (section 15.4). Existing fields did not change.
 
 Open the detail with `GET /chatbot-requests/:id`.
 
@@ -392,6 +400,82 @@ An open row, three quarters through its window:
   "cancelReason": null, "staffCancelReason": null, "mergedInto": null,
   "allowedActions": ["CLAIM", "CANCEL"], "deniedActions": [] }
 ```
+
+## 15. S9 additions (v1.5): filters on the by-customer list, `unassigned`, `overdueCount`, customer on history
+
+Owner decisions of 2026-11-12 on the FE inbox notes: «Filtros al expandir un grupo», «Conteo «sin responsable» y vencidas por grupo», «Nombre del cliente en el Historial». Everything here is **additive**: no existing field, route or status code changed, and a request without the new parameters answers as before. «Mías» and «Sin responsable» stay mutually exclusive: there is one `assignee` filter (intentional).
+
+### 15.1 Filters on `GET /chatbot-requests?customerKey=` (the «Ver las N restantes» list)
+
+New optional query parameters, identical to the ones of `groups` (section 4):
+
+| Parameter | Type | Values | Default |
+| --- | --- | --- | --- |
+| `subtype` | string | any `subtype` | all |
+| `assignee` | string | `me`, `unassigned` (alias `none`), or a user id (UUID) | all |
+| `overdue` | boolean | `true` / `false` | not filtered |
+| `windowClosingSoon` | boolean | `true` / `false` (WhatsApp window closes within 2 hours) | not filtered |
+| `q` | string, at most 100 chars | folio, customer name, or phone digits | no search |
+
+- **Same rows as the group.** For the same data and the same query string, `GET /chatbot-requests/groups?...` and `GET /chatbot-requests?customerKey=<that group>&...` match the same requests, in the same order (the group shows the first 10). So «Ver las N restantes» keeps the filters the user has on, and `N` is the group's `moreRequests`.
+- **Same validation, same errors.** `assignee=nobody`, `overdue=maybe`, `subtype=BOGUS`, a `q` over 100 characters and `status=bogus` are `400 VALIDATION_ERROR` on both routes. An empty or blank `q` is ignored. A `customerKey` token of another sucursal is still `400`, whatever else is sent.
+- **Same `q` rules (R12).** Folio and name work for every role. A digits-only `q` needs `read:CustomerPhone`; without it the answer is `200 {"items": [], "nextCursor": null}`, exactly like a miss, so this route is no more a phone oracle than `groups`.
+- **Closed tabs.** `status=resolved|cancelled` with filters works the same way (inside the 7-day window).
+- **Paging.** `cursor` and `limit` are unchanged; send the same filters with every page.
+
+```
+GET /chatbot-requests/groups?assignee=unassigned&subtype=COMPLAINT&q=rosa
+GET /chatbot-requests?customerKey=k1.…&assignee=unassigned&subtype=COMPLAINT&q=rosa&limit=50
+```
+
+### 15.2 `counts.unassigned`
+
+| Field | Type | Null |
+| --- | --- | --- |
+| `unassigned` | integer | never |
+
+Open requests (`NEW` or `IN_PROGRESS`) with no assignee, counted per request (not per customer), for the current sucursal. It is the number of requests `assignee=unassigned` lists across all groups. Same permission (`read:ChatbotRequest`) and the same answer for every role as the other counts; another sucursal's requests are never counted. It moves on claim, release and cancel like `new`.
+
+```json
+{ "new": 7, "inProgress": 4, "mine": 2, "overdue": 1, "windowClosingSoon": 3, "scheduled": 0, "needsReschedule": 0,
+  "resolved7d": 12, "cancelled7d": 5, "openGroups": 9, "unassigned": 4 }
+```
+
+### 15.3 `overdueCount` on every group
+
+| Field | Type | Null |
+| --- | --- | --- |
+| `overdueCount` | integer (>= 0) | never |
+
+On each item of `groups`: how many of that customer's **open** requests have `overdueAt` set. It is exact even when the customer has more than the 10 loaded rows (`openCount: 25`, `requests` with 10 rows none overdue, `overdueCount: 13` is possible). It does **not** follow the filters (like `openCount`), so a filtered group still shows the customer's full overdue total. On `status=resolved` / `cancelled` groups it is `0`. Summed over all groups it equals `counts.overdue`.
+
+```json
+{ "customerKey": "k1.…", "openCount": 25, "overdueCount": 13, "moreRequests": 15, "requests": [ /* 10 rows */ ] }
+```
+
+The stream (`17-realtime-sse.md`) does not carry it: a `request.*` event changes it by one at most, so refetch the group (or `counts`) as you do for `openCount`.
+
+### 15.4 Customer on history rows
+
+Every item of `GET /chatbot-requests/history` has a new `customer` object, the same card as a group header (section 4) and as the `customer` next to `request` in a stream event:
+
+| Field | Type | Null |
+| --- | --- | --- |
+| `customer.id` | string (UUID) | `null` if the request is not linked to a `Customer` |
+| `customer.displayName` | string, `"Juan Pérez"` | `null` if not linked |
+| `customer.phone` | string | masked (`"55 **** 5678"`) without `read:CustomerPhone`, `"+525512345678"` with it; `null` if the request has no phone |
+| `customer.isTrusted` | boolean | `false` if not linked |
+
+`customerKey` of the row is unchanged (the sealed `k1.…` token). A caller without `read:CustomerPhone` never receives the full number anywhere in the response. Show the name when there is one, otherwise the masked phone. The history is one query plus one customer lookup per page, however many rows.
+
+```json
+{ "id": "…", "folio": "S-000012", "status": "RESOLVED", "customerKey": "k1.…", "closedAt": "2026-10-30T16:00:00.000Z",
+  "customer": { "id": "7c2a…", "displayName": "Juan Pérez", "phone": "55 **** 5678", "isTrusted": true } }
+```
+
+### 15.5 Realtime
+
+No new event type and no new field on the `request` row of the stream: the row is built by the same code as the list rows. The new data is on the side: `customer` already travels next to `request` and now has the same shape as the history card.
 
 ## 12. Performance (for the record)
 

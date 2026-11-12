@@ -1,7 +1,8 @@
 /**
  * Query strings of the staff read routes (§3.8, §12.3). The global
- * ValidationPipe rejects unknown parameters. `q` (free-text search) is only
- * accepted by `groups` for now; `history` answers 400 until it ships.
+ * ValidationPipe rejects unknown parameters. The inbox filters (`q`, `assignee`,
+ * `overdue`, `windowClosingSoon`, `subtype`) are accepted by `groups` and by the
+ * by-customer list alike (S9); `history` answers 400 to `q` until it ships.
  */
 import { Transform, Type } from 'class-transformer';
 import {
@@ -20,6 +21,7 @@ import {
 } from 'class-validator';
 import type {
   AssigneeFilter,
+  InboxFilters,
   InboxTab,
 } from '../application/chatbot-request-reads.service';
 import { MAX_PAGE } from '../application/chatbot-request-reads.service';
@@ -69,7 +71,11 @@ class PageDto {
   limit?: number;
 }
 
-export class GroupsQueryDto extends PageDto {
+/**
+ * The inbox filters, shared by `groups` and the by-customer list (S9): one
+ * declaration, so both validate and parse them identically.
+ */
+export class InboxFilterQueryDto extends PageDto {
   @IsOptional()
   @IsIn(TABS)
   status?: InboxTab;
@@ -99,15 +105,23 @@ export class GroupsQueryDto extends PageDto {
   q?: string;
 }
 
-export class CustomerListQueryDto extends PageDto {
+export class GroupsQueryDto extends InboxFilterQueryDto {}
+
+export class CustomerListQueryDto extends InboxFilterQueryDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(300)
   customerKey!: string;
+}
 
-  @IsOptional()
-  @IsIn(TABS)
-  status?: InboxTab;
+/** The filters of a query as the service takes them (groups and by-customer). */
+export function toInboxFilters(query: InboxFilterQueryDto): InboxFilters {
+  return {
+    subtype: query.subtype,
+    assignee: parseAssignee(query.assignee),
+    overdue: query.overdue,
+    windowClosingSoon: query.windowClosingSoon,
+  };
 }
 
 export class HistoryQueryDto extends PageDto {

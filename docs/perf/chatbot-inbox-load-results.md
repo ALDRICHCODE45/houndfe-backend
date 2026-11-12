@@ -448,3 +448,20 @@ Proof lives in `src/chatbot-requests/chatbot-inbox-additions.integration.spec.ts
 - **Row fields** add no round trip: `cancelReason`/`staffCancelReason` are plain columns; `mergedInto` is a `CASE`-guarded subselect of the source's `MERGED` event (events index `(tenantId, requestId, createdAt)`, only for `SUPERSEDED` rows); `lastReleasedAt` (the claim clock's cycle start, the sweep's expression) is a `CASE`-guarded subselect only for `NEW` rows; `zoneHasValidation` is a primary-key lookup only for `DELIVERY_ZONE` rows. `slaLevel` is pure CPU over the settings row the pause lookup already read (one lookup per response, shared by every row).
 - **Known cost:** the `NEW` rows pay one events-index probe each for `lastReleasedAt`. At 10 rows per group and 25 groups that is at most 250 probes inside the same statement (included in the groups figure above).
 
+
+## S9 additions (v1.5): `counts.unassigned`, `overdueCount`, by-customer filters, history customer
+
+Proof lives in `src/chatbot-requests/chatbot-inbox-s9.integration.spec.ts` (regular integration spec, no `PERF=1`; Supertest, so the timings include the HTTP stack and are **not** comparable with the service-level numbers at the top). The `PERF=1` load test was **not** rerun for S9 (it writes its report to `/tmp`).
+
+| Check | Limit | Measured | Verdict |
+| --- | --- | --- | --- |
+| counts p95 with `unassigned` (20,000 requests: 5,000 open, 15,000 closed, `VACUUM ANALYZE`, 40 samples, via HTTP) | < 200 ms | p50 7.8 / p95 12.1 / max 15.0 ms (S8 counts: p95 9.5 ms on a different data set) | PASS |
+| groups page of 25 with `overdueCount` (4,000 open over 1,500 customers, 30 samples, via HTTP) | < 200 ms | p50 20.8 / p95 24.9 / max 25.4 ms (S8 groups: p95 31.0 ms) | PASS |
+| `unassigned` statement: no sequential scan of `chatbot_requests`, uses `chatbot_requests_open_status_idx`, no `Sort`, no `HashAggregate` | EXPLAIN | asserted on the real statement | PASS |
+| groups statement with `overdueCount`: no sequential scan of `chatbot_requests`, no `HashAggregate` / `GroupAggregate`, uses the group index and `chatbot_requests_tenantId_customerKey_status_idx` | EXPLAIN | asserted on the real statement | PASS |
+| statements per read do not grow with the rows (groups 1 vs 50 groups, history 1 vs 50 rows) | constant | equal in every pair | PASS |
+
+- **`unassigned`** is one more scalar subquery of the counts statement: `status IN ('NEW','IN_PROGRESS') AND assigneeUserId IS NULL`. It reads the partial open index `(tenantId, status)` and filters the assignee on the heap (the open rows of one tenant, 5,000 at the sized load). It deliberately does not shortcut to `status = 'NEW'` even though the table's CHECK makes them equal today, so it keeps matching `assignee=unassigned` if that rule ever changes. No migration.
+- **`overdueCount`** is a correlated scalar `count(*)` in the `page` CTE of the open groups statement, so it runs once per group of the page (at most `limit + 1`, 26) over the customer's open rows through `(tenantId, customerKey, status)`; there is no `GROUP BY` and no extra round trip. It does not read `ChatbotCustomerGroup.hasOverdue` (a hint, not a count) and no counter column was added (that would need a migration and every writer of overdue to maintain it). Closed tabs select a constant `0`.
+- **By-customer filters** reuse `inboxPredicates` and `searchPredicate`, the same SQL fragments as the groups; the statement is the same as before plus those predicates on the `(tenantId, customerKey, status)` scan.
+- **History customer** is one `customers` lookup by id for the page (`IN` over at most 50 ids, primary key), after the unchanged history statement.

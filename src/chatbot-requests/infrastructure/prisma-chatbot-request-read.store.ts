@@ -84,6 +84,17 @@ const COLUMNS = Prisma.sql`
   ${MERGED_INTO} AS "mergedInto",
   ${LAST_RELEASED_NEW} AS "lastReleasedAt",
   ${ZONE_HAS_VALIDATION} AS "zoneHasValidation"`;
+/**
+ * S9: open requests of the group's customer with `overdueAt` set, exact. A
+ * correlated scalar subquery in the page CTE: it runs once per group of the
+ * page (at most limit + 1), over the customer's few open rows through
+ * `(tenantId, customerKey, status)`, in the same statement (no extra round trip,
+ * no N+1, no GROUP BY). Not narrowed by the filters, like `openCount`. The
+ * stored `hasOverdue` flag is not used: it is a hint, and this must be exact.
+ */
+const OVERDUE_COUNT = Prisma.sql`(SELECT count(*)::int FROM "chatbot_requests" o
+  WHERE o."tenantId" = g."tenantId" AND o."customerKey" = g."customerKey"
+    AND o."status" IN ('NEW', 'IN_PROGRESS') AND o."overdueAt" IS NOT NULL)`;
 const OPEN_ORDER = Prisma.sql`ORDER BY "urgencyAt" ASC NULLS LAST, r."createdAt" ASC, r."id" ASC`;
 const CLOSED_ORDER = Prisma.sql`ORDER BY r."closedAt" DESC, r."id" DESC`;
 
@@ -225,6 +236,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       total,
       mostUrgentAt,
       openCount,
+      overdueCount,
       lastClosedAt,
       ...row
     } of rows) {
@@ -234,6 +246,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
         customerKey: request.customerKey,
         mostUrgentAt,
         openCount,
+        overdueCount,
         lastClosedAt,
         moreRequests: 0,
         requests: [],
@@ -264,12 +277,13 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       : Prisma.empty;
     return this.db.$queryRaw<GroupRow[]>(Prisma.sql`
       WITH page AS (
-        SELECT g."customerKey", g."mostUrgentAt", g."openCount"
+        SELECT g."customerKey", g."mostUrgentAt", g."openCount",
+               ${OVERDUE_COUNT} AS "overdueCount"
         FROM "chatbot_customer_groups" g
         WHERE g."tenantId" = ${t} ${cursor} ${exists}
         ORDER BY g."mostUrgentAt" ASC NULLS LAST, g."customerKey" ASC
         LIMIT ${q.limit + 1})
-      SELECT p."mostUrgentAt", p."openCount", NULL::timestamp AS "lastClosedAt", x.*
+      SELECT p."mostUrgentAt", p."openCount", p."overdueCount", NULL::timestamp AS "lastClosedAt", x.*
       FROM page p
       CROSS JOIN LATERAL (
         SELECT ${COLUMNS}, (count(*) OVER ())::int AS "total"
@@ -298,7 +312,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
         GROUP BY r."customerKey" ${having}
         ORDER BY max(r."closedAt") DESC, r."customerKey" ASC
         LIMIT ${q.limit + 1})
-      SELECT NULL::timestamp AS "mostUrgentAt", 0 AS "openCount", p."lastClosedAt", x.*
+      SELECT NULL::timestamp AS "mostUrgentAt", 0 AS "openCount", 0 AS "overdueCount", p."lastClosedAt", x.*
       FROM page p
       CROSS JOIN LATERAL (
         SELECT ${COLUMNS}, (count(*) OVER ())::int AS "total"
@@ -311,6 +325,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
   listByCustomer(q: {
     customerKey: string;
     tab: InboxTab;
+    filters: InboxFilters;
     userId: string;
     now: Date;
     cutoff: Date;
@@ -320,8 +335,12 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     const closed = q.tab === 'resolved' || q.tab === 'cancelled';
     const preds = [
       Prisma.sql`r."customerKey" = ${q.customerKey}`,
-      ...inboxPredicates(q.tab, {}, q.userId, q.now, q.cutoff),
+      ...inboxPredicates(q.tab, q.filters, q.userId, q.now, q.cutoff),
     ];
+    // The same `q` predicate as the groups (R12 was decided by the service).
+    if (q.filters.search) {
+      preds.push(searchPredicate(q.filters.search, this.tenantId()));
+    }
     if (q.cursor) {
       preds.push(
         closed ? beforeClosedCursor(q.cursor) : afterOpenCursor(q.cursor),
@@ -364,7 +383,8 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
         ${closed7d('RESOLVED')} AS "resolved7d",
         ${closed7d('CANCELLED')} AS "cancelled7d",
         (SELECT count(*)::int FROM "chatbot_customer_groups" g
-          WHERE g."tenantId" = ${t}) AS "openGroups"`);
+          WHERE g."tenantId" = ${t}) AS "openGroups",
+        ${open(Prisma.sql`r."assigneeUserId" IS NULL`)} AS "unassigned"`);
     return row;
   }
 
@@ -637,5 +657,6 @@ type GroupRow = RequestRecord & {
   total: number;
   mostUrgentAt: Date | null;
   openCount: number;
+  overdueCount: number;
   lastClosedAt: Date | null;
 };
