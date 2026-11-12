@@ -54,6 +54,15 @@ function isUniqueViolation(error: unknown): boolean {
 
 type Db = ReturnType<TenantPrismaService['getClient']>;
 
+/** The backend's own record of a staff reply (never the bot's words). */
+interface StaffReply {
+  replyId: string;
+  requestId: string;
+  staffUserId: string;
+  /** The exact text the staff member submitted (`resolution.text`). */
+  text: string;
+}
+
 @Injectable()
 export class PrismaConversationMirrorStore implements ConversationMirrorStore {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -131,7 +140,8 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
               ${reply ? 'STAFF' : m.author}::"ConversationMessageAuthor",
               ${reply ? reply.staffUserId : null},
               ${reply ? reply.replyId : null},
-              ${m.waMessageId}, ${m.type}::"ConversationMessageType", ${m.text},
+              ${m.waMessageId}, ${m.type}::"ConversationMessageType",
+              ${reply ? reply.text : m.text},
               ${m.mediaId}, ${m.providerTimestamp}, ${m.observedAt}, now(),
               ${initialDeliveryStatus(m.direction, reply ? 'BOT' : m.author)}::"ConversationDeliveryStatus",
               now() + interval '12 months')`,
@@ -215,7 +225,10 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
   /**
    * Unit 10: the staff replies the bot says it sent. A `staffReplyId` must be
    * the id of a RESOLVED clarification of THIS tenant; the staff user comes
-   * from the backend's own record (`resolvedByActorId`), never from the batch.
+   * from the backend's own record (`resolvedByActorId`), never from the batch,
+   * and so does the TEXT (`resolution.text`, exactly what the staff member
+   * submitted): the text the bot sent with the message is not stored, so the
+   * bot credential cannot put arbitrary words in a named staff member's mouth.
    * A request that carries a `conversationRef` only matches its own chat. A
    * request WITHOUT one (the bot never told us its chat) matches the chat the
    * bot sent the reply to: the reply id is the message's primary key, so it can
@@ -229,27 +242,24 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
     tenantId: string,
     conversationRef: string,
     messages: ParsedMessage[],
-  ): Promise<
-    Map<string, { replyId: string; requestId: string; staffUserId: string }>
-  > {
+  ): Promise<Map<string, StaffReply>> {
     const wanted = messages.flatMap((m) =>
       m.staffReplyId ? [m.staffReplyId] : [],
     );
-    const found = new Map<
-      string,
-      { replyId: string; requestId: string; staffUserId: string }
-    >();
+    const found = new Map<string, StaffReply>();
     if (wanted.length === 0) return found;
     const rows = await db.$queryRaw<
       Array<{
         replyId: string;
         requestId: string;
         staffUserId: string | null;
+        text: string | null;
         conversationRef: string | null;
       }>
     >(Prisma.sql`
       SELECT "resolution" ->> 'replyId' AS "replyId", "id" AS "requestId",
-             "resolvedByActorId" AS "staffUserId", "conversationRef"
+             "resolvedByActorId" AS "staffUserId",
+             "resolution" ->> 'text' AS "text", "conversationRef"
       FROM "chatbot_requests"
       WHERE "tenantId" = ${tenantId}
         AND "kind" = 'CLARIFICATION' AND "status" = 'RESOLVED'
@@ -258,12 +268,14 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
       if (
         (row.conversationRef === null ||
           row.conversationRef === conversationRef) &&
-        row.staffUserId
+        row.staffUserId &&
+        row.text !== null
       ) {
         found.set(row.replyId, {
           replyId: row.replyId,
           requestId: row.requestId,
           staffUserId: row.staffUserId,
+          text: row.text,
         });
       }
     }

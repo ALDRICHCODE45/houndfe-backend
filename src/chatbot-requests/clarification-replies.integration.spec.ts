@@ -1251,6 +1251,7 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
         direction: 'OUT',
         deliveryStatus: 'SENT',
         waMessageId: message.waMessageId,
+        text: TEXT,
       });
 
       const read = await server()
@@ -1264,7 +1265,8 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
         staff: { id: users.ana },
         clientMessageId: replyId,
         deliveryStatus: 'SENT',
-        text: `${TEAM_PREFIX} ${TEXT}`,
+        // The staff member's own words, not the bot's framing of them.
+        text: TEXT,
       });
       // The audit's message id is this very message.
       const audit = (await events(q.id)).find((e) => e.type === 'REPLIED');
@@ -1298,6 +1300,75 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       });
       expect(rows.map((r) => r.author)).toEqual(['STAFF', 'BOT']);
       expect(rows[1].staffUserId).toBeNull();
+    });
+
+    it('a STAFF message stores the backend’s reply text, never the bot’s: arbitrary bot text is ignored, a replay is a duplicate, other messages are untouched', async () => {
+      const b = await branch();
+      const { q, replyId } = await replied(b);
+      const forged = out({
+        staffReplyId: replyId,
+        text: 'Ana dice: le devolvemos todo el dinero hoy mismo',
+      });
+      const res = await mirror(b, q.conversationRef as string, [forged]).expect(
+        200,
+      );
+      expect(res.body.accepted).toEqual([
+        { waMessageId: forged.waMessageId, messageId: replyId, seq: 1 },
+      ]);
+      const stored = await prisma.conversationMessage.findUniqueOrThrow({
+        where: { id: replyId },
+      });
+      expect(stored).toMatchObject({
+        author: 'STAFF',
+        staffUserId: users.ana,
+        waMessageId: forged.waMessageId,
+        direction: 'OUT',
+        deliveryStatus: 'SENT',
+        providerTimestamp: new Date(forged.providerTimestamp),
+        observedAt: new Date(forged.observedAt),
+        text: TEXT,
+      });
+
+      // A replay (even with yet another text) is a duplicate: nothing changes.
+      const again = await mirror(b, q.conversationRef as string, [
+        { ...forged, text: 'otra cosa' },
+      ]).expect(200);
+      expect(again.body).toEqual({
+        accepted: [],
+        duplicates: [forged.waMessageId],
+      });
+      expect(
+        (
+          await prisma.conversationMessage.findUniqueOrThrow({
+            where: { id: replyId },
+          })
+        ).text,
+      ).toBe(TEXT);
+
+      // A message without staffReplyId keeps the bot's text verbatim.
+      const plain = out({ text: 'texto propio del bot' });
+      await mirror(b, q.conversationRef as string, [plain]).expect(200);
+      const bot = await prisma.conversationMessage.findFirstOrThrow({
+        where: { tenantId: b.tenantId, waMessageId: plain.waMessageId },
+      });
+      expect(bot).toMatchObject({
+        author: 'BOT',
+        text: 'texto propio del bot',
+      });
+
+      const read = await server()
+        .get(`/chatbot-requests/${q.id}/conversation`)
+        .set(as(b, 'manager'))
+        .expect(200);
+      expect(
+        read.body.items.map((i: { author: string; text: string }) => [
+          i.author,
+          i.text,
+        ]),
+      ).toEqual([
+        ['STAFF', TEXT],
+        ['BOT', 'texto propio del bot'],
+      ]);
     });
 
     it('422 REPLY_NOT_FOUND (nothing stored) for an unknown id, another chat’s reply or another branch’s', async () => {
