@@ -79,17 +79,36 @@ export class LiveSessionSweepStore {
     // `startDeadlineAt`; older rows (no snapshot) at `startedAt` + the default.
     const startCut = new Date(now.getTime() - SESSION_TIMING.startTimeoutMs);
     const endCut = new Date(now.getTime() - SESSION_TIMING.endingTimeoutMs);
-    // ACTIVE sessions are idle-checked against the chat's last customer
-    // message too, so the cheap filter is the activation time only.
     const idleCut = new Date(now.getTime() - SESSION_TIMING.idleEndMs);
+    // Only sessions that are DUE come back: one SELECT per state, each on its
+    // own partial index of the migration (STARTING deadline / STARTING legacy /
+    // ENDING / ACTIVE), joined by UNION ALL. The idle branch also requires the
+    // chat's last customer message to be older than the idle cut (the same rule
+    // `dueSessionAction` applies under the lock), so a long-running session
+    // whose customer is still writing is never a candidate. A single OR over
+    // the table made the planner walk (tenantId, id) and filter every row, and
+    // not-due candidates filled the batch ahead of due ones (docs/perf/
+    // unit-11-live-conversation.md).
     const candidates = await this.prisma.$queryRaw<Candidate[]>(Prisma.sql`
-      SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
-      WHERE (s."state" = 'STARTING' AND s."startDeadlineAt" <= ${now})
-         OR (s."state" = 'STARTING' AND s."startDeadlineAt" IS NULL
-             AND s."startedAt" <= ${startCut})
-         OR (s."state" = 'ENDING' AND s."endingAt" <= ${endCut})
-         OR (s."state" = 'ACTIVE' AND s."activeAt" <= ${idleCut})
-      ORDER BY s."tenantId", s."id" LIMIT ${this.batchSize}`);
+      SELECT d."id", d."tenantId", d."requestId" FROM (
+        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        WHERE s."state" = 'STARTING' AND s."startDeadlineAt" <= ${now}
+        UNION ALL
+        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        WHERE s."state" = 'STARTING' AND s."startDeadlineAt" IS NULL
+          AND s."startedAt" <= ${startCut}
+        UNION ALL
+        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        WHERE s."state" = 'ENDING' AND s."endingAt" <= ${endCut}
+        UNION ALL
+        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        JOIN "chatbot_conversations" c
+          ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
+        WHERE s."state" = 'ACTIVE' AND s."activeAt" <= ${idleCut}
+          AND (c."lastCustomerMessageAt" IS NULL
+               OR c."lastCustomerMessageAt" <= ${idleCut})
+      ) d
+      ORDER BY d."tenantId", d."id" LIMIT ${this.batchSize}`);
     result.candidates = candidates.length;
     for (const candidate of candidates) {
       try {
@@ -130,6 +149,17 @@ export class LiveSessionSweepStore {
    * notice is not held.
    */
   async runNoticeBatch(now: Date = new Date()): Promise<{ noticed: number }> {
+    // Only DUE sessions are candidates: a new customer message to announce, or
+    // a level whose wait has elapsed (the same rule `notify` applies under the
+    // lock). A waiting session that is not due yet used to stay a candidate
+    // until its 15 min level was written, and with enough of them the batch of
+    // 100 never reached the due ones.
+    const fiveCut = new Date(
+      now.getTime() - SESSION_TIMING.unansweredAttendeeMs,
+    );
+    const fifteenCut = new Date(
+      now.getTime() - SESSION_TIMING.unansweredReassignMs,
+    );
     const candidates = await this.prisma.$queryRaw<Candidate[]>(Prisma.sql`
       SELECT s."id", s."tenantId", s."requestId"
       FROM "chatbot_live_sessions" s
@@ -138,7 +168,10 @@ export class LiveSessionSweepStore {
       WHERE s."state" = 'ACTIVE'
         AND c."lastCustomerMessageAt" > s."lastStaffActivityAt"
         AND (s."customerNoticeAt" IS DISTINCT FROM c."lastCustomerMessageAt"
-             OR s."unansweredLevel" < 15)
+             OR (s."unansweredLevel" < 5
+                 AND c."lastCustomerMessageAt" <= ${fiveCut})
+             OR (s."unansweredLevel" < 15
+                 AND c."lastCustomerMessageAt" <= ${fifteenCut}))
       ORDER BY s."tenantId", s."id" LIMIT ${this.batchSize}`);
     let noticed = 0;
     for (const candidate of candidates) {
@@ -205,6 +238,10 @@ export class LiveSessionSweepStore {
       folio: request.folio,
       subtype: request.subtype,
     };
+    // SAFETY: `OutboxClient` is the structural subset of the transaction
+    // client that `enqueueNotice` uses (`$queryRaw` / `$executeRaw`). `tx` is
+    // the same root transaction client, and every notice names its own
+    // `tenantId` (a system flow), so the tenant extension is never relied on.
     const outbox = tx as unknown as OutboxClient;
     let written = 0;
     let level = session.unansweredLevel;

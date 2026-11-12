@@ -10,7 +10,7 @@ Shapes in this document come from the controller, DTOs, service and their specs 
 - The sweep, the 50 % / 80 % / overdue notices and the escalation notices (unit 7c). The deadlines already exist on every request (`claimDeadlineAt`, `resolveDeadlineAt`); nothing marks a request overdue yet.
 - Scheduled conversations (unit 14). `scheduling` and `enabledSubtypes` are **stored only**: saving them changes nothing else yet.
 - `slaPaused` / `slaResumesAt` on request rows still come back `false` / `null`. Do not build UI on them yet.
-- Template sending (`templateName` is stored; the send command is unit 11).
+- ~~Template sending~~ — done in unit 11: `POST /chatbot-requests/:id/template` uses `templateName`, `templateLanguageCode` and `templateCostText` (handoff 20, section 3c).
 
 ## 1. Rules
 
