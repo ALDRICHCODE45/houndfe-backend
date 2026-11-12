@@ -3900,6 +3900,11 @@ model ChatbotRequest {
   // §3.8 history filters; the main history order index is partial (migration).
   @@index([tenantId, subtype, closedAt(sort: Desc)])
   @@index([tenantId, resolvedByActorId, closedAt(sort: Desc)])
+  // Migration-only partial index (20261112060000_chatbot_requests_counts_index):
+  // `chatbot_requests_open_unassigned_idx` ("tenantId") WHERE status IN ('NEW',
+  // 'IN_PROGRESS') AND "assigneeUserId" IS NULL — the index-only scan behind the
+  // inbox `counts.unassigned` subquery (its predicate must stay textually the
+  // store's OPEN fragment plus `assigneeUserId IS NULL`).
   @@map("chatbot_requests")
 }
 

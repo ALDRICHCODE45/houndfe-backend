@@ -688,6 +688,39 @@ describeIfDb('chatbot inbox follow-ups, S9 (PostgreSQL)', () => {
         expect(nodes.map((n) => n['Node Type'])).not.toContain('HashAggregate');
       });
 
+      it('keeps every count subquery on its own partial index (unassigned index-only, windowClosingSoon by window)', async () => {
+        await get('/chatbot-requests/counts', 'manager', big);
+        log.length = 0;
+        await get('/chatbot-requests/counts', 'manager', big);
+        const counted = log.find((e) => e.query.includes('"unassigned"'));
+        expect(counted).toBeDefined();
+        const sql = inline(counted!.query, counted!.params);
+        const rows = await prisma.$queryRawUnsafe<any[]>(
+          `EXPLAIN (FORMAT JSON) ${sql}`,
+        );
+        const nodes = nodesOf(rows[0]['QUERY PLAN'][0].Plan as PlanNode);
+        // No subquery of the statement reads the requests table sequentially.
+        expect(
+          nodes.filter(
+            (n) =>
+              n['Node Type'] === 'Seq Scan' &&
+              n['Relation Name'] === 'chatbot_requests',
+          ),
+        ).toEqual([]);
+        // `unassigned`: the partial index holds exactly the rows it counts.
+        const unassigned = nodes.filter(
+          (n) => n['Index Name'] === 'chatbot_requests_open_unassigned_idx',
+        );
+        expect(unassigned.map((n) => n['Node Type'])).toEqual([
+          'Index Only Scan',
+        ]);
+        // `windowClosingSoon` (OPEN + (now, now + warning]): the open window
+        // index, never the plain open index plus a heap filter.
+        expect(nodes.map((n) => n['Index Name'])).toContain(
+          'chatbot_requests_open_window_idx',
+        );
+      });
+
       it('keeps the counts inside the perf target (p95 < 200 ms)', async () => {
         const samples: number[] = [];
         for (let i = 0; i < 40; i++) {
