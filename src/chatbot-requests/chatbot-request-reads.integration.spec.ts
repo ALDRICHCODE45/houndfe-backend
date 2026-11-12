@@ -664,6 +664,10 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         windowClosingSoon: 1,
         scheduled: 1,
         needsReschedule: 0,
+        // S8 additions (no closed requests here; one group per open customer).
+        resolved7d: 0,
+        cancelled7d: 0,
+        openGroups: 4,
       });
       expect(claimed.id).toBeDefined();
       await prisma.tenant.delete({ where: { id: t } });

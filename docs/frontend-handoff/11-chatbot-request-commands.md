@@ -96,6 +96,8 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 422 | `CUSTOMER_PHONE_MISMATCH` | `link-customer` to a customer whose phone is not the request's (section 3.6) | ✓ |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; retry with the **same** key | — |
 
+**Why a button is missing (v1.3).** The inbox rows and the detail (handoff 14, sections 14.1 and 14.4) carry `deniedActions: [{action, code}]` with the codes of this table that depend on the caller or the state: `INSUFFICIENT_PERMISSIONS`, `REQUEST_CLAIMED_BY_OTHER`, `NOT_ASSIGNEE` and `CANCEL_NOT_ALLOWED`. They are the same codes these commands answer, from the same rules, so a disabled button can show the reason the command would give. `allowedActions` on a row is a hint: the command can still answer `409` if the request changed after the list was read.
+
 **Order of checks.** The first failing check answers; later ones are not evaluated. A stale tab that tries to claim someone else's request therefore sees who has it, not a bare version conflict.
 
 | Route | Order |

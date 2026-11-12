@@ -431,3 +431,20 @@ Planning:
 Planning Time: 0.443 ms
 Execution Time: 2.210 ms
 ```
+
+## S8 additions (v1.3): counts, row fields
+
+Proof lives in `src/chatbot-requests/chatbot-inbox-additions.integration.spec.ts` (regular integration spec, `pnpm test:integration`, no `PERF=1`). Timings there go through Supertest (HTTP, guards stubbed), so they include the HTTP stack and are **not** comparable with the service-level numbers above (the load test was **not** rerun for S8: it writes its report to `/tmp`).
+
+| Check | Limit | Measured | Verdict |
+| --- | --- | --- | --- |
+| counts p95 (12,000 closed over 400 days + 3,000 groups, `VACUUM ANALYZE`, 40 samples, via HTTP) | < 200 ms | p50 7.2 / p95 9.5 / max 12.6 ms | PASS |
+| groups page of 25 (4,000 open over 1,500 customers, with the S8 columns, via HTTP, 30 samples) | < 200 ms | p50 22.8 / p95 31.0 / max 32.7 ms | PASS |
+| counts statement: no sequential scan of `chatbot_requests`, uses the partial `chatbot_requests_history_idx`, no `Sort`, no `HashAggregate` | EXPLAIN | asserted on the real statement (`EXPLAIN (FORMAT JSON)`) | PASS |
+| statements per read do not grow with the rows (groups 2 vs 50 groups, closed tab, history, by-customer, detail with 15 more open rows) | constant | equal in every pair | PASS |
+
+- **`resolved7d` / `cancelled7d`** are two scalar subqueries `status = X AND closedAt >= now − 7 d`, served by the partial history index `(tenantId, closedAt DESC, id DESC) WHERE status IN ('RESOLVED','CANCELLED')`; the status filter costs one heap fetch per row of the 7-day window only (bounded: about 2 % of a tenant's rows at 400 days of history). With only a few thousand rows in total the planner prefers a sequential scan (cheaper at that size); the spec sizes the table so the choice is the real one.
+- **`openGroups`** counts the tenant's rows of `chatbot_customer_groups` (one per customer with open requests, deleted at 0), so it equals the number of groups of the open tab. It is O(open customers), a few thousand at the sized load.
+- **Row fields** add no round trip: `cancelReason`/`staffCancelReason` are plain columns; `mergedInto` is a `CASE`-guarded subselect of the source's `MERGED` event (events index `(tenantId, requestId, createdAt)`, only for `SUPERSEDED` rows); `lastReleasedAt` (the claim clock's cycle start, the sweep's expression) is a `CASE`-guarded subselect only for `NEW` rows; `zoneHasValidation` is a primary-key lookup only for `DELIVERY_ZONE` rows. `slaLevel` is pure CPU over the settings row the pause lookup already read (one lookup per response, shared by every row).
+- **Known cost:** the `NEW` rows pay one events-index probe each for `lastReleasedAt`. At 10 rows per group and 25 groups that is at most 250 probes inside the same statement (included in the groups figure above).
+

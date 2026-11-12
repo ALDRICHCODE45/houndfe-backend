@@ -141,8 +141,11 @@ export class ChatbotRequestReadsController {
   @Get(':id/merge-candidates')
   @Header('Cache-Control', 'no-store')
   @RequirePermissions(READ, UPDATE)
-  mergeCandidates(@Param('id', ParseUUIDPipe) id: string) {
-    return this.reads.mergeCandidates(id);
+  mergeCandidates(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: StaffRequest,
+  ) {
+    return this.reads.mergeCandidates(id, this.reader(req));
   }
 
   /** Fail closed if a guard was bypassed: no ability, no read. */

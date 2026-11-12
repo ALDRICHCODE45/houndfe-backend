@@ -17,6 +17,7 @@ import {
   type ChatbotRequestKind,
   type ChatbotRequestStatus,
   type ChatbotRequestSubtype,
+  type StaffCancelReason,
 } from '../domain/chatbot-request.commands';
 import type { CustomerKeySealer } from '../domain/customer-key-sealer';
 import { parseInboxSearch, type InboxSearch } from '../domain/inbox-search';
@@ -24,14 +25,16 @@ import { actorDisplayName } from '../domain/actor-display-name';
 import type { PermissionCheck } from '../domain/resolve-permissions';
 import {
   closedWindowCutoff,
-  computeAllowedActions,
+  computeActionAvailability,
   decodeCursor,
   encodeCursor,
   HISTORY_MAX_RANGE_DAYS,
   isSaneDate,
+  type ActionAvailability,
   type CursorKind,
 } from '../domain/staff-inbox';
 import { toStaffPhone } from '../domain/staff-phone';
+import type { SlaAnchors, SlaLevel } from '../domain/chatbot-sla';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   ChatbotRequestCommandError,
@@ -52,10 +55,27 @@ export const SLA_PAUSE_READER = Symbol('SLA_PAUSE_READER');
  */
 export interface SlaPauseReader {
   pauseAt(now: Date): Promise<{ paused: boolean; resumesAt: Date | null }>;
+  /**
+   * S8: the same single policy lookup, serving `slaPaused` AND `slaLevel`.
+   * Optional so a reader that only knows `pauseAt` keeps working (levels read
+   * as `null`). `level` is pure CPU over the loaded policy.
+   */
+  viewAt?(now: Date): Promise<{
+    pause: { paused: boolean; resumesAt: Date | null };
+    level(anchors: SlaAnchors): SlaLevel | null;
+  }>;
 }
 
 type SlaPause = { paused: boolean; resumesAt: Date | null };
 const NOT_PAUSED: SlaPause = { paused: false, resumesAt: null };
+
+/** What one response needs from the tenant's policy: built once per call. */
+interface SlaView {
+  pause: SlaPause;
+  /** `null` for a closed row, no deadline, or a failed computation. */
+  levelOf(row: RequestRecord): SlaLevel | null;
+}
+const NO_VIEW: SlaView = { pause: NOT_PAUSED, levelOf: () => null };
 
 export type InboxTab = 'open' | 'resolved' | 'cancelled' | 'scheduled';
 export type AssigneeFilter =
@@ -100,6 +120,23 @@ export interface RequestRecord {
   resolvedByActorId: string | null;
   resolvedByDisplayName: string | null;
   urgencyAt: Date | null;
+  /**
+   * S8, all optional so a store that does not select them (and the pre-S8
+   * fixtures) keep working: they read as "unknown / none".
+   */
+  cancelReason?:
+    | 'CUSTOMER_WITHDREW'
+    | 'SUPERSEDED'
+    | 'AUTO_RESOLVED'
+    | 'STAFF'
+    | null;
+  staffCancelReason?: StaffCancelReason | null;
+  /** Target of a staff merge, from the source's MERGED event (SUPERSEDED only). */
+  mergedInto?: { id: string; folio: number } | null;
+  /** Last RELEASED / AUTO_RELEASED event: the start of the claim clock cycle (NEW only). */
+  lastReleasedAt?: Date | null;
+  /** DELIVERY_ZONE only: the zone request has a validation (the detail's `zoneImpact` rule). */
+  zoneHasValidation?: boolean | null;
 }
 
 export interface GroupRecord {
@@ -187,6 +224,11 @@ export interface InboxCounts {
   windowClosingSoon: number;
   scheduled: number;
   needsReschedule: number;
+  /** S8: requests resolved / cancelled with `closedAt` in the last 7 days (D17 window). */
+  resolved7d: number;
+  cancelled7d: number;
+  /** S8: customers with at least one open request (the open tab's group count). */
+  openGroups: number;
 }
 
 interface PageQuery {
@@ -270,23 +312,53 @@ export class ChatbotRequestReadsService {
   /**
    * An empty page has no row to flag: it skips the settings lookup.
    *
-   * Fails soft: `slaPaused` is a derived hint, so a tenant whose policy cannot
-   * be loaded or whose calendar cannot be built (corrupt settings, the case the
-   * SLA sweep isolates per tenant) reads as "not paused" instead of turning the
-   * staff inbox into a 500. One line per failed lookup (not per row), with the
-   * tenant id and the error class only: an error message can carry settings
-   * values or customer data.
+   * Fails soft: `slaPaused` and `slaLevel` are derived hints, so a tenant whose
+   * policy cannot be loaded or whose calendar cannot be built (corrupt
+   * settings, the case the SLA sweep isolates per tenant) reads as "not
+   * paused, no level" instead of turning the staff inbox into a 500. One line
+   * per failed call (not per row), with the tenant id and the error class
+   * only: an error message can carry settings values or customer data.
    */
-  private async pause(now: Date, empty = false): Promise<SlaPause> {
-    if (!this.pauseReader || empty) return NOT_PAUSED;
-    try {
-      return await this.pauseReader.pauseAt(now);
-    } catch (error) {
+  private async slaView(now: Date, empty = false): Promise<SlaView> {
+    if (!this.pauseReader || empty) return NO_VIEW;
+    const tenant = this.store.tenantId();
+    let warned = false;
+    const warn = (what: string, error: unknown) => {
+      if (warned) return;
+      warned = true;
       const kind = error instanceof Error ? error.constructor.name : 'unknown';
-      this.logger.warn(
-        `sla pause lookup failed, reading as not paused (tenant ${this.store.tenantId()}, ${kind})`,
-      );
-      return NOT_PAUSED;
+      this.logger.warn(`${what} (tenant ${tenant}, ${kind})`);
+    };
+    try {
+      if (!this.pauseReader.viewAt) {
+        return {
+          pause: await this.pauseReader.pauseAt(now),
+          levelOf: () => null,
+        };
+      }
+      const view = await this.pauseReader.viewAt(now);
+      return {
+        pause: view.pause,
+        levelOf: (row) => {
+          if (row.status !== 'NEW' && row.status !== 'IN_PROGRESS') return null;
+          try {
+            return view.level({
+              subtype: row.subtype,
+              status: row.status,
+              createdAt: row.createdAt,
+              scheduledFor: row.scheduledFor,
+              lastReleasedAt: row.lastReleasedAt ?? null,
+              overdueAt: row.overdueAt,
+            });
+          } catch (error) {
+            warn('sla level failed, reading as null', error);
+            return null;
+          }
+        },
+      };
+    } catch (error) {
+      warn('sla pause lookup failed, reading as not paused', error);
+      return NO_VIEW;
     }
   }
 
@@ -326,7 +398,7 @@ export class ChatbotRequestReadsService {
         1,
       ),
     });
-    const pause = await this.pause(now, records.length === 0);
+    const view = await this.slaView(now, records.length === 0);
     const page = records.slice(0, limit);
     const customers = await this.customerIndex(page.flatMap((g) => g.requests));
     const items = page.map((group) => {
@@ -350,7 +422,7 @@ export class ChatbotRequestReadsService {
           ? { lastClosedAt: iso(group.lastClosedAt) }
           : {}),
         openCount: group.openCount,
-        requests: group.requests.map((r) => this.toRow(r, pause)),
+        requests: group.requests.map((r) => this.toRow(r, view, reader)),
         moreRequests: group.moreRequests,
       };
     });
@@ -393,11 +465,11 @@ export class ChatbotRequestReadsService {
         open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
       ),
     });
-    const pause = await this.pause(now, records.length === 0);
+    const view = await this.slaView(now, records.length === 0);
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
-      items: page.map((r) => this.toRow(r, pause)),
+      items: page.map((r) => this.toRow(r, view, reader)),
       nextCursor:
         records.length > limit && last
           ? encodeCursor(
@@ -465,7 +537,7 @@ export class ChatbotRequestReadsService {
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
-      items: page.map((r) => this.toRow(r, NOT_PAUSED)),
+      items: page.map((r) => this.toRow(r, NO_VIEW, reader)),
       nextCursor:
         records.length > limit && last
           ? encodeCursor([iso(last.closedAt), last.id])
@@ -479,8 +551,8 @@ export class ChatbotRequestReadsService {
     const record = await this.store.findDetail(id, now);
     if (!record) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
     const { request, customer } = record;
-    const pause = await this.pause(now);
-    const row = this.toRow(request, pause);
+    const view = await this.slaView(now);
+    const row = this.toRow(request, view, reader);
     const audit = record.audit.slice(0, AUDIT_IN_DETAIL);
     const lastAudit = audit[audit.length - 1];
     const resolved = request.status === 'RESOLVED' && request.resolvedAt;
@@ -530,7 +602,9 @@ export class ChatbotRequestReadsService {
           paymentStatus: o.paymentStatus,
         })),
       },
-      otherOpenRequests: record.otherOpen.map((r) => this.toRow(r, pause)),
+      otherOpenRequests: record.otherOpen.map((r) =>
+        this.toRow(r, view, reader),
+      ),
       decision: record.decision ? { ...record.decision, resolution } : null,
       ...(record.zoneImpact ? { zoneImpact: record.zoneImpact } : {}),
       deliveries: record.deliveries.map((d) => ({
@@ -547,7 +621,7 @@ export class ChatbotRequestReadsService {
         record.audit.length > AUDIT_IN_DETAIL && lastAudit
           ? encodeCursor([iso(lastAudit.createdAt), lastAudit.id])
           : null,
-      allowedActions: computeAllowedActions(
+      ...computeActionAvailability(
         toState(request),
         reader.ability,
         reader.userId,
@@ -601,18 +675,44 @@ export class ChatbotRequestReadsService {
     };
   }
 
-  /** `GET /chatbot-requests/:id/merge-candidates` (§12.11). */
-  async mergeCandidates(id: string) {
+  /**
+   * `GET /chatbot-requests/:id/merge-candidates` (§12.11). With a `reader` its
+   * rows carry `allowedActions` / `deniedActions` like every row; the
+   * controller always passes it.
+   */
+  async mergeCandidates(id: string, reader?: StaffReader) {
     const records = await this.store.mergeCandidates(id);
     if (!records) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
-    const pause = await this.pause(this.clock(), records.length === 0);
-    return { items: records.map((r) => this.toRow(r, pause)) };
+    const view = await this.slaView(this.clock(), records.length === 0);
+    return { items: records.map((r) => this.toRow(r, view, reader)) };
   }
 
   // ------------------------------------------------------------- shaping
 
-  private toRow(r: RequestRecord, pause: SlaPause) {
+  /**
+   * One list row. `reader` (the caller) feeds `allowedActions` /
+   * `deniedActions`; they are computed from the row's own columns and the
+   * caller's abilities, with no query. A row never shows MERGE or
+   * LINK_CUSTOMER (they need facts only the detail loads) and an action can
+   * still fail at command time if the request changed meanwhile.
+   */
+  private toRow(r: RequestRecord, view: SlaView, reader?: StaffReader) {
+    const { pause } = view;
     const state = toState(r);
+    const open = r.status === 'NEW' || r.status === 'IN_PROGRESS';
+    // Without a caller (an internal call that has none) nothing is offered:
+    // the HTTP routes always pass one.
+    const actions: ActionAvailability = reader
+      ? computeActionAvailability(state, reader.ability, reader.userId, {
+          // The detail hides RESOLVE on a zone request with no validation
+          // (the route answers 404). A row follows that rule conservatively:
+          // unknown counts as "no validation".
+          resolveTargetMissing:
+            r.subtype === 'DELIVERY_ZONE' && r.zoneHasValidation !== true,
+        })
+      : { allowedActions: [], deniedActions: [] };
+    const cancelReason = open ? null : (r.cancelReason ?? null);
+    const merged = r.mergedInto;
     const paused =
       pause.paused && (r.status === 'NEW' || r.status === 'IN_PROGRESS');
     return {
@@ -647,6 +747,23 @@ export class ChatbotRequestReadsService {
         ? { id: r.resolvedByActorId, displayName: r.resolvedByDisplayName }
         : null,
       version: r.version,
+      // S8. Close cause: null on open and resolved rows. `staffCancelReason`
+      // only with STAFF; `mergedInto` only for a staff merge (SUPERSEDED).
+      // Internal notes never reach a row.
+      cancelReason,
+      staffCancelReason:
+        cancelReason === 'STAFF' ? (r.staffCancelReason ?? null) : null,
+      mergedInto:
+        cancelReason === 'SUPERSEDED' &&
+        merged &&
+        typeof merged.id === 'string' &&
+        typeof merged.folio === 'number'
+          ? { id: merged.id, folio: formatFolio(merged.folio) }
+          : null,
+      // The overdue mark wins and needs no policy, so it also holds when the
+      // settings cannot be read (the fail-soft path).
+      slaLevel: open ? (r.overdueAt ? 'OVERDUE' : view.levelOf(r)) : null,
+      ...actions,
     };
   }
 

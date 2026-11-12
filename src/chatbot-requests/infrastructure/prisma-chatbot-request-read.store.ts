@@ -28,8 +28,10 @@ import type {
   RequestRecord,
 } from '../application/chatbot-request-reads.service';
 import { readDecision } from './chatbot-request-decision.reader';
+import { LAST_RELEASED } from './chatbot-sla-policy';
 import { assignableUserWhere } from './assignable-users';
 import { phoneLookupPairs } from '../domain/canonical-phone';
+import { closedWindowCutoff } from '../domain/staff-inbox';
 import { actorDisplayName } from '../domain/actor-display-name';
 import { MERGEABLE_SUBTYPES } from '../domain/chatbot-request.commands';
 import type { CandidateRecord } from '../application/chatbot-request-reads.service';
@@ -44,6 +46,31 @@ const WINDOW_WARNING_MS = 2 * 3_600_000;
 
 const OPEN = Prisma.sql`r."status" IN ('NEW', 'IN_PROGRESS')`;
 const URGENCY = Prisma.sql`(CASE WHEN r."status" = 'NEW' THEN r."claimDeadlineAt" ELSE r."resolveDeadlineAt" END)`;
+/**
+ * S8 columns, each guarded by a CASE so PostgreSQL evaluates the correlated
+ * subquery only for the rows that need it (no extra round trip, no N+1):
+ *
+ *   mergedInto           the SOURCE side of the staff merge (SUPERSEDED rows):
+ *                        `{id, folio}` out of the MERGED event's data, via the
+ *                        `(tenantId, requestId, createdAt)` events index. Only
+ *                        those two keys are projected, never the whole `data`.
+ *   lastReleasedAt       start of the claim clock's cycle (NEW rows only; the
+ *                        same expression the sweep uses).
+ *   zoneHasValidation    DELIVERY_ZONE rows: the zone request has a validation
+ *                        (the detail's `zoneImpact` exists exactly then). One
+ *                        primary-key lookup.
+ */
+const MERGED_INTO = Prisma.sql`(CASE WHEN r."cancelReason" = 'SUPERSEDED' THEN (
+  SELECT jsonb_build_object('id', e."data" ->> 'intoRequestId', 'folio', e."data" -> 'intoFolio')
+  FROM "chatbot_request_events" e
+  WHERE e."tenantId" = r."tenantId" AND e."requestId" = r."id"
+    AND e."type" = 'MERGED' AND e."data" ->> 'role' = 'SOURCE'
+  ORDER BY e."createdAt" DESC LIMIT 1) END)`;
+const LAST_RELEASED_NEW = Prisma.sql`(CASE WHEN r."status" = 'NEW' THEN ${LAST_RELEASED} END)`;
+const ZONE_HAS_VALIDATION = Prisma.sql`(CASE WHEN r."subtype" = 'DELIVERY_ZONE' THEN EXISTS (
+  SELECT 1 FROM "delivery_zone_requests" z
+  WHERE z."tenantId" = r."tenantId" AND z."id" = r."deliveryZoneRequestId"
+    AND z."validationId" IS NOT NULL) END)`;
 const COLUMNS = Prisma.sql`
   r."id", r."folio", r."kind"::text AS "kind", r."subtype"::text AS "subtype",
   r."status"::text AS "status", r."version", r."customerKey", r."customerId",
@@ -51,7 +78,12 @@ const COLUMNS = Prisma.sql`
   r."claimedAt", r."claimDeadlineAt", r."resolveDeadlineAt", r."overdueAt",
   r."whatsappWindowClosesAt", r."scheduledFor", r."requiresTemplateAtStart",
   r."needsReschedule", r."summary", r."createdAt", r."closedAt",
-  r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt"`;
+  r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt",
+  r."cancelReason"::text AS "cancelReason",
+  r."staffCancelReason"::text AS "staffCancelReason",
+  ${MERGED_INTO} AS "mergedInto",
+  ${LAST_RELEASED_NEW} AS "lastReleasedAt",
+  ${ZONE_HAS_VALIDATION} AS "zoneHasValidation"`;
 const OPEN_ORDER = Prisma.sql`ORDER BY "urgencyAt" ASC NULLS LAST, r."createdAt" ASC, r."id" ASC`;
 const CLOSED_ORDER = Prisma.sql`ORDER BY r."closedAt" DESC, r."id" DESC`;
 
@@ -306,6 +338,14 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     const open = (extra: Prisma.Sql) => Prisma.sql`(
       SELECT count(*)::int FROM "chatbot_requests" r
       WHERE r."tenantId" = ${t} AND ${OPEN} AND ${extra})`;
+    // S8: closed in the last 7 days, the same D17 window the resolved and
+    // cancelled tabs use, so the number matches the tab. Wall clock, tenant
+    // scoped, served by the partial history index (tenantId, closedAt DESC).
+    const cutoff = closedWindowCutoff(now);
+    const closed7d = (status: 'RESOLVED' | 'CANCELLED') => Prisma.sql`(
+      SELECT count(*)::int FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${t} AND r."status" = ${status}::"ChatbotRequestStatus"
+        AND r."closedAt" >= ${cutoff})`;
     const [row] = await this.db.$queryRaw<InboxCounts[]>(Prisma.sql`
       SELECT
         (SELECT count(*)::int FROM "chatbot_requests" r
@@ -320,7 +360,11 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
           Prisma.sql`r."whatsappWindowClosesAt" > ${now} AND r."whatsappWindowClosesAt" <= ${new Date(now.getTime() + WINDOW_WARNING_MS)}`,
         )} AS "windowClosingSoon",
         ${open(Prisma.sql`r."scheduledFor" IS NOT NULL`)} AS "scheduled",
-        ${open(Prisma.sql`r."needsReschedule"`)} AS "needsReschedule"`);
+        ${open(Prisma.sql`r."needsReschedule"`)} AS "needsReschedule",
+        ${closed7d('RESOLVED')} AS "resolved7d",
+        ${closed7d('CANCELLED')} AS "cancelled7d",
+        (SELECT count(*)::int FROM "chatbot_customer_groups" g
+          WHERE g."tenantId" = ${t}) AS "openGroups"`);
     return row;
   }
 

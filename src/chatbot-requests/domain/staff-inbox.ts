@@ -16,8 +16,13 @@ import {
   release,
   resolve,
   type ChatbotRequestState,
+  type CommandResult,
 } from './chatbot-request.commands';
-import { canResolveSubtype, type PermissionCheck } from './resolve-permissions';
+import {
+  canResolveSubtype,
+  legacyResolvePermission,
+  type PermissionCheck,
+} from './resolve-permissions';
 
 /** D17: closed requests stay in the inbox this long; then they are history. */
 export const CLOSED_WINDOW_DAYS = 7;
@@ -66,79 +71,188 @@ export interface AllowedActionsOptions {
   hasLinkCandidate?: boolean;
 }
 
-export function computeAllowedActions(
+/**
+ * Why a command the caller would see is not available right now (S8). Only the
+ * codes below are ever listed, and only the code: no assignee, no permission
+ * name, nothing the row does not already show.
+ *
+ *   INSUFFICIENT_PERMISSIONS  a permission gate (the route guard, or the legacy
+ *                             permission of `resolve`); it always comes first,
+ *                             exactly like the command's own check order
+ *   REQUEST_CLAIMED_BY_OTHER  `claim` / `resolve` of a request someone holds
+ *   NOT_ASSIGNEE              `release` / `cancel` / `merge` of a request
+ *                             someone else holds, without the assignment
+ *                             permission
+ *   CANCEL_NOT_ALLOWED        a decision is resolved, never cancelled; a
+ *                             started live session pins the request
+ */
+export type DeniedCode =
+  | 'INSUFFICIENT_PERMISSIONS'
+  | 'REQUEST_CLAIMED_BY_OTHER'
+  | 'NOT_ASSIGNEE'
+  | 'CANCEL_NOT_ALLOWED';
+
+export interface DeniedAction {
+  action: AllowedAction;
+  code: DeniedCode;
+}
+
+export interface ActionAvailability {
+  allowedActions: AllowedAction[];
+  deniedActions: DeniedAction[];
+}
+
+/** The state-dependent codes worth showing; anything else means "does not apply". */
+const INFORMATIVE: readonly string[] = [
+  'REQUEST_CLAIMED_BY_OTHER',
+  'NOT_ASSIGNEE',
+  'CANCEL_NOT_ALLOWED',
+];
+
+/**
+ * What the command answers for this state, ignoring the permission gates:
+ * `'OK'`, `'NOT_APPLICABLE'` or a command error code.
+ */
+type StateAnswer = string;
+
+const answerOf = (result: CommandResult): StateAnswer =>
+  result.ok ? 'OK' : result.error.code;
+
+/**
+ * The single evaluation behind `allowedActions` and `deniedActions` (rows and
+ * detail). Every action is the real command run against the row's state, plus
+ * the permission gates of its route:
+ *
+ *   - allowed: gates pass and the command would accept;
+ *   - denied:  the action applies to the state, but a gate fails
+ *              (`INSUFFICIENT_PERMISSIONS`, gates come first, as in the route)
+ *              or the command would answer one of the informative codes;
+ *   - neither: the action does not apply (release of a NEW request, a closed
+ *              row, a stale own re-claim, resolve of a clarification...).
+ *
+ * `MERGE` and `LINK_CUSTOMER` need facts only the detail loads
+ * (`hasMergeCandidate`, `customer`, `hasLinkCandidate`); without them they are
+ * in neither list, so a list row never shows them.
+ */
+export function computeActionAvailability(
   state: ChatbotRequestState,
   ability: PermissionCheck,
   userId: string,
   options: AllowedActionsOptions = {},
-): AllowedAction[] {
+): ActionAvailability {
   const actor = { userId, displayName: '-' };
   const now = new Date();
   const expectedVersion = state.version;
   const canUpdate = ability.can('update', 'ChatbotRequest');
   const canReassign = ability.can('update', 'ChatbotRequestAssignment');
-  const offered: Array<[AllowedAction, boolean]> = [
-    ['CLAIM', canUpdate && claim(state, { actor, expectedVersion, now }).ok],
+  const heldByAnother = heldByOther(state, actor);
+  const resolvable = legacyResolvePermission(state.subtype) !== null;
+
+  const evaluated: Array<[AllowedAction, boolean, StateAnswer]> = [
+    [
+      'CLAIM',
+      canUpdate,
+      answerOf(claim(state, { actor, expectedVersion, now })),
+    ],
     [
       'RELEASE',
-      canUpdate &&
+      canUpdate,
+      answerOf(
         release(state, {
           actor,
           expectedVersion,
           actorCanReassign: canReassign,
-        }).ok,
+        }),
+      ),
     ],
     [
       'REASSIGN',
-      canReassign &&
+      canReassign,
+      answerOf(
         reassign(state, {
           actor,
           expectedVersion,
           toUser: { userId: `${userId}:candidate`, displayName: '-' },
           now,
-        }).ok,
+        }),
+      ),
     ],
     [
       'RESOLVE',
-      canUpdate &&
-        !options.resolveTargetMissing &&
-        canResolveSubtype(ability, state.subtype) &&
-        resolve(state, { actor, expectedVersion, action: 'RESOLVE', now }).ok,
+      // Route gate, then the subtype's legacy permission (service check).
+      canUpdate && canResolveSubtype(ability, state.subtype),
+      // No wrapped resolve for the subtype (422) or no zone validation (404):
+      // the action does not exist for this row.
+      options.resolveTargetMissing || !resolvable
+        ? 'NOT_APPLICABLE'
+        : answerOf(
+            resolve(state, { actor, expectedVersion, action: 'RESOLVE', now }),
+          ),
     ],
     [
       'MERGE',
-      // Same rule as `cancelByStaff` (M5): someone else's request needs the
-      // assignment permission.
-      canUpdate &&
-        options.hasMergeCandidate === true &&
-        canMergeSource(state) &&
-        !(heldByOther(state, actor) && !canReassign),
+      canUpdate,
+      options.hasMergeCandidate !== true || !canMergeSource(state)
+        ? 'NOT_APPLICABLE'
+        : // Same rule as `cancelByStaff` (M5): someone else's request needs
+          // the assignment permission.
+          heldByAnother && !canReassign
+          ? 'NOT_ASSIGNEE'
+          : 'OK',
     ],
     [
       'LINK_CUSTOMER',
-      canUpdate &&
-        options.customer !== undefined &&
-        options.hasLinkCandidate === true &&
-        linkCustomer(state, {
-          actor,
-          expectedVersion,
-          customerId: 'candidate',
-          current: options.customer,
-        }).ok,
+      canUpdate,
+      options.customer === undefined || options.hasLinkCandidate !== true
+        ? 'NOT_APPLICABLE'
+        : answerOf(
+            linkCustomer(state, {
+              actor,
+              expectedVersion,
+              customerId: 'candidate',
+              current: options.customer,
+            }),
+          ),
     ],
     [
       'CANCEL',
-      canUpdate &&
+      canUpdate,
+      answerOf(
         cancelByStaff(state, {
           actor,
           actorCanReassign: canReassign,
           expectedVersion,
           reason: 'DUPLICATE',
           now,
-        }).ok,
+        }),
+      ),
     ],
   ];
-  return offered.filter(([, allowed]) => allowed).map(([action]) => action);
+
+  const allowedActions: AllowedAction[] = [];
+  const deniedActions: DeniedAction[] = [];
+  for (const [action, permitted, answer] of evaluated) {
+    if (answer === 'OK' && permitted) {
+      allowedActions.push(action);
+    } else if (answer === 'OK' || INFORMATIVE.includes(answer)) {
+      deniedActions.push({
+        action,
+        code: permitted ? (answer as DeniedCode) : 'INSUFFICIENT_PERMISSIONS',
+      });
+    }
+  }
+  return { allowedActions, deniedActions };
+}
+
+/** Commands the caller can run right now (the `allowedActions` of S8's pair). */
+export function computeAllowedActions(
+  state: ChatbotRequestState,
+  ability: PermissionCheck,
+  userId: string,
+  options: AllowedActionsOptions = {},
+): AllowedAction[] {
+  return computeActionAvailability(state, ability, userId, options)
+    .allowedActions;
 }
 
 /** Opaque cursor: base64url of a JSON array of strings or nulls. */

@@ -159,6 +159,49 @@ export function activeClock(
   };
 }
 
+/**
+ * Traffic light of an open request (S8): where `now` sits on its ACTIVE clock,
+ * in business time. `OK` before 50 %, `HALF` from 50 %, `ESCALATION` from 80 %,
+ * `OVERDUE` from the deadline. It reads the same `activeClock` instants the SLA
+ * sweep records its milestones from, with the same `<=` comparison, so it can
+ * never disagree with them (it is only never late: the sweep records a
+ * milestone on its next 30 s tick, this is exact at read time).
+ */
+export type SlaLevel = 'OK' | 'HALF' | 'ESCALATION' | 'OVERDUE';
+
+/**
+ * An open request whose `overdueAt` is set (it was overdue on some clock, and
+ * the mark is never cleared) is always `OVERDUE`, whatever its active clock
+ * says now: a request claimed after its claim deadline would otherwise read
+ * `OK` on its later resolve clock while `displayStatus` is `EXPIRED` and its
+ * assignee was already told it is overdue. The mark is a stored fact, so this
+ * needs no calendar. Callers pass open requests only.
+ *
+ * Otherwise `null` when the active clock has no deadline or the calendar
+ * cannot place one (no business time inside its horizon): the sweep treats both
+ * as "nothing to watch". Never throws for those; any other error propagates.
+ */
+export function slaLevel(
+  policy: SlaPolicy,
+  anchors: SlaAnchors,
+  now: Date,
+): SlaLevel | null {
+  if (anchors.overdueAt) return 'OVERDUE';
+  let clock: ActiveClock | null;
+  try {
+    clock = activeClock(policy, anchors);
+  } catch (error) {
+    if (!(error instanceof BusinessCalendarError)) throw error;
+    return null;
+  }
+  if (!clock) return null;
+  let level: SlaLevel = 'OK';
+  for (const { milestone, at } of clock.instants) {
+    if (at.getTime() <= now.getTime()) level = milestone;
+  }
+  return level;
+}
+
 function nextCheck(
   policy: SlaPolicy,
   anchors: SlaAnchors,

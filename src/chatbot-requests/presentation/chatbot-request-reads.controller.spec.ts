@@ -212,6 +212,7 @@ describe('ChatbotRequestReadsController', () => {
     await get(`/chatbot-requests/${ID}/audit?limit=7`);
     expect(service.audit).toHaveBeenCalledWith(ID, { limit: 7 });
     await get(`/chatbot-requests/${ID}/merge-candidates`);
-    expect(service.mergeCandidates).toHaveBeenCalledWith(ID);
+    // S8: the caller goes along, so the rows carry allowedActions.
+    expect(service.mergeCandidates).toHaveBeenCalledWith(ID, expect.anything());
   });
 });
