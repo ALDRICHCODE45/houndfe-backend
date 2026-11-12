@@ -36,7 +36,9 @@ import {
 import { slaColumnsForTransition } from './chatbot-sla-policy';
 import {
   beginSessionEnding,
+  emitFailedMessageStatuses,
   emitSessionEvent,
+  failDeferredStaffMessages,
   markEnded,
   revertStart,
 } from './live-session-writes';
@@ -48,6 +50,8 @@ export interface SessionSweepResult {
   idleEnded: number;
   /** T11d: live conversation notices written (customer wrote, 5 and 15 min). */
   noticed: number;
+  /** S16 3 backstop: deferred staff messages settled FAILED by `runDeferredBatch`. */
+  settledDeferred: number;
   skipped: number;
   failed: number;
 }
@@ -72,6 +76,7 @@ export class LiveSessionSweepStore {
       ended: 0,
       idleEnded: 0,
       noticed: 0,
+      settledDeferred: 0,
       skipped: 0,
       failed: 0,
     };
@@ -186,6 +191,88 @@ export class LiveSessionSweepStore {
       }
     }
     return { noticed };
+  }
+
+  /**
+   * S16 3 backstop (verify F1): a bot ACK `DEFERRED_WINDOW_CLOSED` that read
+   * the session as ACTIVE just before staff finished can commit after the
+   * finish skipped its item (`SKIP LOCKED`), leaving a deferred staff message
+   * on an epoch that is over. The end transitions re-settle, but an ACK still
+   * in flight at that moment can slip past too, so this settles whatever is
+   * left. Only DUE rows are read: the partial index `chatbot_feed_items_
+   * deferred_idx` holds just the few pending deferred items, and the
+   * `NOT EXISTS (… ACTIVE)` keeps the waiting messages of live sessions out of
+   * the batch (they would crowd out the due ones). One request per candidate,
+   * one short transaction, request row `SKIP LOCKED` like the other phases.
+   */
+  async runDeferredBatch(): Promise<{ settledDeferred: number }> {
+    const candidates = await this.prisma.$queryRaw<
+      Array<{ tenantId: string; requestId: string }>
+    >(Prisma.sql`
+      SELECT DISTINCT f."tenantId", f."requestId"
+      FROM (
+        SELECT f."tenantId", f."requestId", f."payload", f."cursor"
+        FROM "chatbot_feed_items" f
+        WHERE f."outcome" IN ('DEFERRED_WINDOW_CLOSED', 'DEFERRED_HUMAN_SESSION')
+          AND f."outcome" = 'DEFERRED_WINDOW_CLOSED'
+          AND f."ackedAt" IS NULL
+          AND f."type" = 'conversation.staff_message'
+          AND NOT EXISTS (
+            SELECT 1 FROM "chatbot_live_sessions" s
+            WHERE s."tenantId" = f."tenantId" AND s."requestId" = f."requestId"
+              AND s."epoch" = (f."payload"->>'handoffEpoch')::int
+              AND s."state" = 'ACTIVE')
+        ORDER BY f."cursor" LIMIT ${this.batchSize}
+      ) f`);
+    let settledDeferred = 0;
+    for (const candidate of candidates) {
+      try {
+        settledDeferred += await this.prisma.$transaction((tx) =>
+          this.settleDeferred(asTenantClient(tx), candidate),
+        );
+      } catch (error) {
+        this.logger.error(
+          `deferred settle failed for request ${candidate.requestId}: ${error instanceof Error ? error.name : 'unknown'}`,
+        );
+      }
+    }
+    return { settledDeferred };
+  }
+
+  private async settleDeferred(
+    tx: TenantClient,
+    { tenantId, requestId }: { tenantId: string; requestId: string },
+  ): Promise<number> {
+    const [request] = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT "id" FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}
+      FOR UPDATE SKIP LOCKED`);
+    if (!request) return 0;
+    // Under the request lock: the newest epoch decides. Every earlier epoch is
+    // over (one live session per chat); the newest only when it is not ACTIVE.
+    const [latest] = await tx.$queryRaw<{ epoch: number; state: string }[]>(
+      Prisma.sql`
+      SELECT s."epoch", s."state" FROM "chatbot_live_sessions" s
+      WHERE s."tenantId" = ${tenantId} AND s."requestId" = ${requestId}
+      ORDER BY s."epoch" DESC LIMIT 1 FOR UPDATE`,
+    );
+    const upToEpoch = latest
+      ? latest.state === 'ACTIVE'
+        ? latest.epoch - 1
+        : latest.epoch
+      : Number.MAX_SAFE_INTEGER;
+    const failed = await failDeferredStaffMessages(
+      tx,
+      tenantId,
+      requestId,
+      upToEpoch,
+    );
+    if (failed.length === 0) return 0;
+    // The realtime lock is the last lock of the transaction. No version bump
+    // and no `session.*` event: no request or session state changed, only
+    // message statuses.
+    await emitFailedMessageStatuses(tx, tenantId, requestId, failed);
+    return failed.length;
   }
 
   private async notify(
@@ -345,8 +432,23 @@ export class LiveSessionSweepStore {
 
     if (action === 'MARK_ENDED') {
       await markEnded(tx, session);
+      // S16 3 (verify F1): a window deferral whose ACK committed after the
+      // finish skipped its item is settled at ENDED.
+      const failed = await failDeferredStaffMessages(
+        tx,
+        tenantId,
+        requestId,
+        session.epoch,
+      );
       const version = await bump(tx, tenantId, requestId);
-      await emitSessionEvent(tx, tenantId, requestId, 'session.ended', version);
+      await emitSessionEvent(
+        tx,
+        tenantId,
+        requestId,
+        'session.ended',
+        version,
+        failed,
+      );
       return action;
     }
 

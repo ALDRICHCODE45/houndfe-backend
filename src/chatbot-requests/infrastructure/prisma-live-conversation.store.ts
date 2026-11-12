@@ -30,6 +30,7 @@ import { lockRequestRow, type TenantClient } from './chatbot-request-writes';
 import {
   bumpVersion,
   emitSessionEvent,
+  failDeferredStaffMessages,
   lockConversation,
   lockLatestSession,
   markActive,
@@ -159,6 +160,14 @@ export class PrismaLiveConversationStore {
         return { epoch, state, sessionState: 'ACTIVE' };
       }
       await markEnded(tx, latest);
+      // S16 3 (verify F1): a deferral whose ACK committed after the finish
+      // skipped its item (SKIP LOCKED) is still pending: settle it now.
+      const failed = await failDeferredStaffMessages(
+        tx,
+        tenantId,
+        latest.requestId,
+        latest.epoch,
+      );
       const version = await bumpVersion(tx, tenantId, latest.requestId);
       await emitSessionEvent(
         tx,
@@ -166,6 +175,7 @@ export class PrismaLiveConversationStore {
         latest.requestId,
         'session.ended',
         version,
+        failed,
       );
       return { epoch, state, sessionState: 'ENDED' };
     });
@@ -402,7 +412,7 @@ export class PrismaLiveConversationStore {
           tx,
           tenantId,
           request.id,
-          window.key,
+          window,
         );
         throw new ChatbotRequestCommandError('WINDOW_CLOSED', 409, current, {
           templateAllowed: template.allowed,
@@ -509,7 +519,12 @@ export class PrismaLiveConversationStore {
       lastCustomerMessageAt: Date | null;
       windowClosedAt: Date | null;
     },
-  ): Promise<{ open: boolean; closesAt: Date | null; key: Date }> {
+  ): Promise<{
+    open: boolean;
+    closesAt: Date | null;
+    key: Date;
+    lastCustomerAt: Date | null;
+  }> {
     const [row] = await tx.$queryRaw<
       { lastCustomerMessageAt: Date | null; createdAt: Date }[]
     >(Prisma.sql`
@@ -520,26 +535,37 @@ export class PrismaLiveConversationStore {
       row?.lastCustomerMessageAt ?? null,
       conversation.windowClosedAt,
     );
+    const lastCustomerAt =
+      [conversation.lastCustomerMessageAt, row?.lastCustomerMessageAt ?? null]
+        .filter((d): d is Date => d !== null)
+        .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
     return {
       open: closesAt !== null && closesAt.getTime() > Date.now(),
       closesAt,
       key: closesAt ?? row?.createdAt,
+      lastCustomerAt,
     };
   }
 
   /**
-   * Can a template be requested for this closed window? It needs the tenant's
-   * approved template name and no live template for the window: a row whose
-   * message is `FAILED` (Meta refused it, or a later failed status) may be
-   * replaced; QUEUED, SENT, DELIVERED, READ and UNKNOWN (it may have been
-   * sent, and it costs money) may not. The row is locked: a concurrent click
-   * waits for this transaction (the request row already serializes clicks).
+   * Can a template be requested now? It needs the tenant's approved template
+   * name and no live template since the customer last wrote: ANY `TEMPLATE`
+   * message of this request newer than the last customer message (chat or
+   * request row) whose status is not `FAILED` refuses it (QUEUED, SENT,
+   * DELIVERED, READ and UNKNOWN: it may have been sent, and it costs money). A
+   * `FAILED` one (Meta refused it, or a later failed status) may be replaced.
+   * The rule does NOT match the window key (`windowClosedAt`): that instant
+   * moves when a later 131047 raises the chat's `windowClosedAt`, and a second
+   * template would pass while the first is UNKNOWN (verify F3). The key only
+   * decides which once-per-window row a new template reuses. The rows are
+   * locked: a concurrent click waits for this transaction (the request row
+   * already serializes clicks).
    */
   private async templateOffer(
     tx: TenantClient,
     tenantId: string,
     requestId: string,
-    windowKey: Date,
+    window: { key: Date; lastCustomerAt: Date | null },
   ): Promise<{
     allowed: boolean;
     name: string | null;
@@ -548,20 +574,29 @@ export class PrismaLiveConversationStore {
     taken: boolean;
   }> {
     const settings = await readSettingsRow(tx, tenantId);
-    const [existing] = await tx.$queryRaw<
-      { id: string; deliveryStatus: string | null }[]
+    const rows = await tx.$queryRaw<
+      {
+        id: string;
+        sameWindow: boolean;
+        deliveryStatus: string | null;
+        since: boolean;
+      }[]
     >(Prisma.sql`
-      SELECT t."id", m."deliveryStatus"::text AS "deliveryStatus"
+      SELECT t."id", (t."windowClosedAt" = ${window.key}) AS "sameWindow",
+             m."deliveryStatus"::text AS "deliveryStatus",
+             (${window.lastCustomerAt}::timestamptz IS NULL
+              OR m."receivedAt" > ${window.lastCustomerAt}) AS "since"
       FROM "chatbot_session_templates" t
       LEFT JOIN "conversation_messages" m
         ON m."tenantId" = t."tenantId" AND m."id" = t."messageId"
       WHERE t."tenantId" = ${tenantId} AND t."requestId" = ${requestId}
-        AND t."windowClosedAt" = ${windowKey}
+      ORDER BY t."id"
       FOR UPDATE OF t`);
-    const taken =
-      !!existing &&
-      existing.deliveryStatus !== null &&
-      existing.deliveryStatus !== 'FAILED';
+    const taken = rows.some(
+      (r) =>
+        r.since && r.deliveryStatus !== null && r.deliveryStatus !== 'FAILED',
+    );
+    const existing = rows.find((r) => r.sameWindow);
     return {
       allowed: !!settings?.templateName && !taken,
       name: settings?.templateName ?? null,
@@ -683,12 +718,7 @@ export class PrismaLiveConversationStore {
           whatsappWindowClosesAt: window.closesAt?.toISOString() ?? null,
         });
       }
-      const offer = await this.templateOffer(
-        tx,
-        tenantId,
-        request.id,
-        window.key,
-      );
+      const offer = await this.templateOffer(tx, tenantId, request.id, window);
       if (!offer.name) {
         throw new ChatbotRequestCommandError('TEMPLATE_NOT_CONFIGURED', 422);
       }

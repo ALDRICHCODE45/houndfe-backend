@@ -19,6 +19,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { createHash, randomUUID } from 'crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
@@ -2025,6 +2026,145 @@ describeIfDb('live conversation (PostgreSQL)', () => {
           .map((e) => e.deliveryStatus),
       ).toContain('FAILED');
     });
+
+    // Verify F1: an ACK that deferred a message while staff finished can commit
+    // AFTER the finish skipped its item (SKIP LOCKED) and read the session as
+    // ACTIVE: the epoch is over but the item is still DEFERRED_WINDOW_CLOSED
+    // and the message DEFERRED. These seed that post-race state directly.
+    describe('F1: a deferral that raced the end is settled at ENDED and by the sweep backstop', () => {
+      const leftovers = async (b: Branch, feed: Array<{ cursor: bigint }>) =>
+        prisma.chatbotFeedItem.findMany({
+          where: {
+            tenantId: b.tenantId,
+            cursor: { in: feed.map((f) => f.cursor) },
+          },
+          orderBy: { cursor: 'asc' },
+          select: { outcome: true, ackedAt: true },
+        });
+
+      /** withDeferred, then the session is moved out of ACTIVE under it. */
+      async function raced(
+        b: Branch,
+        state: 'ENDING' | 'ENDED',
+        endedAgoMs = 0,
+      ) {
+        const seeded = await withDeferred(b);
+        const at = new Date(Date.now() - endedAgoMs);
+        await prisma.chatbotLiveSession.updateMany({
+          where: { tenantId: b.tenantId, requestId: seeded.l.id },
+          data:
+            state === 'ENDING'
+              ? { state, endReason: 'FINISHED', endingAt: at }
+              : { state, endReason: 'FINISHED', endingAt: at, endedAt: at },
+        });
+        if (state === 'ENDED') {
+          await prisma.chatbotConversation.updateMany({
+            where: { tenantId: b.tenantId, conversationRef: seeded.l.ref },
+            data: { mode: 'BOT' },
+          });
+        }
+        // the race left both deferred and pending
+        expect(await status(seeded.ids[0])).toBe('DEFERRED');
+        expect(await status(seeded.ids[1])).toBe('DEFERRED');
+        expect((await leftovers(b, seeded.feed)).slice(0, 2)).toEqual([
+          { outcome: 'DEFERRED_WINDOW_CLOSED', ackedAt: null },
+          { outcome: 'DEFERRED_WINDOW_CLOSED', ackedAt: null },
+        ]);
+        return seeded;
+      }
+
+      const expectSettled = async (
+        b: Branch,
+        l: Live,
+        ids: string[],
+        feed: Array<{ cursor: bigint }>,
+      ) => {
+        expect(await status(ids[0])).toBe('FAILED');
+        expect(await status(ids[1])).toBe('FAILED');
+        expect(await status(ids[2])).toBe('SENT');
+        const rows = await leftovers(b, feed);
+        expect(rows[0].ackedAt).not.toBeNull();
+        expect(rows[1].ackedAt).not.toBeNull();
+        expect(rows[0].outcome).toBe('STALE');
+        expect(rows[1].outcome).toBe('STALE');
+        const failed = (await statusEvents(b, l.id)).filter(
+          (e) => e.deliveryStatus === 'FAILED',
+        );
+        expect(failed.map((e) => e.messageId).sort()).toEqual(
+          [ids[0], ids[1]].sort(),
+        );
+      };
+
+      it('the bot ack ENDED of an ENDING epoch settles the leftovers: messages FAILED, items acknowledged, message.status emitted once', async () => {
+        const b = await branch();
+        const { l, ids, feed } = await raced(b, 'ENDING');
+        await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+        expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+        await expectSettled(b, l, ids, feed);
+        // a replay of the ack adds nothing
+        await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+        expect(
+          (await statusEvents(b, l.id)).filter(
+            (e) => e.deliveryStatus === 'FAILED',
+          ),
+        ).toHaveLength(2);
+      });
+
+      it('the sweep marking an ENDING epoch ENDED (10 min, no ack) settles the leftovers too', async () => {
+        const b = await branch();
+        const { l, ids, feed } = await raced(b, 'ENDING', 11 * MIN);
+        const result = await sweepScheduler().tick(new Date());
+        expect(result.ended).toBeGreaterThanOrEqual(1);
+        expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+        await expectSettled(b, l, ids, feed);
+      });
+
+      it('the backstop settles leftovers of a non-ACTIVE epoch without any session transition (ENDING not due yet, and ENDED), and leaves an ACTIVE epoch alone', async () => {
+        const b = await branch();
+        const ending = await raced(b, 'ENDING', 1 * MIN);
+        const ended = await raced(b, 'ENDED', 30 * MIN);
+        const live = await withDeferred(b);
+
+        const result = await sweepScheduler().tick(new Date());
+        expect(result.settledDeferred).toBeGreaterThanOrEqual(4);
+
+        // not due for ENDED: the session is still ENDING, only the items moved
+        expect((await sessions(b, ending.l.id))[0].state).toBe('ENDING');
+        await expectSettled(b, ending.l, ending.ids, ending.feed);
+        await expectSettled(b, ended.l, ended.ids, ended.feed);
+        // the ACTIVE epoch keeps waiting for the customer
+        expect(await status(live.ids[0])).toBe('DEFERRED');
+        expect(await status(live.ids[1])).toBe('DEFERRED');
+        expect(
+          (await pending(b, live.l.ref).expect(200)).body.items,
+        ).toHaveLength(2);
+        // idempotent: nothing more to settle for these
+        const again = await sweepScheduler().tick(new Date());
+        expect(again.settledDeferred).toBe(0);
+      });
+
+      it('ACK DEFERRED_WINDOW_CLOSED racing the finish: whichever order the transactions commit in, the bot ack ENDED leaves the message FAILED and the item acknowledged', async () => {
+        const b = await branch();
+        for (let round = 0; round < 6; round++) {
+          const l = await liveRequest(b);
+          const { version } = await activeSession(b, l);
+          const sent = (await say(b, l.id, 1, `r${round}`).expect(200)).body
+            .message.id;
+          const [feedItem] = await items(b, l.id, 'conversation.staff_message');
+          const [acked, finished] = await Promise.all([
+            outcome(b, feedItem.deliveryId, deferral()),
+            finish(b, l.id, version),
+          ]);
+          expect(acked.status).toBe(200);
+          expect(finished.status).toBe(200);
+          await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+          expect(await status(sent)).toBe('FAILED');
+          const [row] = await leftovers(b, [feedItem]);
+          expect(row.ackedAt).not.toBeNull();
+          expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+        }
+      });
+    });
   });
 
   describe('S16 5: the idle clock counts from the customer message providerTimestamp', () => {
@@ -2449,6 +2589,113 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await statuses(b, [failed131047(wamid)]).expect(200);
       expect((await messageOf(id)).deliveryStatus).toBe('FAILED');
       expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+    });
+
+    // Verify F2: the idle sweep and the finish lock chat → message; the status
+    // writers used to take the message first and the chat second (a 40P01
+    // cycle with the sweep's IDLE_END). One global order: item → chat →
+    // message (docs/chatbot-requests-model.md "Lock order"). Proved by holding
+    // the chat row from the test: a writer that needs the chat must still be
+    // waiting for it WITHOUT having taken the message row.
+    describe('F2: lock order chat → message', () => {
+      const holdChatWhile = async (
+        chatId: string,
+        during: () => Promise<void>,
+      ) => {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let locked!: () => void;
+        const ready = new Promise<void>((resolve) => (locked = resolve));
+        const holder = prisma.$transaction(
+          async (tx) => {
+            await tx.$queryRaw(
+              Prisma.sql`SELECT 1 FROM "chatbot_conversations" WHERE "id" = ${chatId} FOR UPDATE`,
+            );
+            locked();
+            await gate;
+          },
+          { timeout: 30_000 },
+        );
+        await ready;
+        try {
+          await during();
+        } finally {
+          release();
+          await holder;
+        }
+      };
+      const waitForLockWait = async () => {
+        for (let i = 0; i < 100; i++) {
+          const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT count(*)::int AS "n" FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+          if (n > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error('no transaction is waiting for a lock');
+      };
+      const messageIsFree = async (messageId: string) =>
+        (
+          await prisma.$queryRaw<unknown[]>`
+            SELECT 1 FROM "conversation_messages" WHERE "id" = ${messageId}
+            FOR UPDATE SKIP LOCKED`
+        ).length === 1;
+
+      it('statuses:batch (131047 reopening the window) waits for the chat before it takes the message row', async () => {
+        const b = await branch();
+        const wamid = `wamid.f2.${randomUUID()}`;
+        const { l, id } = await sentMessage(b, wamid);
+        const chat = await conversation(b, l.ref);
+        let free = false;
+        let call!: Promise<{ status: number }>;
+        await holdChatWhile(chat.id, async () => {
+          call = statuses(b, [failed131047(wamid)]).then((res) => res);
+          await waitForLockWait();
+          free = await messageIsFree(id);
+        });
+        expect(free).toBe(true);
+        expect((await call).status).toBe(200);
+        expect((await messageOf(id)).deliveryStatus).toBe('DEFERRED');
+      });
+
+      it('the DEFERRED_WINDOW_CLOSED outcome waits for the chat before it takes the message row', async () => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        const id = (await say(b, l.id, 1, 'hola').expect(200)).body.message.id;
+        const [item] = await items(b, l.id, 'conversation.staff_message');
+        const chat = await conversation(b, l.ref);
+        let free = false;
+        let call!: Promise<{ status: number }>;
+        await holdChatWhile(chat.id, async () => {
+          call = outcome(b, item.deliveryId, {
+            attemptId: randomUUID(),
+            outcome: 'DEFERRED_WINDOW_CLOSED',
+            attemptedAt: AT,
+          }).then((res) => res);
+          await waitForLockWait();
+          free = await messageIsFree(id);
+        });
+        expect(free).toBe(true);
+        expect((await call).status).toBe(200);
+        expect((await messageOf(id)).deliveryStatus).toBe('DEFERRED');
+      });
+
+      it('statuses:batch and the idle sweep on the same chat in parallel never deadlock (rounds)', async () => {
+        const b = await branch();
+        for (let round = 0; round < 5; round++) {
+          const wamid = `wamid.f2.par.${randomUUID()}`;
+          const { l } = await sentMessage(b, wamid);
+          const tick = sweepScheduler().tick(new Date(Date.now() + 125 * MIN));
+          const [res, swept] = await Promise.all([
+            statuses(b, [failed131047(wamid)]),
+            tick,
+          ]);
+          expect(res.status).toBe(200);
+          expect(swept.failed).toBe(0);
+          expect(l.id).toBeDefined();
+        }
+      });
     });
   });
 
@@ -3231,6 +3478,58 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       expect(unknown.body.code).toBe('TEMPLATE_ALREADY_SENT');
     });
 
+    it('F3: the once-per-window key moving (a later 131047 raises windowClosedAt) does not let a second template pass while the first is UNKNOWN', async () => {
+      const b = await branch();
+      await templateSettings(b, 'seguimiento_pedido');
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      // a text the bot sent while the window was open: its wamid will carry the
+      // later 131047
+      const wamid = `wamid.f3.${randomUUID()}`;
+      await say(b, l.id, 1, 'hola').expect(200);
+      const [text] = await items(b, l.id, 'conversation.staff_message');
+      await outcome(b, text.deliveryId, accepted(wamid)).expect(200);
+      await customerWroteAgo(b, l, 25);
+
+      const first = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
+      const [tpl] = await items(b, l.id, 'template.requested');
+      await outcome(b, tpl.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'DELIVERY_UNKNOWN',
+        attemptedAt: AT,
+      }).expect(200);
+      const [row] = await templateRows(b, l.id);
+
+      // Meta's verdict (the 131047 on the earlier text) lands later, with an
+      // instant inside the old window: the chat's windowClosedAt moves, and so
+      // does the instant the window "closed" (the old key)
+      const verdictAt = new Date(Date.now() - 5 * 60 * MIN);
+      await statuses(b, [
+        {
+          providerMessageId: wamid,
+          status: 'FAILED',
+          occurredAt: verdictAt.toISOString(),
+          errorCode: '131047',
+        },
+      ]).expect(200);
+      expect((await conversation(b, l.ref)).windowClosedAt?.getTime()).toBe(
+        verdictAt.getTime(),
+      );
+      expect(verdictAt.getTime()).not.toBe(row.windowClosedAt.getTime());
+
+      const second = await template(b, l.id, { expectedEpoch: 1 }).expect(409);
+      expect(second.body.code).toBe('TEMPLATE_ALREADY_SENT');
+      expect(await items(b, l.id, 'template.requested')).toHaveLength(1);
+      expect(await templateRows(b, l.id)).toHaveLength(1);
+      expect((await messageOf(first.body.message.id)).deliveryStatus).toBe(
+        'UNKNOWN',
+      );
+      // the text message offer agrees
+      expect(
+        (await say(b, l.id, 1, 'otra').expect(409)).body.templateAllowed,
+      ).toBe(false);
+    });
+
     it('two parallel clicks: exactly one template is enqueued', async () => {
       const b = await branch();
       const l = await closedWindow(b);
@@ -3352,8 +3651,21 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await mirrorIn(b, l.ref, 'sí, gracias').expect(200);
       await say(b, l.id, 1, 'qué bueno que contestas').expect(200);
 
-      // a day later the window is closed again
+      // a day later the window is closed again (the clock is simulated by
+      // moving the customer's reply back, so the first template moves back
+      // with it: it was sent BEFORE that reply, which is what lets a new one
+      // through since F3)
       await customerWroteAgo(b, l, 26);
+      // (messages are immutable: the test's admin connection skips the
+      // trigger for this one backdating)
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL session_replication_role = replica`;
+        await tx.$executeRaw(
+          Prisma.sql`UPDATE "conversation_messages"
+            SET "receivedAt" = ${new Date(Date.now() - 27 * 60 * MIN)}
+            WHERE "id" = ${first.body.message.id as string}`,
+        );
+      });
       const second = await template(b, l.id, { expectedEpoch: 1 }).expect(200);
       expect(second.body.message.id).not.toBe(first.body.message.id);
       const rows = await templateRows(b, l.id);
@@ -3526,6 +3838,102 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await mirrorIn(b, plain.ref, 'hola').expect(200);
       await tickAt(20 * MIN);
       expect(await notifyRows(b, plain.id)).toHaveLength(0);
+    });
+  });
+
+  // Verify F4: the attendee's access to the chat and to the files of the
+  // session ends with the session (finish), the hand-over (reassign) and the
+  // start-timeout revert; the new attendee reads.
+  describe('F4: the former attendee loses the conversation read and the media proxy', () => {
+    const JPEG = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      Buffer.from('f4-photo-bytes'),
+    ]);
+    const collect = (
+      res: any,
+      cb: (err: Error | null, body: Buffer) => void,
+    ) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => cb(null, Buffer.concat(chunks)));
+    };
+    const readChat = (b: Branch, id: string, userId: string) =>
+      server()
+        .get(`/chatbot-requests/${id}/conversation`)
+        .set(as(b, 'attendee', userId));
+    const openMedia = (b: Branch, mediaId: string, userId: string) =>
+      server()
+        .get(`/chatbot-media/${mediaId}`)
+        .set(as(b, 'attendee', userId))
+        .buffer(true)
+        .parse(collect);
+
+    /** An ACTIVE session of Ana with one photo sent to the customer. */
+    async function withPhoto(b: Branch) {
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      const up = await server()
+        .post(`/chatbot-requests/${l.id}/media`)
+        .set(as(b))
+        .set('Idempotency-Key', randomUUID())
+        .attach('file', JPEG, {
+          filename: 'foto.jpg',
+          contentType: 'application/octet-stream',
+        })
+        .expect(201);
+      const mediaId = up.body.mediaId as string;
+      const clientMessageId = randomUUID();
+      await staffPost(
+        b,
+        `/chatbot-requests/${l.id}/messages`,
+        {
+          clientMessageId,
+          expectedEpoch: 1,
+          type: 'IMAGE',
+          mediaId,
+          caption: 'Mira',
+        },
+        { key: clientMessageId },
+      ).expect(200);
+      // while attending, Ana reads and opens it
+      await readChat(b, l.id, users.ana).expect(200);
+      await openMedia(b, mediaId, users.ana).expect(200);
+      return { l, version, mediaId };
+    }
+
+    it('after finish', async () => {
+      const b = await branch();
+      const { l, version, mediaId } = await withPhoto(b);
+      await finish(b, l.id, version).expect(200);
+      await readChat(b, l.id, users.ana).expect(403);
+      await openMedia(b, mediaId, users.ana).expect(403);
+    });
+
+    it('after reassign: the old attendee gets 403 and the new one can read and open the file', async () => {
+      const b = await branch();
+      await makeAssignable(b, users.luis);
+      const { l, version, mediaId } = await withPhoto(b);
+      await reassign(b, l.id, version, users.luis).expect(200);
+      await readChat(b, l.id, users.ana).expect(403);
+      await openMedia(b, mediaId, users.ana).expect(403);
+
+      const read = await readChat(b, l.id, users.luis).expect(200);
+      expect(read.body.items.some((m: any) => m.media?.id === mediaId)).toBe(
+        true,
+      );
+      const file = await openMedia(b, mediaId, users.luis).expect(200);
+      expect(Buffer.isBuffer(file.body) && file.body.equals(JPEG)).toBe(true);
+    });
+
+    it('after the start-timeout revert (the request is NEW again, nobody holds it)', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      await readChat(b, l.id, users.ana).expect(200);
+      await sweepScheduler().tick(new Date(Date.now() + 121_000));
+      expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+      expect((await row(l.id)).status).toBe('NEW');
+      await readChat(b, l.id, users.ana).expect(403);
     });
   });
 

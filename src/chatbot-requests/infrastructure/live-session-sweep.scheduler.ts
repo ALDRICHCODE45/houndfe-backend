@@ -29,7 +29,14 @@ export class LiveSessionSweepScheduler {
     this.running = true;
     try {
       const total = await this.tick();
-      if (total.reverted + total.ended + total.idleEnded + total.failed > 0) {
+      if (
+        total.reverted +
+          total.ended +
+          total.idleEnded +
+          total.settledDeferred +
+          total.failed >
+        0
+      ) {
         this.logger.log(
           `live session sweep: ${total.reverted} reverted, ${total.ended} ended, ${total.idleEnded} idle-ended, ${total.failed} failed`,
         );
@@ -51,6 +58,7 @@ export class LiveSessionSweepScheduler {
       ended: 0,
       idleEnded: 0,
       noticed: 0,
+      settledDeferred: 0,
       skipped: 0,
       failed: 0,
     };
@@ -70,6 +78,10 @@ export class LiveSessionSweepScheduler {
     }
     // T11d: the notice phase (customer wrote, 5 and 15 min unanswered).
     total.noticed += (await this.store.runNoticeBatch(now)).noticed;
+    // S16 3 backstop: deferred staff messages of an epoch that is over.
+    total.settledDeferred += (
+      await this.store.runDeferredBatch()
+    ).settledDeferred;
     return total;
   }
 }

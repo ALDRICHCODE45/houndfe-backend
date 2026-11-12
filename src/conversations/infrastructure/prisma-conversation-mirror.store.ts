@@ -424,6 +424,19 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         tenantId,
         statuses,
       );
+      // Lock order (verify F2): item → chat → message, the order of the ACK
+      // (`applyStaffMessageOutcome`), the sweep and the finish. The chats of the
+      // batch are locked in id order BEFORE the message rows: the reopened-window
+      // write below used to take the chat while holding the messages, a cycle
+      // with the idle sweep (chat, then message).
+      await db.$queryRaw(Prisma.sql`
+        SELECT c."id" FROM "chatbot_conversations" c
+        WHERE c."tenantId" = ${tenantId}
+          AND c."id" IN (
+            SELECT m."conversationId" FROM "conversation_messages" m
+            WHERE m."tenantId" = ${tenantId}
+              AND m."waMessageId" = ANY(${ids}::text[]))
+        ORDER BY c."id" FOR UPDATE`);
       // Locked in id order so two status batches never wait on each other in a
       // cycle.
       const rows = await db.$queryRaw<

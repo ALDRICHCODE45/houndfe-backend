@@ -387,6 +387,22 @@ export async function markActive(
     WHERE "id" = ${sessionId}`);
 }
 
+/** `message.status` FAILED events for the messages a settle turned terminal. */
+function failedStatusEvents(
+  tenantId: string,
+  requestId: string,
+  failedMessages: FailedMessage[],
+) {
+  // S16 3: the attendee sees the deferred messages turn "No enviado".
+  return failedMessages.map(({ messageId, seq }) => ({
+    tenantId,
+    userId: null,
+    type: 'message.status',
+    requestId,
+    payload: { messageId, seq, deliveryStatus: 'FAILED' },
+  }));
+}
+
 /** The LAST write of the transaction: one `session.*` event with the row. */
 export function emitSessionEvent(
   tx: TenantClient,
@@ -398,15 +414,21 @@ export function emitSessionEvent(
 ): Promise<void> {
   return emitRealtimeEvents(tx, [
     { tenantId, userId: null, type, requestId, payload: { version } },
-    // S16 3: the attendee sees the deferred messages turn "No enviado".
-    ...failedMessages.map(({ messageId, seq }) => ({
-      tenantId,
-      userId: null,
-      type: 'message.status',
-      requestId,
-      payload: { messageId, seq, deliveryStatus: 'FAILED' },
-    })),
+    ...failedStatusEvents(tenantId, requestId, failedMessages),
   ]);
+}
+
+/** The LAST write of a settle that changes no session: only `message.status`. */
+export function emitFailedMessageStatuses(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  failedMessages: FailedMessage[],
+): Promise<void> {
+  return emitRealtimeEvents(
+    tx,
+    failedStatusEvents(tenantId, requestId, failedMessages),
+  );
 }
 
 /**
@@ -428,6 +450,14 @@ export async function applyStaffMessageOutcome(
     attemptedAt: Date | null;
   },
 ): Promise<{ seq: number; deliveryStatus: string } | null> {
+  // Lock order (verify F2): chat row BEFORE the message row, like the sweep,
+  // the finish and the mirror. Joining the message only reads it (`OF c`).
+  await tx.$queryRaw(Prisma.sql`
+    SELECT c."id" FROM "chatbot_conversations" c
+    JOIN "conversation_messages" m
+      ON m."tenantId" = c."tenantId" AND m."conversationId" = c."id"
+    WHERE m."tenantId" = ${tenantId} AND m."id" = ${input.messageId}
+    FOR UPDATE OF c`);
   const [message] = await tx.$queryRaw<
     {
       seq: number;
