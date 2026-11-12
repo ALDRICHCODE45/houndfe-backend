@@ -1,7 +1,8 @@
 /**
  * Error envelope of the chatbot settings routes: the staff envelope of
  * `ChatbotRequestHttpFilter` (`{statusCode, code, message}`) plus
- * - 409 `VERSION_CONFLICT` with `current`, the settings a GET would return;
+ * - 409 `VERSION_CONFLICT` with `current`, the settings a GET would return
+ *   (omitted when the caller has no `read:ChatbotSettings`: apply-to-all);
  * - 400 `VALIDATION_ERROR` with `reason`, the domain code (`INVALID_OPENING_HOURS`,
  *   `INVALID_CHATBOT_SETTINGS`) and the domain message, which is fixed text
  *   written by this codebase and never echoes input.
@@ -30,7 +31,7 @@ export class ChatbotSettingsHttpFilter implements ExceptionFilter {
         statusCode: HttpStatus.CONFLICT,
         code: 'VERSION_CONFLICT',
         message: 'The settings changed; reload them',
-        current: exception.current,
+        ...(exception.current ? { current: exception.current } : {}),
       });
       return;
     }

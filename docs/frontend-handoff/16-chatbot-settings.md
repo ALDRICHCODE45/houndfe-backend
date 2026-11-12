@@ -130,7 +130,7 @@ After a change is saved, the **open** requests (`NEW`, `IN_PROGRESS`) of that su
 | --- | --- | --- |
 | 400 | `VALIDATION_ERROR` | Shape, or a rule above. Has `reason`: `INVALID_OPENING_HOURS` (overlap, midnight, bad zone, missing day) or `INVALID_CHATBOT_SETTINGS` (everything else), and a fixed English `message` you can log |
 | 401 / 403 | `UNAUTHORIZED` / `INSUFFICIENT_PERMISSIONS` | Not signed in or inactive / missing permission |
-| 409 | `VERSION_CONFLICT` | Someone saved first. Body has `current`: the same object `GET` returns. Replace the form with it (or merge) and retry with `current.version` |
+| 409 | `VERSION_CONFLICT` | Someone saved first. Body has `current`: the same object `GET` returns. Replace the form with it (or merge) and retry with `current.version`. (On `apply-to-all-tenants` `current` is present only if you also have `read:ChatbotSettings`, see §5) |
 
 ```json
 { "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them", "current": { "version": 4, "openingHours": { }, "...": "..." } }
@@ -149,7 +149,7 @@ Request body (both optional):
 ```
 
 - `dryRun: true`: reports what would change and writes nothing. Call it first and show "N sucursales cambian" before the user confirms.
-- `expectedVersion`: the version of **this** sucursal's settings the user saw. A stale one answers `409 VERSION_CONFLICT` with `current`, so you never copy something other than what was on screen. Save with `PUT` first, then apply.
+- `expectedVersion`: the version of **this** sucursal's settings the user saw. A stale one answers `409 VERSION_CONFLICT`, so you never copy something other than what was on screen. The body carries `current` (same object as `GET`) **only if you also have `read:ChatbotSettings` in this sucursal**, because this route requires just `update:ChatbotSettingsAllBranches` and must not be a way around `GET`. Without that permission the `409` has no `current` key: `{ "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them" }`. Handle both: if `current` is missing, tell the user the settings changed and ask them to reload (a `GET` will work if they can read; otherwise just retry the dry run). Save with `PUT` first, then apply.
 
 Copied: `openingHours`, `closedDates`, `slas`, `windowWarningMinutes`, `receiptCloseMarginMinutes`, `scheduling`. **Not copied** (they stay per sucursal): `templateName`, `templateCostText`, `enabledSubtypes`.
 
@@ -175,7 +175,7 @@ Response `200`:
 
 Every sucursal appears in **exactly one** of the four lists. Show a warning for the `tenantsApplied` entries with `recompute: "FAILED"`.
 
-**Sucursales where you have no membership at all are not listed and not counted**, so the response never reveals other branches. Each sucursal is its own transaction, so a partial result is possible and is why `tenantsFailed` exists. Permissions merge across your roles in one sucursal (`manage:all` counts).
+**Sucursales where you have no membership at all are not listed and not counted**, so the response never reveals other branches. Each sucursal is its own transaction, so a partial result is possible and is why `tenantsFailed` exists. Whether you can apply in a sucursal is decided by your effective permissions there, computed exactly as for every other route (the same `CASL` ability the permission guard uses): they merge across your roles in one sucursal and `manage:all` counts.
 
 Tell the user in the confirmation text that sucursales they do not belong to are not reached.
 

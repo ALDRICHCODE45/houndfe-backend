@@ -19,7 +19,11 @@
  *   applyToAll     S7: copies hours, closed dates, SLA times (and the receipt
  *                  margin, window warning) and scheduling settings to every
  *                  tenant where the caller holds
- *                  `update:ChatbotSettingsAllBranches` through a membership.
+ *                  `update:ChatbotSettingsAllBranches` through a membership,
+ *                  decided by the CASL ability of the caller in that tenant
+ *                  (the factory `PermissionsGuard` uses). A stale
+ *                  `expectedVersion` is 409 and carries `current` only if
+ *                  the caller also has `read:ChatbotSettings` there.
  *                  Other tenants are never touched, listed or counted.
  *                  Each tenant has its own transaction and audit event and
  *                  appears in exactly ONE result list: `tenantsFailed` only
@@ -35,6 +39,7 @@ import {
   rowToSettings,
 } from '../../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { recomputeOpenRequests } from '../../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factory';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import type { OpeningDay } from '../../shipping/pickup/domain/opening-hours';
 import {
@@ -73,8 +78,13 @@ export interface PutResponse extends SettingsResponse {
   recompute: RecomputeStatus;
 }
 
+/**
+ * `current` is absent when the caller may not read the settings of the tenant
+ * (apply-to-all needs only `update:ChatbotSettingsAllBranches`; a GET needs
+ * `read:ChatbotSettings`, so the 409 must not be a way around it).
+ */
 export class SettingsVersionConflictError extends Error {
-  constructor(readonly current: SettingsResponse) {
+  constructor(readonly current?: SettingsResponse) {
     super('chatbot settings version conflict');
     this.name = 'SettingsVersionConflictError';
   }
@@ -152,6 +162,7 @@ export class ChatbotSettingsService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly abilities: CaslAbilityFactory,
     @Inject(SETTINGS_CLOCK) private readonly clock: () => Date,
   ) {}
 
@@ -273,7 +284,14 @@ export class ChatbotSettingsService {
       options.expectedVersion !== undefined &&
       options.expectedVersion !== sourceVersion
     ) {
-      throw new SettingsVersionConflictError(await this.get(tenantId));
+      // `current` is what GET returns: only for a caller who may GET it.
+      const mayRead = (await this.abilityIn(actorUserId, tenantId)).can(
+        'read',
+        'ChatbotSettings',
+      );
+      throw new SettingsVersionConflictError(
+        mayRead ? await this.get(tenantId) : undefined,
+      );
     }
 
     const result: ApplyToAllResult = {
@@ -291,7 +309,9 @@ export class ChatbotSettingsService {
         result.tenantsSkipped.push({ ...ref, reason: 'TENANT_INACTIVE' });
         continue;
       }
-      if (!target.granted) {
+      // The ability PermissionsGuard builds for the caller in that tenant.
+      const ability = await this.abilityIn(actorUserId, target.id);
+      if (!ability.can('update', 'ChatbotSettingsAllBranches')) {
         result.tenantsSkipped.push({ ...ref, reason: 'NO_PERMISSION' });
         continue;
       }
@@ -326,45 +346,34 @@ export class ChatbotSettingsService {
   }
 
   /**
-   * Tenants where the caller has a membership, with whether their roles grant
-   * `update:ChatbotSettingsAllBranches`. As in `CaslAbilityFactory`, `manage`
-   * and subject `all` count, and grants merge across ALL of the caller's
-   * memberships in a tenant. Sorted by id.
+   * Tenants where the caller has a membership (one entry per tenant even with
+   * several memberships), sorted by id. The write authority in each is decided
+   * by `abilityIn`, never here.
    */
   private async memberTenants(userId: string) {
     const memberships = await this.prisma.tenantMembership.findMany({
       where: { userId },
+      distinct: ['tenantId'],
       select: {
         tenant: { select: { id: true, name: true, isActive: true } },
-        role: {
-          select: {
-            permissions: {
-              select: {
-                permission: { select: { action: true, subject: true } },
-              },
-            },
-          },
-        },
       },
     });
-    const byTenant = new Map<
-      string,
-      { id: string; name: string; isActive: boolean; granted: boolean }
-    >();
-    for (const m of memberships) {
-      const grants = m.role.permissions.some(
-        ({ permission }) =>
-          (permission.action === 'update' || permission.action === 'manage') &&
-          (permission.subject === 'ChatbotSettingsAllBranches' ||
-            permission.subject === 'all'),
-      );
-      const known = byTenant.get(m.tenant.id);
-      byTenant.set(m.tenant.id, {
-        ...m.tenant,
-        granted: grants || (known?.granted ?? false),
-      });
-    }
-    return [...byTenant.values()].sort((a, b) => a.id.localeCompare(b.id));
+    return memberships
+      .map((m) => m.tenant)
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /**
+   * The CASL ability of the caller inside one tenant, from the same factory
+   * and context `PermissionsGuard` uses (grants merge across the caller's
+   * memberships there). One query per call; apply-to-all calls it once per
+   * ACTIVE tenant the caller is a member of, so it is bounded by memberships.
+   */
+  private abilityIn(userId: string, tenantId: string) {
+    return this.abilities.createForUser(userId, {
+      tenantId,
+      isSuperAdmin: false,
+    });
   }
 
   /** The target after a copy; the fields that are not copied stay as they are. */

@@ -30,6 +30,7 @@ import type {
   AppActions,
   AppSubjects,
 } from '../auth/authorization/domain/permission';
+import { CaslAbilityFactory } from '../auth/authorization/casl-ability.factory';
 import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
 import { ActiveUserGuard } from '../auth/guards/active-user.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -151,6 +152,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
   const prisma = integrationPrisma();
   let app: INestApplication;
   let root: PrismaService;
+  let casl: CaslAbilityFactory;
   const tenantA: string = randomUUID();
   const tenantB: string = randomUUID();
   const tenantC: string = randomUUID();
@@ -170,6 +172,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       ],
       controllers: [ChatbotSettingsController],
       providers: [
+        CaslAbilityFactory,
         ChatbotSettingsHttpFilter,
         ChatbotSettingsService,
         { provide: SETTINGS_CLOCK, useValue: () => NOW },
@@ -188,6 +191,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
     app.useGlobalPipes(createAppValidationPipe());
     await app.init();
     root = moduleRef.get(PrismaService);
+    casl = moduleRef.get(CaslAbilityFactory);
     for (const [i, id] of tenants.entries()) {
       await prisma.tenant.create({
         data: {
@@ -213,7 +217,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
 
   /**
    * userId: admin grant (`update:ChatbotSettingsAllBranches`) in A, B and E
-   * (E is inactive); a role WITHOUT it in C; a `manage:all` role in D through a
+   * (E is inactive; A's role also reads the settings, B's does not); a role WITHOUT it in C; a `manage:all` role in D through a
    * second membership next to a plain role (grants merge across memberships).
    * otherUser: a membership in B only, without the grant.
    */
@@ -226,6 +230,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       });
     const allBranches = await perm('ChatbotSettingsAllBranches', 'update');
     const settings = await perm('ChatbotSettings', 'update');
+    const readSettings = await perm('ChatbotSettings', 'read');
     const manageAll = await perm('all', 'manage');
     const role = async (
       tenantId: string,
@@ -251,7 +256,7 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
     await member(
       userId,
       tenantA,
-      await role(tenantA, 'admin', [allBranches.id]),
+      await role(tenantA, 'admin', [allBranches.id, readSettings.id]),
     );
     await member(
       userId,
@@ -1170,6 +1175,91 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       await applyAll(source).expect(200);
       expect(await prisma.rolePermission.count()).toBe(grantsBefore);
       expect(await prisma.tenantMembership.count()).toBe(membershipsBefore);
+    });
+
+    describe('write authority comes from the CASL ability (T7d)', () => {
+      afterEach(() => jest.restoreAllMocks());
+
+      it('builds one ability per ACTIVE member tenant with the PermissionsGuard factory, and none for other tenants', async () => {
+        const spy = jest.spyOn(casl, 'createForUser');
+        const stranger: string = randomUUID();
+        await prisma.tenant.create({
+          data: { id: stranger, name: 'Ajena', slug: `cs-${stranger}` },
+        });
+        try {
+          await applyAll(source, { dryRun: true }).expect(200);
+        } finally {
+          await prisma.tenant.delete({ where: { id: stranger } });
+        }
+        const forWrite = spy.mock.calls.filter(([, ctx]) =>
+          tenants.includes(ctx.tenantId ?? ''),
+        );
+        expect(
+          forWrite.map(([uid, ctx]) => [uid, ctx.tenantId, ctx.isSuperAdmin]),
+        ).toEqual(
+          [tenantA, tenantB, tenantC, tenantD]
+            .sort()
+            .map((id) => [userId, id, false]),
+        );
+        // Bounded by the memberships: nothing for the inactive E or a stranger.
+        expect(spy.mock.calls.map(([, ctx]) => ctx.tenantId)).not.toContain(
+          tenantE,
+        );
+        expect(JSON.stringify(spy.mock.calls)).not.toContain(stranger);
+      });
+
+      it('defers to the ability: a tenant whose ability denies the update is NO_PERMISSION whatever a grant scan says', async () => {
+        const real: CaslAbilityFactory['createForUser'] = (uid, ctx) =>
+          CaslAbilityFactory.prototype.createForUser.call(
+            casl,
+            uid,
+            ctx,
+          ) as Promise<AppAbility>;
+        jest
+          .spyOn(casl, 'createForUser')
+          .mockImplementation((uid, ctx) =>
+            ctx.tenantId === tenantB
+              ? Promise.resolve(
+                  new AbilityBuilder<AppAbility>(createMongoAbility).build(),
+                )
+              : real(uid, ctx),
+          );
+        const res = await applyAll(source, { dryRun: true }).expect(200);
+        const skipped = Object.fromEntries(
+          res.body.tenantsSkipped.map(
+            (t: { tenantId: string; reason: string }) => [t.tenantId, t.reason],
+          ),
+        );
+        expect(skipped).toEqual({
+          [tenantB]: 'NO_PERMISSION',
+          [tenantC]: 'NO_PERMISSION',
+          [tenantE]: 'TENANT_INACTIVE',
+        });
+        const listed = [
+          ...res.body.tenantsApplied,
+          ...res.body.tenantsUnchanged,
+        ].map((t: { tenantId: string }) => t.tenantId);
+        expect(listed).not.toContain(tenantB);
+      });
+
+      it('a stale expectedVersion returns current only to a caller who can read:ChatbotSettings in the source tenant', async () => {
+        // A's role reads the settings (seed); B's role only has the all-branches grant.
+        const withRead = await applyAll(tenantA, { expectedVersion: 0 }).expect(
+          409,
+        );
+        expect(withRead.body.code).toBe('VERSION_CONFLICT');
+        expect(withRead.body.current.version).toBeGreaterThan(0);
+
+        const withoutRead = await applyAll(tenantB, {
+          expectedVersion: 0,
+        }).expect(409);
+        expect(withoutRead.body).toEqual({
+          statusCode: 409,
+          code: 'VERSION_CONFLICT',
+          message: 'The settings changed; reload them',
+        });
+        expect(JSON.stringify(withoutRead.body)).not.toContain('openingHours');
+      });
     });
   });
 
