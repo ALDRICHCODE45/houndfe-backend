@@ -72,7 +72,12 @@ describe('public Jest suite selection', () => {
       expect(config.globalSetup).toBeUndefined();
       expect(config.globalTeardown).toBeUndefined();
     }
-    expect(integration.setupFiles).toEqual(['<rootDir>/test/integration/setup/load-env.ts']);
+    // `disable-schedulers.ts` keeps `@Interval`/`@Cron` jobs from ticking against
+    // the shared test DB when a spec boots AppModule; integration-only.
+    expect(integration.setupFiles).toEqual([
+      '<rootDir>/test/integration/setup/load-env.ts',
+      '<rootDir>/test/integration/setup/disable-schedulers.ts',
+    ]);
     expect(integration.globalSetup).toBe('<rootDir>/test/integration/setup/global-setup.ts');
     // `${RUN_TESTS:-}` routes the run through the machine-wide test queue and
     // expands to nothing where RUN_TESTS is unset (CI).

@@ -11,12 +11,21 @@ const sql = () =>
 const definitionModel = () =>
   schema.split('model EditorialDefinition {')[1].split('\n}')[0];
 
+const chatbotConversationModel = () =>
+  schema.split('model ChatbotConversation {')[1].split('\n}')[0];
+
 describe('editorial definition description storage', () => {
   it('adds one nullable VarChar(200) column to EditorialDefinition only', () => {
     expect(definitionModel()).toMatch(
       /^\s*description\s+String\?\s+@db\.VarChar\(200\)\s*$/m,
     );
-    expect(schema.match(/@db\.VarChar\(200\)/g)).toHaveLength(1);
+    // Exactly two VarChar(200) columns exist in the schema: this one and
+    // `ChatbotConversation.conversationRef` (human-intervention / T1). Neither
+    // may appear anywhere else.
+    expect(schema.match(/@db\.VarChar\(200\)/g)).toHaveLength(2);
+    expect(chatbotConversationModel()).toMatch(
+      /^\s*conversationRef\s+String\s+@db\.VarChar\(200\)\s*$/m,
+    );
   });
 
   it('is a single additive ALTER: no default, no backfill, no other column touched', () => {

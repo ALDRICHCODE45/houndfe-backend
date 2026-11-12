@@ -86,6 +86,15 @@ import { PromotionExpiryOutboxPoller } from '../promotions/outbox/promotion-expi
 import { DeliveryZoneOutboxPoller } from '../delivery-zones/outbox/delivery-zone-outbox.poller';
 import { PromotionExpiryScanner } from '../promotions/expiry/promotion-expiry.scanner';
 import { ReceiptReviewOutboxPoller } from '../receipts/outbox/receipt-review-outbox.poller';
+import { ChatbotSlaSweepScheduler } from '../chatbot-requests/infrastructure/chatbot-sla-sweep.scheduler';
+import { LiveSessionSweepScheduler } from '../chatbot-requests/infrastructure/live-session-sweep.scheduler';
+import { ChatbotFeedPurgeScheduler } from '../chatbot-requests/infrastructure/chatbot-feed-purge.scheduler';
+import { RealtimeRetentionScheduler } from '../realtime/infrastructure/realtime-retention.scheduler';
+import { ChatbotRequestNotifyConsumer } from '../notifications/outbox/chatbot-request-notify.consumer';
+import { ChatbotRequestEmailDispatcher } from '../notifications/outbox/chatbot-request-email.dispatcher';
+import { NotificationRetentionScheduler } from '../notifications/infrastructure/notification-retention.scheduler';
+import { ConversationRetentionScheduler } from '../conversations/infrastructure/conversation-retention.scheduler';
+import { NOTICE_EMAIL_FUNCTION_ID } from '../notifications/inngest/chatbot-request-email.functions';
 import { InngestService } from './inngest.service';
 import { MAILER, type IMailer } from '../notifications/email/mailer.port';
 
@@ -96,6 +105,24 @@ const DELIVERY_THANK_YOU_FUNCTION_ID = 'delivery-thank-you-notify';
 /** transfer-receipts / T2 — staff email + 5-year retention purge. */
 const RECEIPT_REVIEW_FUNCTION_ID = 'receipt-review-requested-email';
 const RECEIPT_RETENTION_FUNCTION_ID = 'receipt-retention-purge';
+/** human-intervention / T6 — chatbot request notice email. */
+const CHATBOT_NOTICE_FUNCTION_ID = NOTICE_EMAIL_FUNCTION_ID;
+
+/**
+ * human-intervention units 1-10: every `@Interval` scheduler/consumer the
+ * chatbot-requests, notifications, realtime and conversations modules add.
+ * Each is replaced by an inert stub so no timer is mounted at boot.
+ */
+const HUMAN_INTERVENTION_INTERVAL_CLASSES = [
+  ChatbotSlaSweepScheduler,
+  LiveSessionSweepScheduler,
+  ChatbotFeedPurgeScheduler,
+  RealtimeRetentionScheduler,
+  ChatbotRequestNotifyConsumer,
+  ChatbotRequestEmailDispatcher,
+  NotificationRetentionScheduler,
+  ConversationRetentionScheduler,
+] as const;
 
 /**
  * A full `AppModule` boot instantiates a few hundred providers through
@@ -300,6 +327,9 @@ const ALLOWED_BOOT_HOOK_OWNERS: ReadonlyMap<string, 'inert-stub' | 'wiring'> =
     ['DeliveryZoneInngestRegistrar', 'wiring'],
     // transfer-receipts / T2: registers local SDK functions only.
     ['ReceiptReviewInngestRegistrar', 'wiring'],
+    // human-intervention / T6: registers local SDK functions only (the chatbot
+    // request notice email); no DB read, event or mail at boot.
+    ['ChatbotRequestInngestRegistrar', 'wiring'],
     ['DeliveryRouteSubjectResolverRegistrar', 'wiring'],
     // @nestjs/schedule: interval exploration + in-process timer mounting.
     ['ScheduleExplorer', 'wiring'],
@@ -469,6 +499,12 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         [DeliveryZoneOutboxPoller.name]: createInertPollerStub(),
         [PromotionExpiryScanner.name]: createInertPollerStub(),
         [ReceiptReviewOutboxPoller.name]: createInertPollerStub(),
+        ...Object.fromEntries(
+          HUMAN_INTERVENTION_INTERVAL_CLASSES.map((cls) => [
+            cls.name,
+            createInertPollerStub(),
+          ]),
+        ),
       };
 
       let moduleRef: TestingModule | undefined;
@@ -479,7 +515,7 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         // 3. Compile the REAL application graph with the four dangerous
         //    boundaries replaced (no DB connect, no seeder writes, no font
         //    CDN, no timers).
-        moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+        const builder = Test.createTestingModule({ imports: [AppModule] })
           .overrideProvider(PrismaService)
           .useValue(prismaStub)
           .overrideProvider(PermissionSeeder)
@@ -503,8 +539,11 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
           .overrideProvider(PromotionExpiryScanner)
           .useValue(pollerStubs[PromotionExpiryScanner.name])
           .overrideProvider(ReceiptReviewOutboxPoller)
-          .useValue(pollerStubs[ReceiptReviewOutboxPoller.name])
-          .compile();
+          .useValue(pollerStubs[ReceiptReviewOutboxPoller.name]);
+        for (const cls of HUMAN_INTERVENTION_INTERVAL_CLASSES) {
+          builder.overrideProvider(cls).useValue(pollerStubs[cls.name]);
+        }
+        moduleRef = await builder.compile();
 
         // 4. Fail-closed BEFORE any hook runs.
         assertBootHooksAreBounded(
@@ -551,6 +590,11 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         expect(
           moduleRef.get(ReceiptReviewOutboxPoller, { strict: false }),
         ).toBe(pollerStubs[ReceiptReviewOutboxPoller.name]);
+        for (const cls of HUMAN_INTERVENTION_INTERVAL_CLASSES) {
+          expect(moduleRef.get(cls, { strict: false })).toBe(
+            pollerStubs[cls.name],
+          );
+        }
 
         // 6. Outbound boundaries: spied with non-network implementations so
         //    an accidental dispatch cannot reach Inngest or Resend, and the
@@ -588,6 +632,9 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
         ).toHaveLength(1);
         expect(
           ids.filter((id) => id === RECEIPT_RETENTION_FUNCTION_ID),
+        ).toHaveLength(1);
+        expect(
+          ids.filter((id) => id === CHATBOT_NOTICE_FUNCTION_ID),
         ).toHaveLength(1);
         expect(new Set(ids).size).toBe(ids.length);
         expect(captured.options.client).toBe(inngestService.getClient());
@@ -650,6 +697,13 @@ describe('pca-5b — promotion alert AppModule boot proof (test-only, stubbed bo
               instance instanceof HrTimeOffOutboxPoller ||
               instance instanceof DeliveryZoneOutboxPoller ||
               instance instanceof ReceiptReviewOutboxPoller,
+          ),
+        ).toHaveLength(0);
+        expect(
+          instances.filter((instance) =>
+            HUMAN_INTERVENTION_INTERVAL_CLASSES.some(
+              (cls) => instance instanceof cls,
+            ),
           ),
         ).toHaveLength(0);
       } finally {

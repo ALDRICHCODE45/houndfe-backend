@@ -25,6 +25,14 @@ describe('purchase-order permission registry', () => {
           'InventoryAdjustment',
           'DeliveryZone',
           'ShippingSettings',
+          // human-intervention / T1: additive chatbot-request permissions.
+          'ChatbotRequest',
+          'ChatbotRequestAssignment',
+          'ChatbotConversation',
+          'ChatbotEscalation',
+          'CustomerPhone',
+          'ChatbotSettings',
+          'ChatbotSettingsAllBranches',
         ].includes(p.subject),
     );
     expect(
