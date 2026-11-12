@@ -282,6 +282,7 @@ Los 9 anteriores (outbox, zonas, rutas, horas libres, comprobantes, promociones 
    - **Unidad 10** (línea 589): handler de `request.answered` con `kind: "CLARIFICATION"` y espejo con `staffReplyId`. Hasta que el handler exista, esos ítems se ACKean `STALE` y **el cliente no recibe la respuesta**.
    Evidencia E2E en dev contra el bot real: unidad 5 (L46), fusión (L66-L67), aviso de vencida (L77-L78), espejo y medios (L110-L116). **No hay evidencia registrada del handler de aclaraciones (unidad 10)** ni de su espejo: ver «Riesgos».
    El `SERVICE_KEY` del bot no cambia (los scopes se ampliaron en el servidor).
+   **Espejo del chatbot, último paso aparte.** El `main` del chatbot trae `CONVERSATION_MIRROR_DELIVERY_ENABLED` (por defecto `false`): con el flag apagado, las filas del espejo y de estados de la unidad 9 se acumulan en su outbox sin llamar al backend. Orden: humo del backend → deploy del chatbot con sus migraciones (4600-4800 de su repo) → recién al final encender el flag; lo acumulado se vacía en lotes (`messages:batch` hasta 50, presupuesto de escritura 300/min por credencial).
 
 ## 6. Post-deploy
 
