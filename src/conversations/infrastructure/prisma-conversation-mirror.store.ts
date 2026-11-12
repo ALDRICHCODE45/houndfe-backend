@@ -214,10 +214,15 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
 
   /**
    * Unit 10: the staff replies the bot says it sent. A `staffReplyId` must be
-   * the id of a RESOLVED clarification of THIS tenant and THIS chat; the staff
-   * user comes from the backend's own record (`resolvedByActorId`), never from
-   * the batch. An unknown, foreign or other-chat id is a bug in the bot: the
-   * whole batch is refused (`422 REPLY_NOT_FOUND`), never mirrored as the bot's.
+   * the id of a RESOLVED clarification of THIS tenant; the staff user comes
+   * from the backend's own record (`resolvedByActorId`), never from the batch.
+   * A request that carries a `conversationRef` only matches its own chat. A
+   * request WITHOUT one (the bot never told us its chat) matches the chat the
+   * bot sent the reply to: the reply id is the message's primary key, so it can
+   * be mirrored once, and a second mirror in another chat is
+   * `409 MESSAGE_ID_CONFLICT`. An unknown, foreign or other-chat id is a bug in
+   * the bot: the whole batch is refused (`422 REPLY_NOT_FOUND`), never mirrored
+   * as the bot's.
    */
   private async resolveReplies(
     db: Db,
@@ -250,7 +255,11 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         AND "kind" = 'CLARIFICATION' AND "status" = 'RESOLVED'
         AND "resolution" ->> 'replyId' = ANY(${wanted}::text[])`);
     for (const row of rows) {
-      if (row.conversationRef === conversationRef && row.staffUserId) {
+      if (
+        (row.conversationRef === null ||
+          row.conversationRef === conversationRef) &&
+        row.staffUserId
+      ) {
         found.set(row.replyId, {
           replyId: row.replyId,
           requestId: row.requestId,

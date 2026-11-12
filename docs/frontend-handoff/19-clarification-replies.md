@@ -90,6 +90,7 @@ When the bot has sent the answer it reports it to the conversation mirror (bot h
 
 - `id` and `clientMessageId` are the **reply's id** (`reply.id`; the `messageId` of the `REPLIED` audit event), so you can match the message to the reply. `text` is what the bot actually sent (the bot may word the team prefix in the customer's tú/usted).
 - **It appears only after the bot sent it.** A deferred answer is not in the conversation until it is really delivered. Before that, `reply.text` and the delivery state are the source.
+- A clarification **without** a `conversationRef` has no conversation of its own: `GET /chatbot-requests/:id/conversation` stays empty for it even after the bot sent the answer (the message is stored in the chat the bot sent it to, and shows in that chat's other requests). Keep showing `reply.text` and the delivery state for it.
 - Live updates: the `conversation.message` event of that message goes to the request that was answered too (even though it is closed now), and `message.status` follows (`SENT → DELIVERED → READ`).
 
 ## 5. Audit and realtime

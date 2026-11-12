@@ -184,15 +184,16 @@ export class ConversationRetentionService {
    */
   private async settleIntents(batch: number, runStartedAt: Date) {
     const claimed = await this.prisma.$queryRaw<ClaimedIntent[]>(Prisma.sql`
-      UPDATE "conversation_media_intents" i
-      SET "leaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
-      WHERE i."id" IN (
+      WITH picked AS MATERIALIZED (
         SELECT "id" FROM "conversation_media_intents"
         WHERE "dueAt" < now()
           AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
           AND ("lastErrorAt" IS NULL OR "lastErrorAt" < ${runStartedAt})
         ORDER BY "attempts", "dueAt", "id"
         LIMIT ${batch} FOR UPDATE SKIP LOCKED)
+      UPDATE "conversation_media_intents" i
+      SET "leaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
+      FROM picked WHERE i."id" = picked."id"
       RETURNING i."id", i."tenantId", i."storageKey", i."reason"`);
 
     let settled = 0;
@@ -402,15 +403,16 @@ export class ConversationRetentionService {
 
   private async purgeMedia(batch: number, runStartedAt: Date) {
     const claimed = await this.prisma.$queryRaw<Claimed[]>(Prisma.sql`
-      UPDATE "conversation_media" m
-      SET "purgeLeaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
-      WHERE m."id" IN (
+      WITH picked AS MATERIALIZED (
         SELECT "id" FROM "conversation_media"
         WHERE "purgedAt" IS NULL AND "purgeAfter" < now()
           AND ("purgeLeaseUntil" IS NULL OR "purgeLeaseUntil" < now())
           AND ("lastPurgeErrorAt" IS NULL OR "lastPurgeErrorAt" < ${runStartedAt})
         ORDER BY "purgeAttempts", "purgeAfter", "id"
         LIMIT ${batch} FOR UPDATE SKIP LOCKED)
+      UPDATE "conversation_media" m
+      SET "purgeLeaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
+      FROM picked WHERE m."id" = picked."id"
       RETURNING m."id", m."tenantId", m."storageKey"`);
 
     let purged = 0;
@@ -553,8 +555,7 @@ export class ConversationRetentionService {
         ? Prisma.empty
         : Prisma.sql`AND k."id" = ANY(${ids}::text[])`;
     return this.prisma.$executeRaw(Prisma.sql`
-      DELETE FROM "chatbot_conversations" c
-      WHERE c."id" IN (
+      WITH picked AS MATERIALIZED (
         SELECT "id" FROM "chatbot_conversations" k
         WHERE k."mode" = 'BOT' ${scope}
           AND k."updatedAt" < now() - (${CONVERSATION_RETENTION_LIMITS.chatIdleDays} * interval '1 day')
@@ -569,6 +570,8 @@ export class ConversationRetentionService {
             WHERE r."tenantId" = k."tenantId" AND r."conversationRef" = k."conversationRef")
         ORDER BY k."updatedAt", k."id"
         LIMIT ${limit}
-        FOR UPDATE SKIP LOCKED)`);
+        FOR UPDATE SKIP LOCKED)
+      DELETE FROM "chatbot_conversations" c
+      USING picked WHERE c."id" = picked."id"`);
   }
 }

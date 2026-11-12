@@ -72,6 +72,10 @@ import {
   ChatbotRequestCommandsService,
 } from './application/chatbot-request-commands.service';
 import {
+  CHATBOT_REQUEST_RELATION_STORE,
+  ChatbotRequestRelationsService,
+} from './application/chatbot-request-relations.service';
+import {
   CHATBOT_REQUEST_READ_STORE,
   ChatbotRequestReadsService,
   CUSTOMER_KEY_SEALER,
@@ -84,12 +88,14 @@ import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.sto
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
 import { PrismaChatbotRequestCommandStore } from './infrastructure/prisma-chatbot-request-command.store';
 import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-request-read.store';
+import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
 import { PrismaSlaPauseReader } from './infrastructure/prisma-sla-pause.reader';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
 import { ChatbotRequestReadsController } from './presentation/chatbot-request-reads.controller';
+import { ChatbotRequestRelationsController } from './presentation/chatbot-request-relations.controller';
 
 const describeIfDb =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL
@@ -181,6 +187,7 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       ],
       controllers: [
         ChatbotRequestCommandsController,
+        ChatbotRequestRelationsController,
         ChatbotRequestReadsController,
         BotFeedController,
         BotRecoveryController,
@@ -191,6 +198,11 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
         ServiceAuthGuard,
         ChatbotRequestHttpFilter,
         ChatbotRequestCommandsService,
+        ChatbotRequestRelationsService,
+        {
+          provide: CHATBOT_REQUEST_RELATION_STORE,
+          useClass: PrismaChatbotRequestRelationStore,
+        },
         ChatbotRequestReadsService,
         ChatbotFeedService,
         ChatbotRecoveryService,
@@ -591,28 +603,180 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
       expect(await feedItems(b, q.id)).toHaveLength(1);
     });
 
-    it('a claim and a reply racing on a NEW request leave one holder: the loser is told, never two answers', async () => {
-      const b = await branch();
-      const q = await question(b, {}, null);
-      const [claim, answer] = await Promise.all([
-        server()
-          .post(`/chatbot-requests/${q.id}/claim`)
-          .set(as(b, 'cashier', users.luis))
-          .set('Idempotency-Key', randomUUID())
-          .send({ expectedVersion: 1 }),
-        reply(
+    it('a claim and a reply racing on a NEW request leave one holder: the loser gets its exact code, never two answers', async () => {
+      // Both orders happen over a few rounds; each is checked exactly.
+      for (let round = 0; round < 4; round++) {
+        const b = await branch();
+        const q = await question(b, {}, null);
+        const [claim, answer] = await Promise.all([
+          server()
+            .post(`/chatbot-requests/${q.id}/claim`)
+            .set(as(b, 'cashier', users.luis))
+            .set('Idempotency-Key', randomUUID())
+            .send({ expectedVersion: 1 }),
+          reply(
+            b,
+            q.id,
+            { expectedVersion: 1, text: TEXT },
+            { userId: users.ana },
+          ),
+        ]);
+        expect(
+          [claim.status, answer.status].filter((x) => x === 200),
+        ).toHaveLength(1);
+        const row = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: q.id },
+        });
+        const replied = (await events(q.id)).filter(
+          (e) => e.type === 'REPLIED',
+        );
+        if (answer.status === 200) {
+          // The reply took and closed it in one step; the claim finds it closed.
+          expect(claim.status).toBe(409);
+          expect(claim.body.code).toBe('REQUEST_CLOSED');
+          expect(row).toMatchObject({
+            status: 'RESOLVED',
+            assigneeUserId: users.ana,
+          });
+          expect(replied).toHaveLength(1);
+          expect(await feedItems(b, q.id)).toHaveLength(1);
+        } else {
+          // The claim won: Luis holds it and Ana, not the holder, is refused.
+          expect(answer.status).toBe(403);
+          expect(answer.body.code).toBe('NOT_ASSIGNEE');
+          expect(row).toMatchObject({
+            status: 'IN_PROGRESS',
+            assigneeUserId: users.luis,
+          });
+          expect(replied).toHaveLength(0);
+          expect(await feedItems(b, q.id)).toHaveLength(0);
+        }
+      }
+    });
+  });
+
+  describe('a reply racing a cancel or a merge: one winner, consistent state, nothing from the loser', () => {
+    const cancel = (b: Branch, id: string, userId: string) =>
+      server()
+        .post(`/chatbot-requests/${id}/cancel`)
+        .set(as(b, 'cashier', userId))
+        .set('Idempotency-Key', randomUUID())
+        .send({ expectedVersion: 1, reason: 'OTHER', note: 'ya no aplica' });
+    const merge = (b: Branch, id: string, intoId: string, userId: string) =>
+      server()
+        .post(`/chatbot-requests/${id}/merge`)
+        .set(as(b, 'cashier', userId))
+        .set('Idempotency-Key', randomUUID())
+        .send({
+          expectedVersion: 1,
+          intoRequestId: intoId,
+          intoExpectedVersion: 1,
+        });
+    const feedOf = (b: Branch, requestId: string, type: string) =>
+      prisma.chatbotFeedItem.count({
+        where: { tenantId: b.tenantId, requestId, type },
+      });
+
+    it.each([
+      ['NEW', null],
+      ['held by the replier', 'ana'],
+    ] as const)('reply vs cancel on a request %s', async (_label, holder) => {
+      // Both orders happen over a few rounds; each is checked exactly.
+      for (let round = 0; round < 4; round++) {
+        const b = await branch();
+        const q = await question(b, {}, holder);
+        const [answer, cancelled] = await Promise.all([
+          reply(
+            b,
+            q.id,
+            { expectedVersion: 1, text: TEXT },
+            { userId: users.ana },
+          ),
+          cancel(b, q.id, users.ana),
+        ]);
+        expect(
+          [answer.status, cancelled.status].filter((x) => x === 200),
+        ).toHaveLength(1);
+        const row = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: q.id },
+        });
+        const types = (await events(q.id)).map((e) => e.type);
+        if (answer.status === 200) {
+          expect(cancelled.status).toBe(409);
+          expect(cancelled.body.code).toBe('REQUEST_CLOSED');
+          expect(row.status).toBe('RESOLVED');
+          expect(types.filter((t) => t === 'REPLIED')).toHaveLength(1);
+          expect(types).not.toContain('CANCELLED');
+          expect(await feedItems(b, q.id)).toHaveLength(1);
+          expect(await feedOf(b, q.id, 'request.cancelled')).toBe(0);
+        } else {
+          expect(answer.status).toBe(409);
+          expect(answer.body.code).toBe('REQUEST_CLOSED');
+          expect(row.status).toBe('CANCELLED');
+          expect(types).not.toContain('REPLIED');
+          expect(await feedItems(b, q.id)).toHaveLength(0);
+          expect(await feedOf(b, q.id, 'request.cancelled')).toBe(1);
+          // Nothing of the reply was stored.
+          expect(row.resolution).toBeNull();
+        }
+      }
+    });
+
+    it('reply vs merge of the same request into another: one winner, no request.answered for a merged source, no request.merged for an answered one', async () => {
+      for (let round = 0; round < 4; round++) {
+        const b = await branch();
+        const source = await question(b, {}, 'ana');
+        const target = await question(
           b,
-          q.id,
-          { expectedVersion: 1, text: TEXT },
-          { userId: users.ana },
-        ),
-      ]);
-      // Either the claim won (the reply is then refused: 403 held by Luis, or 409
-      // stale version) or the reply won (the claim finds it closed).
-      expect(
-        [claim.status, answer.status].filter((x) => x === 200),
-      ).toHaveLength(1);
-      expect((await feedItems(b, q.id)).length).toBeLessThanOrEqual(1);
+          {
+            customerKey: source.customerKey,
+            conversationRef: source.conversationRef,
+          },
+          'luis',
+        );
+        const [answer, merged] = await Promise.all([
+          reply(
+            b,
+            source.id,
+            { expectedVersion: 1, text: TEXT },
+            { userId: users.ana },
+          ),
+          merge(b, source.id, target.id, users.ana),
+        ]);
+        expect(
+          [answer.status, merged.status].filter((x) => x === 200),
+        ).toHaveLength(1);
+        const row = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: source.id },
+        });
+        const targetRow = await prisma.chatbotRequest.findUniqueOrThrow({
+          where: { id: target.id },
+        });
+        const types = (await events(source.id)).map((e) => e.type);
+        // The target is never closed or answered by this race.
+        expect(targetRow).toMatchObject({ status: 'IN_PROGRESS', version: 1 });
+        expect(await feedItems(b, target.id)).toHaveLength(0);
+        if (answer.status === 200) {
+          expect(merged.status).toBe(409);
+          expect(merged.body.code).toBe('REQUEST_CLOSED');
+          expect(row.status).toBe('RESOLVED');
+          expect(types.filter((t) => t === 'REPLIED')).toHaveLength(1);
+          expect(types).not.toContain('MERGED');
+          expect(await feedItems(b, source.id)).toHaveLength(1);
+          expect(await feedOf(b, source.id, 'request.merged')).toBe(0);
+        } else {
+          expect(answer.status).toBe(409);
+          expect(answer.body.code).toBe('REQUEST_CLOSED');
+          expect(row).toMatchObject({
+            status: 'CANCELLED',
+            cancelReason: 'SUPERSEDED',
+          });
+          expect(types).not.toContain('REPLIED');
+          expect(await feedItems(b, source.id)).toHaveLength(0);
+          expect(await feedOf(b, source.id, 'request.merged')).toBe(1);
+          expect(row.resolution).toBeNull();
+        }
+      }
     });
   });
 
@@ -1157,6 +1321,91 @@ describeIfDb('clarification replies (PostgreSQL)', () => {
           where: { tenantId: { in: [b.tenantId, other.tenantId] } },
         }),
       ).toBe(0);
+    });
+
+    describe('a clarification without a conversationRef (parent decision)', () => {
+      it('its reply is mirrored in the chat the bot sent it to: STAFF, the replying user, id = replyId', async () => {
+        const b = await branch();
+        const q = await question(b, { conversationRef: null });
+        await reply(
+          b,
+          q.id,
+          { expectedVersion: 1, text: TEXT },
+          { userId: users.ana },
+        ).expect(200);
+        const replyId = await replyIdOf(q.id);
+        const message = out({ staffReplyId: replyId });
+        const res = await mirror(b, 'wa:5255819999', [message]).expect(200);
+        expect(res.body.accepted).toEqual([
+          { waMessageId: message.waMessageId, messageId: replyId, seq: 1 },
+        ]);
+        expect(
+          await prisma.conversationMessage.findUniqueOrThrow({
+            where: { id: replyId },
+          }),
+        ).toMatchObject({
+          author: 'STAFF',
+          staffUserId: users.ana,
+          clientMessageId: replyId,
+          direction: 'OUT',
+          deliveryStatus: 'SENT',
+        });
+        // A plain replay is a duplicate, not an error.
+        const again = await mirror(b, 'wa:5255819999', [message]).expect(200);
+        expect(again.body.duplicates).toEqual([message.waMessageId]);
+      });
+
+      it('the reply id is unique: mirrored once, a second mirror in ANOTHER chat is 409 and stores nothing', async () => {
+        const b = await branch();
+        const q = await question(b, { conversationRef: null });
+        await reply(b, q.id, { expectedVersion: 1, text: TEXT }).expect(200);
+        const replyId = await replyIdOf(q.id);
+        await mirror(b, 'wa:5255818881', [
+          out({ staffReplyId: replyId }),
+        ]).expect(200);
+        const res = await mirror(b, 'wa:5255818882', [
+          out({ staffReplyId: replyId }),
+        ]).expect(409);
+        expect(res.body.code).toBe('MESSAGE_ID_CONFLICT');
+        const rows = await prisma.conversationMessage.findMany({
+          where: { tenantId: b.tenantId },
+          include: { conversation: true },
+        });
+        expect(rows).toHaveLength(1);
+        expect(rows[0].conversation.conversationRef).toBe('wa:5255818881');
+      });
+
+      it('a null-ref reply of another branch is still 422 REPLY_NOT_FOUND', async () => {
+        const b = await branch();
+        const other = await branch();
+        const q = await question(other, { conversationRef: null });
+        await reply(other, q.id, { expectedVersion: 1, text: TEXT }).expect(
+          200,
+        );
+        const res = await mirror(b, 'wa:5255817771', [
+          out({ staffReplyId: await replyIdOf(q.id) }),
+        ]).expect(422);
+        expect(res.body.code).toBe('REPLY_NOT_FOUND');
+      });
+
+      it('one null-ref reply in a batch does not excuse another chat’s reply: the whole batch is 422', async () => {
+        const b = await branch();
+        const nullRef = await question(b, { conversationRef: null });
+        await reply(b, nullRef.id, { expectedVersion: 1, text: TEXT }).expect(
+          200,
+        );
+        const elsewhere = await replied(b);
+        const res = await mirror(b, 'wa:5255816661', [
+          out({ staffReplyId: await replyIdOf(nullRef.id) }),
+          out({ staffReplyId: elsewhere.replyId }),
+        ]).expect(422);
+        expect(res.body.code).toBe('REPLY_NOT_FOUND');
+        expect(
+          await prisma.conversationMessage.count({
+            where: { tenantId: b.tenantId },
+          }),
+        ).toBe(0);
+      });
     });
 
     it('an open or non-clarification request id is not a reply id', async () => {

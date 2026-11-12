@@ -96,7 +96,11 @@ describeIfDb('conversation retention (PostgreSQL)', () => {
 
   async function media(
     tenantId: string,
-    over: { dueDaysAgo?: number; storageKey?: string | null } = {},
+    over: {
+      dueDaysAgo?: number;
+      storageKey?: string | null;
+      purgeAttempts?: number;
+    } = {},
   ) {
     const id = randomUUID();
     const key =
@@ -113,10 +117,11 @@ describeIfDb('conversation retention (PostgreSQL)', () => {
     await prisma.$executeRaw`
       INSERT INTO "conversation_media"
         ("id", "tenantId", "storageKey", "mimeType", "sizeBytes", "sha256",
-         "idempotencyKey", "createdAt", "purgeAfter")
+         "idempotencyKey", "createdAt", "purgeAfter", "purgeAttempts")
       VALUES (${id}, ${tenantId}, ${key}, 'image/jpeg', 1, ${'c'.repeat(64)},
               ${randomUUID()}, now() - interval '13 months',
-              now() - (${over.dueDaysAgo ?? 1} * interval '1 day'))`;
+              now() - (${over.dueDaysAgo ?? 1} * interval '1 day'),
+              ${over.purgeAttempts ?? 0})`;
     return { id, key: key as string };
   }
   const mediaRow = (id: string) =>
@@ -331,11 +336,29 @@ describeIfDb('conversation retention (PostgreSQL)', () => {
     expect(storage.objects.has(stuck.key)).toBe(true);
   });
 
+  it('a claim never takes more rows than the batch, however many are due', async () => {
+    const t = await tenant();
+    // One at a time: a burst of parallel inserts needs connections the shared
+    // database may not have left after the suites that ran before this one.
+    for (let i = 0; i < 30; i++) await media(t);
+    for (let run = 0; run < 10; run++) {
+      const result = await service.purgeBatch({
+        batchSize: 1000,
+        mediaBatchSize: 3,
+      });
+      expect(result.mediaClaimed).toBeLessThanOrEqual(3);
+    }
+  }, 30_000);
+
   it('a full batch of files that all fail is not "more to do" (no retry storm)', async () => {
     const t = await tenant();
-    // Use the oldest due rows of the whole table: make this tenant's win.
+    // The claim is global and takes the rows with the fewest attempts first,
+    // then the oldest. Other specs (and earlier runs) leave due rows in the
+    // shared database, so this tenant's rows go first by construction: fewer
+    // attempts than any real row can have (a row that failed once has 1, one
+    // never tried has 0), whatever else is due.
     const stuck = await Promise.all(
-      [1, 2].map(() => media(t, { dueDaysAgo: 3650 })),
+      [1, 2].map(() => media(t, { dueDaysAgo: 3650, purgeAttempts: -1000 })),
     );
     for (const item of stuck) storage.failRemoveFor.add(item.key);
     const result = await service.purgeBatch({

@@ -85,9 +85,10 @@ export interface AllowedActionsOptions {
  *   REQUEST_CLAIMED_BY_OTHER  `claim` / `resolve` of a request someone holds
  *   NOT_ASSIGNEE              `release` / `cancel` / `merge` of a request
  *                             someone else holds, without the assignment
- *                             permission; `reply` of a clarification that is
- *                             not yours (nobody holds it yet, or someone else
- *                             does): the assignment permission does not lift it
+ *                             permission; `reply` of a clarification someone
+ *                             else holds: the assignment permission does not
+ *                             lift it. A NEW clarification is NOT denied: the
+ *                             reply claims it for the replier (S13)
  *   CANCEL_NOT_ALLOWED        a decision is resolved, never cancelled; a
  *                             started live session pins the request
  */
