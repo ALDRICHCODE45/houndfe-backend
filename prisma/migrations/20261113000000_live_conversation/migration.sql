@@ -105,7 +105,11 @@ CREATE OR REPLACE FUNCTION "conversation_messages_immutable"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF pg_trigger_depth() > 1 THEN
+    -- Nested AND the tenant no longer exists: only the tenant cascade is
+    -- exempt (kept from 20261112030000; a DELETE issued by another trigger
+    -- while the tenant exists is still rejected).
+    IF pg_trigger_depth() > 1
+       AND NOT EXISTS (SELECT 1 FROM "tenants" WHERE "id" = OLD."tenantId") THEN
       RETURN OLD;
     END IF;
     IF coalesce(current_setting('houndfe.conversation_retention', true), '') = 'on'

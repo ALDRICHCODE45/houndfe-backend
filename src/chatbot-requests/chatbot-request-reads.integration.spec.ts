@@ -1595,6 +1595,13 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
           text: 'Sí, es apto desde las 8 semanas.',
         }),
       );
+      // Unit 11: finishing a live conversation. The walk's request is not a
+      // live one, so this is the error path; it must not leak a phone either.
+      R('POST', ':id/finish', () =>
+        call('post', `/chatbot-requests/${id()}/finish`, {
+          expectedVersion: 1,
+        }),
+      );
       R('POST', ':id/resolve', () =>
         call('post', `/chatbot-requests/${ids.restock}/resolve`, {
           expectedVersion: 1,

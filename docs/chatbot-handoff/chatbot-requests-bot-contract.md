@@ -732,13 +732,13 @@ All four use the common envelope (`cursor`, `deliveryId`, `type`, `requestId`, `
 | `conversation.started`       | The claim of a live request committed (session `STARTING`, epoch N)        | `{requestId, handoffEpoch, staffFirstName, whatsappWindowClosesAt}` |
 | `conversation.staff_message` | The attendee sent a message (`POST /chatbot-requests/:id/messages`)        | `{requestId, handoffEpoch, seq, messageId, type: "TEXT", text}`     |
 | `template.requested`         | The attendee pressed "Enviar plantilla" (never automatic, §4.5)            | `{requestId, handoffEpoch, seq, messageId, templateName}`           |
-| `conversation.ended`         | Finish by the attendee or a reassigner, 2 h idle, or the 60 s start revert | `{requestId, handoffEpoch, reason, farewell}`                       |
+| `conversation.ended`         | Finish by the attendee or a reassigner, 2 h idle, or the 60 s start revert | `{requestId, handoffEpoch, reason, farewell, resumeNotice}`                       |
 
 - `staffFirstName` is the first word of the attendee's name; **`null` when the account has no name** (do not invent one: say "una persona del equipo"). It is the only staff datum you ever get; you compose the greeting ("Le atiende Ana…") with the customer's register.
 - `whatsappWindowClosesAt` is informational (the backend's estimate, ISO UTC, or `null`); **Meta is the source of truth** and you apply the real rule when you send. A closed window does **not** stop you from muting and ACKing the session: it only means there is no greeting to send (outcome `STALE`).
 - `messageId` is the id of the message row the backend stored (`QUEUED`). `text` is plain text, 1 to 4096 characters, line breaks included. **Staff messages carry no prefix and the model never touches them.** `seq` is the message's conversation `seq`.
 - `templateName` is the approved template of the tenant's settings (the attendee does not choose it). **OPEN Q4:** its language code and variables.
-- `reason` of `conversation.ended`: `FINISHED` (the attendee finished), `FORCED` (a reassigner finished it), `IDLE_TIMEOUT` (the customer was silent for 2 h, §4.6), `START_TIMEOUT` (the revert of rule 7). `farewell` is `true` for the first three and `false` for `START_TIMEOUT`. The farewell wording is yours ("vuelve a hablar con el bot", in the customer's register).
+- `reason` of `conversation.ended`: `FINISHED` (the attendee finished), `FORCED` (a reassigner finished it), `IDLE_TIMEOUT` (the customer was silent for 2 h, §4.6), `START_TIMEOUT` (the revert of rule 7). `farewell` is `true` for the first three and `false` for `START_TIMEOUT`. `resumeNotice` is `true` only for `START_TIMEOUT`: if you already told the customer you were handing over (you sent the greeting), send a short "seguimos por aquí" in their register (open question Q1); otherwise send nothing. The farewell wording is yours ("vuelve a hablar con el bot", in the customer's register).
 - The `request.answered` items of a clarification **are not** a live message: they keep their own rules and are `DEFERRED_HUMAN_SESSION` while `HUMAN`.
 
 ### ACK outcomes per type
@@ -771,7 +771,7 @@ A status later than the outcome only moves forward (`SENT → DELIVERED → READ
 
 ### `POST /chatbot-api/conversations/:conversationRef/session-ack`
 
-Scope `conversation:write`, class `write`. No `X-Idempotency-Key` needed: the natural key is `(epoch, state)`. `:conversationRef` as in `messages:batch`.
+Scope `conversation:write`, class `control` (its own rate bucket, default 120/min, so a `write` 429 cannot trip the 60 s start revert). No `X-Idempotency-Key` needed: the natural key is `(epoch, state)`. `:conversationRef` as in `messages:batch`.
 
 ```json
 { "epoch": 3, "state": "STARTED", "providerMessageId": "wamid.HBg…" }
