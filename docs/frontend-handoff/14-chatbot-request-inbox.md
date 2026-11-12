@@ -61,7 +61,7 @@ The same row is used by `groups`, `?customerKey=`, `history`, `otherOpenRequests
   "createdAt": "2026-11-09T17:00:00.000Z",
   "claimDeadlineAt": null, "resolveDeadlineAt": "2026-11-10T15:00:00.000Z", "overdueAt": "2026-11-10T15:00:00.000Z",
   "slaPaused": false, "slaResumesAt": null,
-  "whatsappWindowClosesAt": null, "unreadCustomerMessages": 0,
+  "whatsappWindowClosesAt": null, "windowClosingSoon": false, "unreadCustomerMessages": 0,
   "scheduledFor": null, "requiresTemplateAtStart": false, "needsReschedule": false,
   "liveSession": null,
   "closedAt": null, "resolvedBy": null,
@@ -281,6 +281,7 @@ Owner decisions of 2026-11-11 (inbox gaps). Everything here is **additive**: no 
 | `cancelReason` | `"CUSTOMER_WITHDREW" \| "SUPERSEDED" \| "AUTO_RESOLVED" \| "STAFF"` | `null` for open and for resolved requests |
 | `staffCancelReason` | `"DUPLICATE" \| "NOT_ACTIONABLE" \| "CUSTOMER_UNREACHABLE" \| "OTHER"` | `null` unless `cancelReason = "STAFF"` |
 | `mergedInto` | `{id: string, folio: "S-000123"}` | `null` unless `cancelReason = "SUPERSEDED"` by a staff merge |
+| `windowClosingSoon` | `boolean` | Never `null`. `false` for a closed request, with `whatsappWindowClosesAt: null`, or when the window already closed. Same rule as the filter; use it for the 24 h window tag (section 16) |
 | `slaLevel` | `"OK" \| "HALF" \| "ESCALATION" \| "OVERDUE"` | `null` for a closed request, when the active clock has no deadline (and no `overdueAt`), or when the tenant's calendar cannot be read (and no `overdueAt`) |
 
 ### 14.1 Actions on every row (`allowedActions`)
@@ -492,4 +493,9 @@ The `windowClosingSoon` filter (on `groups` and on the by-customer list) and the
 - A sucursal that never saved settings uses **120**, so nothing changes for it. Saving 120 behaves the same.
 - `0` turns the warning off: the filter returns nothing and the count is `0`.
 - Filter and count always agree, and each sucursal only sees its own setting. Changing the setting takes effect on the next read (nothing is recomputed or stored on the rows).
-- No new field and no new parameter: show the value the user chose in your label (for example "Ventana por cerrar (60 min)") by reading `windowWarningMinutes` from the settings if you have `read:ChatbotSettings`.
+- No new parameter: show the value the user chose in your label (for example "Ventana por cerrar (60 min)") by reading `windowWarningMinutes` from the settings if you have `read:ChatbotSettings`.
+- **Per-row `windowClosingSoon` (T7g, additive).** Every request row now carries `windowClosingSoon: boolean`: on the `groups` rows, the by-customer list, `history`, `otherOpenRequests` and `merge-candidates` of the detail, the detail itself, and the `request` row of the realtime events. It is **the same rule as the filter and the count** (one function; the filter's SQL and the row use the same bounds): the request is **open** (`NEW` or `IN_PROGRESS`), `whatsappWindowClosesAt` is not `null`, and it closes in `(now, now + windowWarningMinutes]` of the current sucursal (120 without saved settings; `0` means always `false`). **Use it for the 24 h window tag** ("Ventana de 24 h cierra en …") instead of comparing `whatsappWindowClosesAt` with a fixed 120 minutes.
+  - **Never `null`:** always `true` or `false`. It is `false` for closed rows (`RESOLVED` / `CANCELLED`, so also every `history` row), for rows with `whatsappWindowClosesAt: null`, and for a window that already closed.
+  - Consequence for the filter: `windowClosingSoon=true` on a closed tab (`status=resolved|cancelled`) now returns nothing, because a closed request is never closing soon (it used to match closed rows whose window had not expired yet).
+  - It is computed at read time, from the sucursal's current setting: changing `windowWarningMinutes` changes the flag on the next read, nothing is stored on the row. Every row of `?windowClosingSoon=true` has `windowClosingSoon: true`; rows outside it have `false`.
+  - A row cached on the client does not flip by itself when time passes: recompute the tag locally from `whatsappWindowClosesAt` and the setting for a live countdown, and refetch (or apply the next realtime row) to get the server's value.

@@ -1859,5 +1859,180 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect(list.status).toBe(200);
       expect(summaries(list.body.items)).toEqual(['near']);
     });
+
+    // ---------------------------- T7g: the per-row boolean, same rule
+
+    type Row = { summary: string; windowClosingSoon: boolean; status: string };
+    const flat = (body: { items: Array<{ requests: Row[] }> }): Row[] =>
+      body.items.flatMap((g) => g.requests);
+    const flagged = (rows: Row[]) =>
+      rows
+        .filter((r) => r.windowClosingSoon)
+        .map((r) => r.summary)
+        .sort();
+
+    describe.each([
+      ['a tenant on 60', 60, only(30, 60)],
+      ['a tenant on defaults (no row, 120)', null, only(30, 60, 61, 119, 120)],
+    ])('rows carry windowClosingSoon: %s', (_label, minutes, soon) => {
+      let id: string;
+      beforeAll(async () => {
+        id = (await tenantWithWarning(minutes)).id;
+      });
+
+      it('groups: every row of ?windowClosingSoon=true is true, and the unfiltered rows outside it are false', async () => {
+        const hit = await get(
+          '/chatbot-requests/groups?windowClosingSoon=true&limit=50',
+          'manager',
+          id,
+        );
+        const hitRows = flat(hit.body);
+        expect(hitRows.length).toBe(soon.length);
+        expect(hitRows.every((r) => r.windowClosingSoon === true)).toBe(true);
+        const all = flat(
+          (await get('/chatbot-requests/groups?limit=50', 'manager', id)).body,
+        );
+        expect(all).toHaveLength(CLOSES_IN.length);
+        expect(flagged(all)).toEqual(soon);
+        for (const row of all) {
+          expect(typeof row.windowClosingSoon).toBe('boolean');
+          if (!soon.includes(row.summary)) {
+            expect(row.windowClosingSoon).toBe(false);
+          }
+        }
+        // the count, the filter and the flags are one rule
+        expect(await counted(id)).toBe(soon.length);
+        expect(flagged(all)).toEqual(await filtered(id));
+      });
+
+      it('detail and otherOpenRequests, by-customer list, merge candidates', async () => {
+        const customerKey = `52551177${String(minutes ?? 0).padStart(4, '0')}`;
+        const conversationRef = `wa:t7g-${randomUUID()}`;
+        const mk = (summary: string, closesIn: number | null) =>
+          create(
+            {
+              customerKey,
+              summary,
+              conversationRef,
+              kind: 'CONVERSATION',
+              subtype: 'TALK_TO_HUMAN',
+              ...(closesIn === null
+                ? {}
+                : {
+                    lastCustomerMessageAt: new Date(
+                      NOW.getTime() + closesIn * MIN - DAY,
+                    ),
+                    whatsappWindowClosesAt: new Date(
+                      NOW.getTime() + closesIn * MIN,
+                    ),
+                  }),
+            },
+            id,
+          );
+        const main = await mk('main', 90);
+        await mk('soon', 30);
+        await mk('far', 600);
+        await mk('gone', -1);
+        await mk('nowindow', null);
+        await create(
+          {
+            customerKey,
+            summary: 'done',
+            conversationRef,
+            kind: 'CONVERSATION',
+            subtype: 'TALK_TO_HUMAN',
+            lastCustomerMessageAt: new Date(NOW.getTime() - DAY),
+            whatsappWindowClosesAt: new Date(NOW.getTime() + 20 * MIN),
+            ...closed('RESOLVED', new Date(NOW.getTime() - HOUR)),
+          },
+          id,
+        );
+        const expected: Record<string, boolean> = {
+          main: 90 <= (minutes ?? 120),
+          soon: true,
+          far: false,
+          gone: false,
+          nowindow: false,
+        };
+        const check = (rows: Row[], names: string[]) => {
+          expect(rows.map((r) => r.summary).sort()).toEqual([...names].sort());
+          for (const row of rows) {
+            expect(row.windowClosingSoon).toBe(expected[row.summary]);
+          }
+        };
+
+        const detail = await get(`/chatbot-requests/${main.id}`, 'manager', id);
+        expect(detail.status).toBe(200);
+        expect(detail.body.windowClosingSoon).toBe(expected.main);
+        check(detail.body.otherOpenRequests, [
+          'soon',
+          'far',
+          'gone',
+          'nowindow',
+        ]);
+
+        const list = await get(
+          `/chatbot-requests?customerKey=${encodeURIComponent(token(customerKey, id))}&limit=50`,
+          'manager',
+          id,
+        );
+        check(list.body.items, ['main', 'soon', 'far', 'gone', 'nowindow']);
+
+        const merge = await get(
+          `/chatbot-requests/${main.id}/merge-candidates`,
+          'manager',
+          id,
+        );
+        check(merge.body.items, ['soon', 'far', 'gone', 'nowindow']);
+
+        // closed rows: false, even with a window in range; the filter on the
+        // closed tab matches nothing (same rule: open only)
+        const resolved = await get(
+          '/chatbot-requests/groups?status=resolved&limit=50',
+          'manager',
+          id,
+        );
+        const done = flat(resolved.body).find((r) => r.summary === 'done');
+        expect(done?.windowClosingSoon).toBe(false);
+        const resolvedFiltered = await get(
+          '/chatbot-requests/groups?status=resolved&windowClosingSoon=true&limit=50',
+          'manager',
+          id,
+        );
+        expect(flat(resolvedFiltered.body)).toEqual([]);
+
+        // by-customer with the filter: every row true
+        const hit = await get(
+          `/chatbot-requests?customerKey=${encodeURIComponent(token(customerKey, id))}&windowClosingSoon=true&limit=50`,
+          'manager',
+          id,
+        );
+        expect(hit.body.items.length).toBeGreaterThan(0);
+        expect(
+          hit.body.items.every((r: Row) => r.windowClosingSoon === true),
+        ).toBe(true);
+        expect(flagged(list.body.items)).toEqual(
+          hit.body.items.map((r: Row) => r.summary).sort(),
+        );
+      });
+    });
+
+    it('history rows are closed: windowClosingSoon false', async () => {
+      const { id } = await tenantWithWarning(60);
+      await create(
+        {
+          summary: 'old',
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          lastCustomerMessageAt: new Date(NOW.getTime() - DAY),
+          whatsappWindowClosesAt: new Date(NOW.getTime() + 20 * MIN),
+          ...closed('RESOLVED', new Date(NOW.getTime() - 30 * DAY)),
+        },
+        id,
+      );
+      const history = await get('/chatbot-requests/history', 'manager', id);
+      expect(summaries(history.body.items)).toEqual(['old']);
+      expect(history.body.items[0].windowClosingSoon).toBe(false);
+    });
   });
 });

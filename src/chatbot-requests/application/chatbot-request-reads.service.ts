@@ -35,6 +35,8 @@ import {
 } from '../domain/staff-inbox';
 import { toStaffPhone } from '../domain/staff-phone';
 import type { SlaAnchors, SlaLevel } from '../domain/chatbot-sla';
+import { isWindowClosingSoon } from '../domain/window-closing-soon';
+import { defaultSettings } from '../../chatbot-settings/domain/chatbot-attention-settings';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import {
   ChatbotRequestCommandError,
@@ -67,6 +69,9 @@ export interface SlaPauseReader {
 }
 
 type SlaPause = { paused: boolean; resumesAt: Date | null };
+type WarningMinutes = () => Promise<number>;
+const isOpenStatus = (status: string) =>
+  status === 'NEW' || status === 'IN_PROGRESS';
 const NOT_PAUSED: SlaPause = { paused: false, resumesAt: null };
 
 /** What one response needs from the tenant's policy: built once per call. */
@@ -74,8 +79,18 @@ interface SlaView {
   pause: SlaPause;
   /** `null` for a closed row, no deadline, or a failed computation. */
   levelOf(row: RequestRecord): SlaLevel | null;
+  /**
+   * T7g (S11): the row's `windowClosingSoon`, the rule of the inbox filter
+   * with the tenant's `windowWarningMinutes` (domain `window-closing-soon`).
+   * Pure CPU: the minutes were read once when the view was built.
+   */
+  windowClosingSoonOf(row: RequestRecord): boolean;
 }
-const NO_VIEW: SlaView = { pause: NOT_PAUSED, levelOf: () => null };
+const NO_VIEW: SlaView = {
+  pause: NOT_PAUSED,
+  levelOf: () => null,
+  windowClosingSoonOf: () => false,
+};
 
 export type InboxTab = 'open' | 'resolved' | 'cancelled' | 'scheduled';
 export type AssigneeFilter =
@@ -246,6 +261,11 @@ interface PageQuery {
   now: Date;
   cutoff: Date;
   limit: number;
+  /**
+   * The tenant's `windowWarningMinutes`, set by the service exactly when
+   * `filters.windowClosingSoon` is on (the one read of the call).
+   */
+  windowWarningMinutes?: number;
 }
 
 export interface HistoryQuery {
@@ -278,6 +298,11 @@ export interface ChatbotRequestReadStore {
     },
   ): Promise<RequestRecord[]>;
   counts(userId: string, now: Date): Promise<InboxCounts>;
+  /**
+   * T7g: the tenant's `windowWarningMinutes` (one primary-key read). Optional
+   * so a store (or fake) that does not say reads as the default.
+   */
+  windowWarningMinutes?(): Promise<number>;
   history(query: HistoryQuery): Promise<RequestRecord[]>;
   findDetail(id: string, now: Date): Promise<DetailRecord | null>;
   mergeCandidates(id: string): Promise<RequestRecord[] | null>;
@@ -353,7 +378,53 @@ export class ChatbotRequestReadsService {
    * per failed call (not per row), with the tenant id and the error class
    * only: an error message can carry settings values or customer data.
    */
-  private async slaView(now: Date, empty = false): Promise<SlaView> {
+  private async slaView(
+    now: Date,
+    rows: RequestRecord[],
+    warning: WarningMinutes = this.warningMinutesOnce(),
+  ): Promise<SlaView> {
+    const [sla, windowClosingSoonOf] = await Promise.all([
+      this.slaOnly(now, rows.length === 0),
+      this.windowRule(now, rows, warning),
+    ]);
+    return { ...sla, windowClosingSoonOf };
+  }
+
+  /**
+   * T7g: the tenant's `windowWarningMinutes`, read AT MOST once per call and
+   * only when it is needed (a memoized thunk shared by the filter and the rows).
+   * A store that does not say reads as the default (120), like a tenant with no
+   * settings row.
+   */
+  private warningMinutesOnce(): WarningMinutes {
+    let pending: Promise<number> | undefined;
+    return () => {
+      pending ??= this.store.windowWarningMinutes
+        ? this.store.windowWarningMinutes()
+        : Promise.resolve(defaultSettings().windowWarningMinutes);
+      return pending;
+    };
+  }
+
+  /**
+   * The row rule of the filter. The settings are read only when some row can
+   * be flagged at all (open, with a window): closed rows, rows with no window
+   * and empty pages cost no lookup.
+   */
+  private async windowRule(
+    now: Date,
+    rows: RequestRecord[],
+    warning: WarningMinutes,
+  ): Promise<(row: RequestRecord) => boolean> {
+    const candidate = rows.some(
+      (r) => r.whatsappWindowClosesAt !== null && isOpenStatus(r.status),
+    );
+    if (!candidate) return () => false;
+    const minutes = await warning();
+    return (row) => isWindowClosingSoon(row, now, minutes);
+  }
+
+  private async slaOnly(now: Date, empty: boolean): Promise<SlaView> {
     if (!this.pauseReader || empty) return NO_VIEW;
     const tenant = this.store.tenantId();
     let warned = false;
@@ -368,11 +439,13 @@ export class ChatbotRequestReadsService {
         return {
           pause: await this.pauseReader.pauseAt(now),
           levelOf: () => null,
+          windowClosingSoonOf: () => false,
         };
       }
       const view = await this.pauseReader.viewAt(now);
       return {
         pause: view.pause,
+        windowClosingSoonOf: () => false,
         levelOf: (row) => {
           if (row.status !== 'NEW' && row.status !== 'IN_PROGRESS') return null;
           try {
@@ -412,6 +485,7 @@ export class ChatbotRequestReadsService {
     const limit = input.limit ?? DEFAULT_PAGE;
     const filters = this.withSearch(reader, input.filters, input.q);
     if (!filters) return { items: [], nextCursor: null };
+    const warning = this.warningMinutesOnce();
     const records = await this.store.groups({
       userId: reader.userId,
       now,
@@ -419,6 +493,9 @@ export class ChatbotRequestReadsService {
       limit,
       tab: input.tab,
       filters,
+      ...(filters.windowClosingSoon
+        ? { windowWarningMinutes: await warning() }
+        : {}),
       cursor: this.openCursor(
         input.cursor,
         input.tab === 'resolved' || input.tab === 'cancelled'
@@ -427,7 +504,11 @@ export class ChatbotRequestReadsService {
         1,
       ),
     });
-    const view = await this.slaView(now, records.length === 0);
+    const view = await this.slaView(
+      now,
+      records.flatMap((g) => g.requests),
+      warning,
+    );
     const page = records.slice(0, limit);
     const customers = await this.customerIndex(page.flatMap((g) => g.requests));
     const items = page.map((group) => {
@@ -490,6 +571,7 @@ export class ChatbotRequestReadsService {
     const customerKey = this.openKey(input.customerKey);
     const filters = this.withSearch(reader, input.filters ?? {}, input.q);
     if (!filters) return { items: [], nextCursor: null };
+    const warning = this.warningMinutesOnce();
     const records = await this.store.listByCustomer({
       userId: reader.userId,
       now,
@@ -498,12 +580,15 @@ export class ChatbotRequestReadsService {
       customerKey,
       tab: input.tab,
       filters,
+      ...(filters.windowClosingSoon
+        ? { windowWarningMinutes: await warning() }
+        : {}),
       cursor: this.openCursor(
         input.cursor,
         open ? ['date?', 'date', 'uuid'] : ['date', 'uuid'],
       ),
     });
-    const view = await this.slaView(now, records.length === 0);
+    const view = await this.slaView(now, records, warning);
     const page = records.slice(0, limit);
     const last = page[page.length - 1];
     return {
@@ -598,7 +683,7 @@ export class ChatbotRequestReadsService {
     const record = await this.store.findDetail(id, now);
     if (!record) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
     const { request, customer } = record;
-    const view = await this.slaView(now);
+    const view = await this.slaView(now, [request, ...record.otherOpen]);
     const row = this.toRow(request, view, reader);
     const audit = record.audit.slice(0, AUDIT_IN_DETAIL);
     const lastAudit = audit[audit.length - 1];
@@ -730,7 +815,7 @@ export class ChatbotRequestReadsService {
   async mergeCandidates(id: string, reader?: StaffReader) {
     const records = await this.store.mergeCandidates(id);
     if (!records) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
-    const view = await this.slaView(this.clock(), records.length === 0);
+    const view = await this.slaView(this.clock(), records);
     return { items: records.map((r) => this.toRow(r, view, reader)) };
   }
 
@@ -753,13 +838,14 @@ export class ChatbotRequestReadsService {
     const records = await this.store.byIds(ids);
     const [customers, view] = await Promise.all([
       this.customerIndex(records),
-      this.slaView(this.clock(), records.length === 0),
+      this.slaView(this.clock(), records),
     ]);
     // The level of a row does not depend on who reads it: compute it once per
     // batch instead of once per recipient (it walks the business calendar).
     const levels = new Map<string, SlaLevel | null>();
     const shared: SlaView = {
       pause: view.pause,
+      windowClosingSoonOf: (row) => view.windowClosingSoonOf(row),
       levelOf: (row) => {
         if (!levels.has(row.id)) levels.set(row.id, view.levelOf(row));
         return levels.get(row.id) ?? null;
@@ -857,6 +943,9 @@ export class ChatbotRequestReadsService {
       slaPaused: paused,
       slaResumesAt: paused ? iso(pause.resumesAt) : null,
       whatsappWindowClosesAt: iso(r.whatsappWindowClosesAt),
+      // T7g (S11): the filter's rule with the tenant's windowWarningMinutes;
+      // false for closed rows and rows with no window.
+      windowClosingSoon: view.windowClosingSoonOf(r),
       unreadCustomerMessages: r.unreadCustomerMessages ?? 0,
       scheduledFor: iso(r.scheduledFor),
       requiresTemplateAtStart: r.requiresTemplateAtStart,
