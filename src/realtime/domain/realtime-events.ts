@@ -142,7 +142,11 @@ export type ControlEventName =
   | 'access-revoked'
   | 'connection-replaced'
   | 'slow-consumer'
-  | 'server-shutdown';
+  | 'server-shutdown'
+  | 'server-unavailable';
+
+/** `server-shutdown` reasons: the client reconnects with `Last-Event-ID`. */
+export type ShutdownReason = 'SHUTDOWN' | 'ERROR' | 'RESYNC_FAILED';
 
 export type ResyncReason =
   | 'CURSOR_EXPIRED'

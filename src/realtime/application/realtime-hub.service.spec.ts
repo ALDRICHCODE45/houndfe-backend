@@ -13,6 +13,7 @@ import type { AccessPort, AccessResult } from './realtime-access';
 import { AccessGate } from './realtime-access';
 import {
   RealtimeHub,
+  RealtimeUnavailableError,
   type HubListener,
   type HubShaper,
   type HubStore,
@@ -59,6 +60,10 @@ class FakeStore implements HubStore {
   purged = new Map<string, bigint>();
   reads: Array<{ tenant: string; user: string | null; after: bigint }> = [];
   failReads = 0;
+  /** `tenantHead` calls that reject (the same DB trouble that failed a batch). */
+  failHeads = 0;
+  /** Holds `tenantHead` AFTER it computed its answer (like a slow query). */
+  headGate: Promise<void> | null = null;
   private nextId = 1n;
   hold: Promise<void> | null = null;
   /**
@@ -86,9 +91,15 @@ class FakeStore implements HubStore {
     return row;
   }
 
-  tenantHead(tenantId: string): Promise<bigint> {
+  async tenantHead(tenantId: string): Promise<bigint> {
     const mine = this.rows.filter((r) => r.tenantId === tenantId);
-    return Promise.resolve(mine.at(-1)?.id ?? 0n);
+    const head = mine.at(-1)?.id ?? 0n;
+    if (this.headGate) await this.headGate;
+    if (this.failHeads > 0) {
+      this.failHeads -= 1;
+      throw new Error('db down');
+    }
+    return head;
   }
   purgedThrough(tenantId: string): Promise<bigint> {
     return Promise.resolve(this.purged.get(tenantId) ?? 0n);
@@ -122,17 +133,29 @@ class FakeListener implements HubListener {
   handlers: Array<(payload: string) => void> = [];
   connected: Array<() => void> = [];
   started = 0;
-  start(): Promise<void> {
+  /** `start` calls that reject. */
+  failStarts = 0;
+  /** Holds `start` until released (controllable in-flight connection). */
+  startGate: Promise<void> | null = null;
+  async start(): Promise<void> {
     this.started += 1;
-    return Promise.resolve();
+    if (this.startGate) await this.startGate;
+    if (this.failStarts > 0) {
+      this.failStarts -= 1;
+      throw new Error('listen down');
+    }
   }
   subscribe(_channel: string, handler: (payload: string) => void) {
     this.handlers.push(handler);
-    return () => undefined;
+    return () => {
+      this.handlers = this.handlers.filter((h) => h !== handler);
+    };
   }
   onConnected(handler: () => void) {
     this.connected.push(handler);
-    return () => undefined;
+    return () => {
+      this.connected = this.connected.filter((h) => h !== handler);
+    };
   }
   notify(tenantId: string): void {
     for (const handler of this.handlers) handler(tenantId);
@@ -701,6 +724,102 @@ describe('RealtimeHub', () => {
       await hub.onModuleDestroy();
     });
 
+    describe('a resync that cannot be sent (DB trouble outlasting the batch)', () => {
+      /** Fails the batch of event 1 five times, with `tenantHead` held. */
+      const failFiveBatches = async (
+        ctx: ReturnType<typeof setup>,
+        gate: Promise<void>,
+      ) => {
+        ctx.store.headGate = gate;
+        ctx.store.add('t1', 'request.created');
+        ctx.shape.failPrepare = 5;
+        ctx.listener.notify('t1');
+        for (let i = 0; i < 6; i += 1) {
+          await jest.advanceTimersByTimeAsync(1_000);
+        }
+        await settle();
+      };
+
+      it('closes the stream with a documented reason instead of leaving it behind the cursor', async () => {
+        const ctx = setup();
+        const { store, open, hub } = ctx;
+        const { sink } = await open('t1', 'u1');
+        store.failHeads = 1;
+        await failFiveBatches(ctx, Promise.resolve());
+        expect(sink.events).toEqual(['ready', 'server-shutdown']);
+        expect(sink.text).toContain('"reason":"RESYNC_FAILED"');
+        expect(sink.text).not.toContain('event: resync');
+        expect(sink.ended).toBe(true);
+        expect(hub.openStreams).toBe(0);
+        await hub.onModuleDestroy();
+      });
+
+      it('holds live events while the resync is pending, so Last-Event-ID still covers the skipped ids', async () => {
+        const ctx = setup();
+        const { store, listener, open, hub } = ctx;
+        const { sink } = await open('t1', 'u1');
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        store.failHeads = 1;
+        await failFiveBatches(ctx, gate);
+        // A newer event commits while the resync is still waiting on the DB.
+        store.add('t1', 'request.claimed');
+        listener.notify('t1');
+        await settle();
+        await jest.advanceTimersByTimeAsync(1_000);
+        await settle();
+        expect(sink.events).toEqual(['ready']);
+        release();
+        await settle();
+        expect(sink.events).toEqual(['ready', 'server-shutdown']);
+        expect(sink.text).toContain('RESYNC_FAILED');
+        // The client never saw ids 1 or 2: it reconnects with its own cursor.
+        store.headGate = null;
+        const again = await open('t1', 'u1', 0n);
+        expect(again.sink.events).toEqual([
+          'request.created:1',
+          'request.claimed:2',
+        ]);
+        await hub.onModuleDestroy();
+      });
+
+      it('a successful resync keeps the stream open, tells it first and then delivers what was held', async () => {
+        const ctx = setup();
+        const { store, listener, open, hub } = ctx;
+        const { sink } = await open('t1', 'u1');
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        await failFiveBatches(ctx, gate);
+        store.add('t1', 'request.claimed');
+        listener.notify('t1');
+        await settle();
+        await jest.advanceTimersByTimeAsync(1_000);
+        await settle();
+        expect(sink.events).toEqual(['ready']);
+        release();
+        await settle();
+        expect(sink.events).toEqual(['ready', 'resync:1', 'request.claimed:2']);
+        expect(sink.ended).toBe(false);
+        expect(hub.openStreams).toBe(1);
+        await hub.onModuleDestroy();
+      });
+
+      it('only the stream whose resync failed is closed', async () => {
+        const ctx = setup();
+        const { store, open, hub } = ctx;
+        const a = await open('t1', 'u1');
+        const b = await open('t1', 'u2');
+        store.failHeads = 1;
+        await failFiveBatches(ctx, Promise.resolve());
+        const closed = [a, b].filter(({ sink }) => sink.ended);
+        const open_ = [a, b].filter(({ sink }) => !sink.ended);
+        expect(closed).toHaveLength(1);
+        expect(open_).toHaveLength(1);
+        expect(open_[0].sink.events).toEqual(['ready', 'resync:1']);
+        await hub.onModuleDestroy();
+      });
+    });
+
     it('keeps serving other tenants while one tenant keeps failing', async () => {
       const { store, listener, open, hub } = setup();
       const bad = await open('t1', 'u1');
@@ -710,6 +829,69 @@ describe('RealtimeHub', () => {
       await settle();
       expect(good.sink.events).toEqual(['ready', 'request.created:1']);
       expect(bad.sink.events).toEqual(['ready']);
+      await hub.onModuleDestroy();
+    });
+  });
+
+  describe('the LISTEN subscription fails to start', () => {
+    it('does not memoize the failure: the next connect retries and realtime recovers', async () => {
+      const { store, listener, open, hub } = setup();
+      listener.failStarts = 1;
+      await expect(open('t1', 'u1')).rejects.toThrow(RealtimeUnavailableError);
+      expect(hub.openStreams).toBe(0);
+      // Transient failure over: the very next connect works, without a restart.
+      const { sink } = await open('t1', 'u1');
+      expect(listener.started).toBe(2);
+      store.add('t1', 'request.created');
+      listener.notify('t1');
+      await settle();
+      expect(sink.events).toEqual(['ready', 'request.created:1']);
+      await hub.onModuleDestroy();
+    });
+
+    it('does not stack subscriptions across retries (one wake per NOTIFY)', async () => {
+      const { store, listener, open, hub } = setup();
+      listener.failStarts = 2;
+      await expect(open('t1', 'u1')).rejects.toThrow(RealtimeUnavailableError);
+      await expect(open('t1', 'u1')).rejects.toThrow(RealtimeUnavailableError);
+      expect(listener.handlers).toHaveLength(0);
+      expect(listener.connected).toHaveLength(0);
+      const { sink } = await open('t1', 'u1');
+      expect(listener.handlers).toHaveLength(1);
+      expect(listener.connected).toHaveLength(1);
+      store.add('t1', 'request.created');
+      listener.notify('t1');
+      await settle();
+      expect(sink.events).toEqual(['ready', 'request.created:1']);
+      expect(store.reads.filter((r) => r.user === null)).toHaveLength(1);
+      await hub.onModuleDestroy();
+    });
+
+    it('connects that overlap the failing start share it and all fail once', async () => {
+      const { listener, hub, open } = setup();
+      let release!: () => void;
+      listener.startGate = new Promise<void>((resolve) => (release = resolve));
+      listener.failStarts = 1;
+      const first = open('t1', 'u1');
+      const second = open('t1', 'u2');
+      const outcomes = Promise.allSettled([first, second]);
+      await settle();
+      release();
+      const results = await outcomes;
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+      expect(listener.started).toBe(1);
+      listener.startGate = null;
+      await open('t1', 'u1');
+      expect(listener.started).toBe(2);
+      await hub.onModuleDestroy();
+    });
+
+    it('ensureReady reports RealtimeUnavailableError before any stream exists, then recovers', async () => {
+      const { listener, hub } = setup();
+      listener.failStarts = 1;
+      await expect(hub.ensureReady()).rejects.toThrow(RealtimeUnavailableError);
+      await expect(hub.ensureReady()).resolves.toBeUndefined();
+      expect(listener.started).toBe(2);
       await hub.onModuleDestroy();
     });
   });

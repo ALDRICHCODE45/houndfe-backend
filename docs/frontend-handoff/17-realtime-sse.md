@@ -30,6 +30,7 @@ Needs `read:ChatbotRequest` (the same as the inbox). The user must be active and
 | `401` | No or expired token, or the user is inactive. Refresh the token; if that fails, log out. |
 | `403` | No membership in the sucursal, or no `read:ChatbotRequest`. Do not retry. |
 | `503 STREAM_CAPACITY` | This server is full (1 000 streams). `Retry-After: 5`; retry with backoff. |
+| `503 REALTIME_UNAVAILABLE` | This server cannot serve realtime right now (its database listener did not start; transient). Sent **before** any SSE header, so it is a normal HTTP error, never an empty `200`. `Retry-After: 5`; retry with backoff. Keep polling meanwhile. The next attempt retries on the server; no restart is needed. |
 
 Response headers (all anti-buffering, R6): `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-store`, `X-Accel-Buffering: no`, `Connection: keep-alive`, `Content-Encoding: identity` (so a proxy that compresses by default leaves it alone). There is no `Content-Length`. The body starts with `retry: 3000` (the reconnect hint in milliseconds).
 
@@ -115,7 +116,8 @@ data: {"ids":["…"],"all":false,"unreadCount":2}
 | `access-revoked` | no | `{"reason": "USER_INACTIVE" \| "MEMBERSHIP_REMOVED" \| "PERMISSION_REVOKED"}` | The stream ends. **Do not reconnect in a loop.** Refetch the session / permissions (`/auth/me/permissions`); reconnect only if you still have `read:ChatbotRequest` in this sucursal, otherwise leave the inbox. |
 | `connection-replaced` | no | `{}` | The user opened a 6th stream; this one (the oldest) ends. **Do not reconnect automatically**: show "Abierto en otra ventana" with a button to reconnect (this is what prevents two tabs from expelling each other forever). |
 | `slow-consumer` | no | `{"reason": "BUFFER_FULL" \| "WRITE_BLOCKED" \| "BACKLOG"}` | The server dropped a connection that was not reading fast enough. Reconnect with your `Last-Event-ID`: nothing is lost, the log replays it. If it repeats, back off. |
-| `server-shutdown` | no | `{"reason": "SHUTDOWN" \| "ERROR"}` | The server is restarting (deploy) or hit an error while resuming. Reconnect with `Last-Event-ID` and backoff (the load balancer sends you to another instance). |
+| `server-shutdown` | no | `{"reason": "SHUTDOWN" \| "ERROR" \| "RESYNC_FAILED"}` | The server is restarting (deploy), hit an error while resuming, or (`RESYNC_FAILED`) could not deliver a batch and could not send you the `resync` either (database trouble). Reconnect with `Last-Event-ID` and backoff (the load balancer sends you to another instance): the log replays everything after your cursor, including what the server could not deliver. Do **not** treat it as `resync`; nothing was skipped for you. |
+| `server-unavailable` | no | `{"reason": "REALTIME_UNAVAILABLE"}` | Rare: the server lost the ability to serve realtime after it had already accepted the connection (race with a transient failure). The response ends. Reconnect with `Last-Event-ID` and backoff (start at 5 s), as for `503 REALTIME_UNAVAILABLE`. |
 
 All of them except `ready`, `heartbeat` and `resync` are followed by the end of the response.
 
@@ -126,8 +128,8 @@ The server keeps every event **24 hours** in a durable log. A connection with a 
 Recommended client logic:
 
 1. **First connection of a session (no cursor).** Open the stream, wait for `ready`, then fetch the lists (groups, counts, `unread-count`). Events that arrive while you fetch are applied by the version rule; an event older than the fetched list is ignored or harmless. Store the `id` of `ready` and of every later state-changing message.
-2. **Reconnection** (network, `slow-consumer`, `server-shutdown`, `auth-expired` after refreshing): send `Last-Event-ID` with the stored id. You do **not** need to refetch lists. Dedupe by `id` anyway (cheap): the log never repeats an id on one connection, but your own retry logic might.
-3. **`resync`**: you were away more than 24 hours (`CURSOR_EXPIRED`) or missed more than 1 000 events (`REPLAY_TOO_LARGE`, a very busy sucursal), or the server could not deliver a batch after 5 attempts and skipped it (`DELIVERY_FAILED`, rare; the events of that batch are NOT replayed): refetch everything and continue with the id of the `resync` message. Treat every `reason` the same way; show nothing to the user.
+2. **Reconnection** (network, `slow-consumer`, `server-shutdown`, `server-unavailable`, `auth-expired` after refreshing): send `Last-Event-ID` with the stored id. You do **not** need to refetch lists. Dedupe by `id` anyway (cheap): the log never repeats an id on one connection, but your own retry logic might.
+3. **`resync`**: you were away more than 24 hours (`CURSOR_EXPIRED`) or missed more than 1 000 events (`REPLAY_TOO_LARGE`, a very busy sucursal), or the server could not deliver a batch after 5 attempts and skipped it (`DELIVERY_FAILED`, rare; the events of that batch are NOT replayed; if the server cannot even send you the `resync`, it closes the stream with `server-shutdown` `RESYNC_FAILED` and the reconnect replays them): refetch everything and continue with the id of the `resync` message. Treat every `reason` the same way; show nothing to the user.
 4. **No stored cursor** (a new device, cleared storage): connect without one and follow step 1.
 
 Backoff: start at the `retry:` value (3 s), double up to 30 s, add jitter. Reset it after a message arrives.

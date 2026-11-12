@@ -42,6 +42,7 @@ import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
 import { RealtimeHub } from '../application/realtime-hub.service';
 import type { StreamSink } from '../application/realtime-stream';
 import {
+  formatSseFrame,
   parseEventCursor,
   STREAM_LIMITS,
   tokenExpiryMs,
@@ -108,6 +109,19 @@ export class RealtimeController {
       });
     }
 
+    // The replica must be able to serve realtime BEFORE the 200 goes out: an
+    // empty 200 gives the client no signal (it would just retry forever).
+    try {
+      await this.hub.ensureReady();
+    } catch {
+      res.setHeader('Retry-After', '5');
+      throw new ServiceUnavailableException({
+        statusCode: 503,
+        code: 'REALTIME_UNAVAILABLE',
+        message: 'Realtime is temporarily unavailable; retry shortly',
+      });
+    }
+
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
@@ -126,16 +140,29 @@ export class RealtimeController {
       handle?.dispose();
     });
 
-    handle = await this.hub.connect({
-      tenantId: user.tenantId,
-      userId: user.userId,
-      ability,
-      sink: sinkOf(res),
-      after: cursor,
-      expiresAtMs:
-        tokenExpiryMs(req.headers.authorization) ??
-        Date.now() + STREAM_LIMITS.defaultTokenLifetimeMs,
-    });
+    try {
+      handle = await this.hub.connect({
+        tenantId: user.tenantId,
+        userId: user.userId,
+        ability,
+        sink: sinkOf(res),
+        after: cursor,
+        expiresAtMs:
+          tokenExpiryMs(req.headers.authorization) ??
+          Date.now() + STREAM_LIMITS.defaultTokenLifetimeMs,
+      });
+    } catch {
+      // The headers are already out (the subscription failed between the
+      // check above and now): say so with a control event and close, so the
+      // client backs off and reconnects instead of reading an empty 200.
+      res.end(
+        formatSseFrame({
+          event: 'server-unavailable',
+          data: { reason: 'REALTIME_UNAVAILABLE' },
+        }),
+      );
+      return;
+    }
     if (handle === null) {
       // Filled up between the check and now (the headers are already sent).
       res.end();

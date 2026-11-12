@@ -126,6 +126,19 @@ const MAX_BATCH_FAILURES = 5;
 
 const maxId = (a: bigint, b: bigint) => (a > b ? a : b);
 
+/**
+ * The replica cannot serve realtime right now (the LISTEN subscription did not
+ * start). Transient: the next attempt retries, nothing is memoized. The HTTP
+ * edge answers `503 REALTIME_UNAVAILABLE` (or `event: server-unavailable` when
+ * the headers are already out).
+ */
+export class RealtimeUnavailableError extends Error {
+  constructor() {
+    super('Realtime is unavailable on this replica');
+    this.name = 'RealtimeUnavailableError';
+  }
+}
+
 @Injectable()
 export class RealtimeHub {
   private readonly logger = new Logger(RealtimeHub.name);
@@ -160,6 +173,16 @@ export class RealtimeHub {
   /** Room for one more stream on this replica (§6.4 protection). */
   canAccept(): boolean {
     return !this.closing && this.total < this.limits.maxStreamsPerReplica;
+  }
+
+  /**
+   * Opens the replica's LISTEN subscription if it is not open. The controller
+   * awaits it BEFORE sending SSE headers, so a replica that cannot serve
+   * realtime answers an HTTP error instead of an empty 200.
+   * @throws RealtimeUnavailableError when the subscription cannot start.
+   */
+  ensureReady(): Promise<void> {
+    return this.ensureSubscribed();
   }
 
   async connect(params: ConnectParams): Promise<StreamHandle | null> {
@@ -219,19 +242,36 @@ export class RealtimeHub {
 
   // ------------------------------------------------------------ subscription
 
+  /**
+   * One shared start for the replica. A failed start is NOT memoized: the
+   * handlers it registered are removed and the next caller starts again
+   * (connects that overlap a start share its outcome). No extra backoff: a
+   * retry is one `start()` call, and clients are told `Retry-After`.
+   */
   private ensureSubscribed(): Promise<void> {
     this.subscribed ??= (async () => {
-      this.unsubscribe.push(
-        this.listener.subscribe(REALTIME_CHANNEL, (tenantId) =>
-          this.wake(tenantId),
-        ),
-        // A NOTIFY sent while the connection was down is gone (R7): read from
-        // each cursor instead of trusting it.
-        this.listener.onConnected(() => {
-          for (const tenantId of [...this.feeds.keys()]) this.wake(tenantId);
-        }),
-      );
-      await this.listener.start();
+      const offs: Array<() => void> = [];
+      try {
+        offs.push(
+          this.listener.subscribe(REALTIME_CHANNEL, (tenantId) =>
+            this.wake(tenantId),
+          ),
+          // A NOTIFY sent while the connection was down is gone (R7): read from
+          // each cursor instead of trusting it.
+          this.listener.onConnected(() => {
+            for (const tenantId of [...this.feeds.keys()]) this.wake(tenantId);
+          }),
+        );
+        await this.listener.start();
+        this.unsubscribe.push(...offs);
+      } catch (error) {
+        for (const off of offs) off();
+        this.subscribed = null;
+        this.logger.error(
+          `realtime LISTEN start failed: ${this.reason(error)}`,
+        );
+        throw new RealtimeUnavailableError();
+      }
     })();
     return this.subscribed;
   }
@@ -358,6 +398,40 @@ export class RealtimeHub {
       event: 'resync',
       data: { reason },
     });
+  }
+
+  /**
+   * Tells a stream to resync after the feed cursor skipped events for it. A
+   * stream must never stay open behind a cursor that skipped events without
+   * either a delivered `resync` or a close:
+   * - while the resync is pending the stream is `replaying`, so live events are
+   *   held in its buffer (they cannot move `lastSentId` past the skipped ids);
+   * - on success the held events follow the `resync` frame and the stream is
+   *   live again;
+   * - on failure (the `tenantHead` read usually fails with the same database
+   *   trouble) the stream is closed with `server-shutdown {RESYNC_FAILED}`;
+   *   `lastSentId` is untouched, so the client's `Last-Event-ID` replays the
+   *   skipped ids from the durable log.
+   * A stream that was already replaying keeps its own replay flow to go live.
+   */
+  private async resyncOrClose(
+    stream: RealtimeStream,
+    reason: ResyncReason,
+  ): Promise<void> {
+    const wasLive = stream.state === 'live';
+    if (wasLive) stream.state = 'replaying';
+    try {
+      await this.resync(stream, reason);
+      if (wasLive && !stream.closed) await this.goLive(stream);
+    } catch (error) {
+      this.logger.error(
+        `stream resync failed (tenant ${stream.tenantId}): ${this.reason(error)}`,
+      );
+      stream.close({
+        event: 'server-shutdown',
+        data: { reason: 'RESYNC_FAILED' },
+      });
+    }
   }
 
   /** Flushes what arrived during the replay, then switches to live. */
@@ -568,9 +642,9 @@ export class RealtimeHub {
       feed.cursor = feed.inflightLast;
       feed.inflightLast = null;
       feed.failures = 0;
-      for (const stream of feed.streams) {
+      for (const stream of [...feed.streams]) {
         if (stream.closed) continue;
-        void this.resync(stream, 'DELIVERY_FAILED').catch(() => undefined);
+        void this.resyncOrClose(stream, 'DELIVERY_FAILED');
       }
     }
     if (feed.retryTimer || this.closing) return;
