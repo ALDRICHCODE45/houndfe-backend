@@ -155,6 +155,20 @@ describe('RealtimeStream', () => {
       expect(closed).toHaveLength(1);
     });
 
+    it('a lifetime beyond the timer limit (~24.8 days) does not fire at once, and still expires on time', () => {
+      const day = 24 * 60 * 60_000;
+      const { stream, sink } = make({ expiresAtMs: T0 + 30 * day });
+      stream.start();
+      jest.advanceTimersByTime(1_000);
+      expect(sink.text).not.toContain('auth-expired');
+      expect(stream.state).not.toBe('closed');
+      jest.advanceTimersByTime(30 * day - 1_001);
+      expect(stream.state).not.toBe('closed');
+      jest.advanceTimersByTime(1);
+      expect(sink.text).toContain('event: auth-expired');
+      expect(stream.state).toBe('closed');
+    });
+
     it('a token that already expired closes at once', () => {
       const { stream, sink } = make({ expiresAtMs: T0 - 1 });
       stream.start();

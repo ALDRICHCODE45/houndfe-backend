@@ -144,7 +144,10 @@ export type ControlEventName =
   | 'slow-consumer'
   | 'server-shutdown';
 
-export type ResyncReason = 'CURSOR_EXPIRED' | 'REPLAY_TOO_LARGE';
+export type ResyncReason =
+  | 'CURSOR_EXPIRED'
+  | 'REPLAY_TOO_LARGE'
+  | 'DELIVERY_FAILED';
 export type RevokedReason =
   | 'USER_INACTIVE'
   | 'MEMBERSHIP_REMOVED'

@@ -110,7 +110,7 @@ data: {"ids":["…"],"all":false,"unreadCount":2}
 | --- | --- | --- | --- |
 | `ready` | the current cursor (absent if the sucursal has no events yet) | `{"serverTime": "…", "heartbeatSeconds": 15}` | First message of every connection that came **without** a cursor. See section 4. |
 | `heartbeat` | no | `{"serverTime": "…"}` | Every 15 s. If **nothing at all** arrives for **45 s**, consider the connection dead and reconnect with your `Last-Event-ID`. |
-| `resync` | the current cursor | `{"reason": "CURSOR_EXPIRED" \| "REPLAY_TOO_LARGE"}` | **Refetch your lists** (groups, counts, `GET /notifications/unread-count`, the open detail). The stream stays open and continues from now. |
+| `resync` | the current cursor | `{"reason": "CURSOR_EXPIRED" \| "REPLAY_TOO_LARGE" \| "DELIVERY_FAILED"}` | **Refetch your lists** (groups, counts, `GET /notifications/unread-count`, the open detail). The stream stays open and continues from now. |
 | `auth-expired` | no | `{}` | The token reached its `exp`; the stream ends. Refresh the token and reconnect with `Last-Event-ID`. If the refresh fails, log out. |
 | `access-revoked` | no | `{"reason": "USER_INACTIVE" \| "MEMBERSHIP_REMOVED" \| "PERMISSION_REVOKED"}` | The stream ends. **Do not reconnect in a loop.** Refetch the session / permissions (`/auth/me/permissions`); reconnect only if you still have `read:ChatbotRequest` in this sucursal, otherwise leave the inbox. |
 | `connection-replaced` | no | `{}` | The user opened a 6th stream; this one (the oldest) ends. **Do not reconnect automatically**: show "Abierto en otra ventana" with a button to reconnect (this is what prevents two tabs from expelling each other forever). |
@@ -127,7 +127,7 @@ Recommended client logic:
 
 1. **First connection of a session (no cursor).** Open the stream, wait for `ready`, then fetch the lists (groups, counts, `unread-count`). Events that arrive while you fetch are applied by the version rule; an event older than the fetched list is ignored or harmless. Store the `id` of `ready` and of every later state-changing message.
 2. **Reconnection** (network, `slow-consumer`, `server-shutdown`, `auth-expired` after refreshing): send `Last-Event-ID` with the stored id. You do **not** need to refetch lists. Dedupe by `id` anyway (cheap): the log never repeats an id on one connection, but your own retry logic might.
-3. **`resync`**: you were away more than 24 hours (`CURSOR_EXPIRED`) or missed more than 1 000 events (`REPLAY_TOO_LARGE`, a very busy sucursal): refetch everything and continue with the id of the `resync` message.
+3. **`resync`**: you were away more than 24 hours (`CURSOR_EXPIRED`) or missed more than 1 000 events (`REPLAY_TOO_LARGE`, a very busy sucursal), or the server could not deliver a batch after 5 attempts and skipped it (`DELIVERY_FAILED`, rare; the events of that batch are NOT replayed): refetch everything and continue with the id of the `resync` message. Treat every `reason` the same way; show nothing to the user.
 4. **No stored cursor** (a new device, cleared storage): connect without one and follow step 1.
 
 Backoff: start at the `retry:` value (3 s), double up to 30 s, add jitter. Reset it after a message arrives.

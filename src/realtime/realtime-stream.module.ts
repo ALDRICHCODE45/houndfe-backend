@@ -16,6 +16,7 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { PgNotificationListener } from '../shared/realtime/pg-notification-listener';
 import { RealtimeModule } from '../shared/realtime/realtime.module';
 import { TenantModule } from '../shared/tenant/tenant.module';
+import { REALTIME_NOTIFICATION_READER } from './application/notification-event-reader';
 import { AccessGate, REALTIME_ACCESS } from './application/realtime-access';
 import { RealtimeEventShaper } from './application/realtime-event-shaper';
 import {
@@ -24,6 +25,7 @@ import {
   REALTIME_STORE,
   RealtimeHub,
 } from './application/realtime-hub.service';
+import { PrismaNotificationEventReader } from './infrastructure/prisma-notification-event.reader';
 import { PrismaRealtimeAccess } from './infrastructure/prisma-realtime-access';
 import { PrismaRealtimeEventStore } from './infrastructure/prisma-realtime-event.store';
 import { RealtimeRetentionScheduler } from './infrastructure/realtime-retention.scheduler';
@@ -43,10 +45,15 @@ import { RealtimeController } from './presentation/realtime.controller';
     ActiveUserGuard,
     PrismaRealtimeEventStore,
     PrismaRealtimeAccess,
+    PrismaNotificationEventReader,
     RealtimeEventShaper,
     RealtimeHub,
     // 24 h retention, bounded, SKIP LOCKED (found by AppModule's ScheduleModule).
     RealtimeRetentionScheduler,
+    {
+      provide: REALTIME_NOTIFICATION_READER,
+      useExisting: PrismaNotificationEventReader,
+    },
     { provide: REALTIME_LISTENER, useExisting: PgNotificationListener },
     { provide: REALTIME_STORE, useExisting: PrismaRealtimeEventStore },
     { provide: REALTIME_SHAPER, useExisting: RealtimeEventShaper },

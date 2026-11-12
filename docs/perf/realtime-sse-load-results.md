@@ -84,8 +84,34 @@ The full plans of all six statements are in the JSON report (`queries.explains`)
 1. **The hub read and the tenant head walked other tenants' rows (fixed).** Written as `"tenantId" = $1 AND "id" > $2`, the planner walked the primary key from `$2` to the end of the table filtering by tenant (`realtime_events_pkey`, 204 buffers and 1.3 ms for "nothing new"; the head read 231 buffers), i.e. it reads every newer row of every neighbour: the same family as the bot feed's read (`docs/perf/chatbot-feed-load-results.md`). With the row comparison `("tenantId","id") > ($1,$2) AND ("tenantId","id") <= ($1, max)` and `ORDER BY "tenantId","id"` (and the closed-range form for the head) only the `(tenantId, id)` index can answer: 3 to 6 buffers whatever the neighbours wrote. The personal replay branch needs `"userId" IS NOT NULL` repeated, or the planner cannot prove that the partial index applies and falls back to a parallel sequential scan (2 615 buffers, 16 ms; seen in an intermediate run).
 2. **The row of a batch was costed once per recipient (fixed).** The first burst run (20 commits to 200 streams) took 2.18 s: 4 000 frames spent 1.9 s in `shape`, because each frame recomputed `slaLevel` (it walks the business calendar) even though it does not depend on who reads. The level is now computed once per row per batch, and a frame costs 83 ms for the same 4 000 (the burst above: 254 ms). The fix is in `ChatbotRequestReadsService.loadEventRows`; the rest of each row (`allowedActions`, `deniedActions`, the phone) is per recipient on purpose.
 
+## Cost of the trigger on the write paths that already existed
+
+Every request event insert fires the deferred constraint trigger `chatbot_request_events_realtime` at commit (one per-tenant advisory lock, one `realtime_events` insert, one `pg_notify` per announced event). The verify of unit 8 asked what this adds to writes that existed before. `src/realtime/realtime-trigger-cost.integration.spec.ts` measures the same writes with and without the trigger.
+
+```sh
+PERF=1 pnpm test:integration src/realtime/realtime-trigger-cost.integration.spec.ts
+```
+
+**Method.** The test database, the project's integration harness (same URL guard as above). Two modes alternate (baseline, trigger, then trigger, baseline, …; 5 rounds) so a drifting machine hits both the same. The baseline disables only this trigger with `ALTER TABLE "chatbot_request_events" DISABLE TRIGGER "chatbot_request_events_realtime"` and the trigger mode enables it again; both are committed statements, not a transaction-scoped switch, because a transaction holding the table lock would block the very writers being measured (they use other connections). A `finally` and `afterAll` restore the trigger, the spec refuses to start if it is not enabled, and it asserts it is enabled at the end. One real `LISTEN` connection is open with a no-op handler (as on a replica), so `NOTIFY` has a listener but the hub does no work that competes with the writers. The real command service and stores (called directly, no HTTP layer) and the real SLA sweep store are used; the wrapped-resolve port is stubbed (its legacy use case is not the trigger's cost) and its human decision is created already resolved so the answer the resolve enqueues finds it. The spec asserts that the baseline wrote 0 `realtime_events` rows and the trigger mode wrote some (1 000 in the final run: it really fired, and only then).
+
+**Result (one run, 5 rounds × 30 operations per mode, same machine as PostgreSQL, ms):**
+
+| Write | n per mode | Baseline mean / p50 / p95 | With trigger mean / p50 / p95 | Extra (mean / p50 / p95) |
+| --- | --- | --- | --- | --- |
+| `claim`, sequential | 150 | 10.03 / 8.66 / 17.65 | 9.85 / 9.25 / 14.14 | −0.18 / +0.59 / −3.51 |
+| `resolve` (after claim), sequential | 150 | 11.71 / 10.27 / 19.59 | 11.07 / 10.71 / 14.58 | −0.65 / +0.44 / −5.00 |
+| SLA sweep batch of 100 milestones (100 events, 1 transaction) | 5 | 320.54 / 280.67 / 525.60 | 290.95 / 259.57 / 414.79 | −29.59 / −21.10 / −110.81 |
+| 20 concurrent claims, 20 tenants: wall time per burst | 5 | 74.13 / 66.73 / 112.55 | 72.70 / 68.36 / 99.88 | −1.44 / +1.64 / −12.66 |
+| 20 concurrent claims, 20 tenants: each claim | 100 | 62.93 / 56.24 / 93.11 | 63.28 / 59.49 / 86.65 | +0.34 / +3.24 / −6.47 |
+| 20 concurrent claims, one tenant: wall time per burst | 5 | 75.90 / 68.04 / 106.88 | 69.38 / 64.19 / 92.65 | −6.52 / −3.85 / −14.23 |
+| 20 concurrent claims, one tenant: each claim | 100 | 64.21 / 57.85 / 88.03 | 60.30 / 57.66 / 80.83 | −3.91 / −0.19 / −7.20 |
+
+**Reading.** The trigger's cost is **below the noise of this measurement**: the differences are of both signs (the sweep batch and the claims with the trigger are even faster in the mean, which is machine noise), the largest consistent positive difference is +3.2 ms on the median of an individual claim inside a burst of 20 whose own latency is about 57 ms, and the sequential single-command medians differ by 0.4 to 0.6 ms. In particular: (a) a sweep batch of 100 events in one transaction takes the lock and the `NOTIFY` once at commit per tenant, not per row, and shows no extra time; (b) 20 concurrent claims across 20 tenants (`NOTIFY` serialization at commit is global in PostgreSQL) show no growth in wall time; (c) 20 concurrent claims inside one tenant (the per-tenant commit lock serializes the tail of each transaction) also show none. No contract target covers this, so it is reported, not asserted.
+
+**What this does not prove.** The sample is small (5 sweep batches and 5 bursts per mode; the per-command samples are 100 to 150), so effects under about 2 ms on a single claim cannot be told apart from noise; the machine is not production hardware; no stream or other `LISTEN` client was working (a hub that reads on every `NOTIFY` is measured by the load test above, not here); the 20-concurrent burst is a short spike, not sustained load. The raw report is written to `/tmp/realtime-trigger-cost-report.json` (`PERF_REPORT_PATH`). Knobs: `PERF_ROUNDS` (5), `PERF_OPS` (30).
+
 ## Not measured
 
 - Behind Traefik/Swarm (R6): the owner's test is pending; until it passes, the frontend keeps polling.
 - Several replicas in separate processes, and a database failover (the `LISTEN` reconnect path is covered by the hub's unit spec and the shared listener's own spec).
-- Sustained load beyond the burst (for example 10 commits per second for minutes). The per-tenant commit lock serializes only the tail of each transaction (the feed's lock was measured at 585 commits per second per tenant, `chatbot-feed-load-results.md`).
+- Sustained load beyond the burst (for example 10 commits per second for minutes), for the stream and for the trigger cost above. The per-tenant commit lock serializes only the tail of each transaction (the feed's lock was measured at 585 commits per second per tenant, `chatbot-feed-load-results.md`).

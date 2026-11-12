@@ -56,8 +56,16 @@ export interface HubStore {
 
 /** Builds the payload of an event for one recipient (R12). */
 export interface HubShaper {
-  /** Loads, once per batch, what the frames of this batch need. */
-  prepare(tenantId: string, events: RealtimeEventRow[]): Promise<unknown>;
+  /**
+   * Loads, once per batch, what the frames of this batch need. `audience` is
+   * the set of users with an open stream on this replica for the tenant:
+   * personal events of anyone else need nothing loaded (no frame is written).
+   */
+  prepare(
+    tenantId: string,
+    events: RealtimeEventRow[],
+    audience: ReadonlySet<string>,
+  ): Promise<unknown>;
   /** `null` = nothing to send this recipient for this event. */
   shape(
     prepared: unknown,
@@ -157,6 +165,9 @@ export class RealtimeHub {
   async connect(params: ConnectParams): Promise<StreamHandle | null> {
     if (!this.canAccept()) return null;
     await this.ensureSubscribed();
+    // Connects overlap while the first one awaits the LISTEN start: re-check,
+    // so the cap holds (this runs synchronously up to the registration).
+    if (!this.canAccept()) return null;
     const { tenantId, userId } = params;
     const stream = new RealtimeStream({
       tenantId,
@@ -378,7 +389,11 @@ export class RealtimeHub {
     stream: RealtimeStream,
     events: RealtimeEventRow[],
   ): Promise<void> {
-    const prepared = await this.shaper.prepare(stream.tenantId, events);
+    const prepared = await this.shaper.prepare(
+      stream.tenantId,
+      events,
+      new Set([stream.userId]),
+    );
     const access = await this.access.check(stream.tenantId, stream.userId);
     if (stream.closed) return;
     if (!access.ok) {
@@ -461,8 +476,15 @@ export class RealtimeHub {
     feed: TenantFeed,
     rows: RealtimeEventRow[],
   ): Promise<void> {
-    const prepared = await this.shaper.prepare(feed.tenantId, rows);
+    // The recipients are fixed BEFORE preparing: what is loaded is for them. A
+    // stream that connects while this batch awaits is not in the snapshot; its
+    // own replay reads these rows from the log (they are already committed).
     const streams = [...feed.streams].filter((s) => !s.closed);
+    const prepared = await this.shaper.prepare(
+      feed.tenantId,
+      rows,
+      new Set(streams.map((s) => s.userId)),
+    );
     const relevant = (stream: RealtimeStream) =>
       rows.filter(
         (e) =>
@@ -471,22 +493,36 @@ export class RealtimeHub {
       );
 
     // One access check per user with something to receive (R5), shared by all
-    // of that user's streams.
-    const users = new Set<string>();
-    for (const stream of streams) {
-      if (stream.state === 'live' && relevant(stream).length > 0) {
-        users.add(stream.userId);
-      }
-    }
+    // of that user's streams. A replaying stream can flip to live while these
+    // checks are awaited (its buffer was empty), so the set is recomputed after
+    // every round until every stream that is live NOW has a result: the write
+    // below is synchronous, so what is live at its start is live throughout.
     const results = new Map<string, Awaited<ReturnType<AccessPort['check']>>>();
-    await Promise.all(
-      [...users].map((userId) =>
-        this.access
-          .check(feed.tenantId, userId)
-          .then((result) => results.set(userId, result)),
-      ),
-    );
+    for (;;) {
+      const missing = new Set<string>();
+      for (const stream of streams) {
+        if (
+          !stream.closed &&
+          stream.state === 'live' &&
+          !results.has(stream.userId) &&
+          relevant(stream).length > 0
+        ) {
+          missing.add(stream.userId);
+        }
+      }
+      if (missing.size === 0) break;
+      await Promise.all(
+        [...missing].map((userId) =>
+          this.access
+            .check(feed.tenantId, userId)
+            .then((result) => results.set(userId, result)),
+        ),
+      );
+    }
 
+    // No await below: no stream changes state between the check above and the
+    // writes, so no live stream is skipped and the cursor never passes a row a
+    // live stream has not received.
     for (const stream of streams) {
       if (stream.closed) continue;
       const events = relevant(stream);
@@ -497,7 +533,11 @@ export class RealtimeHub {
         continue;
       }
       const access = results.get(stream.userId);
-      if (!access) continue;
+      if (!access) {
+        // Unreachable by construction; failing retries the batch instead of
+        // skipping rows (the cursor has not moved, `lastSentId` dedupes).
+        throw new Error('missing access result for a live stream');
+      }
       if (!access.ok) {
         stream.close({
           event: 'access-revoked',
@@ -515,7 +555,9 @@ export class RealtimeHub {
   /**
    * A failed batch never advances the cursor and is retried with backoff.
    * After `MAX_BATCH_FAILURES` the batch is skipped and every stream of the
-   * tenant resyncs, so one poison event cannot stall a tenant forever.
+   * tenant resyncs (`DELIVERY_FAILED`: the server could not deliver, unlike a
+   * client that is too far behind), so one poison event cannot stall a tenant
+   * forever.
    */
   private fail(feed: TenantFeed, error: unknown): void {
     feed.failures += 1;
@@ -528,7 +570,7 @@ export class RealtimeHub {
       feed.failures = 0;
       for (const stream of feed.streams) {
         if (stream.closed) continue;
-        void this.resync(stream, 'REPLAY_TOO_LARGE').catch(() => undefined);
+        void this.resync(stream, 'DELIVERY_FAILED').catch(() => undefined);
       }
     }
     if (feed.retryTimer || this.closing) return;

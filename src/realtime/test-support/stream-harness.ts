@@ -53,6 +53,7 @@ import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { PgNotificationListener } from '../../shared/realtime/pg-notification-listener';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { TenantRunnerService } from '../../shared/tenant/tenant-runner.service';
+import { REALTIME_NOTIFICATION_READER } from '../application/notification-event-reader';
 import { AccessGate, REALTIME_ACCESS } from '../application/realtime-access';
 import { RealtimeEventShaper } from '../application/realtime-event-shaper';
 import {
@@ -62,6 +63,7 @@ import {
   REALTIME_STORE,
   RealtimeHub,
 } from '../application/realtime-hub.service';
+import { PrismaNotificationEventReader } from '../infrastructure/prisma-notification-event.reader';
 import { PrismaRealtimeAccess } from '../infrastructure/prisma-realtime-access';
 import { PrismaRealtimeEventStore } from '../infrastructure/prisma-realtime-event.store';
 import { RealtimeController } from '../presentation/realtime.controller';
@@ -130,6 +132,7 @@ export async function createStreamHarness(options: HarnessOptions = {}) {
       PgNotificationListener,
       PrismaRealtimeEventStore,
       PrismaRealtimeAccess,
+      PrismaNotificationEventReader,
       RealtimeEventShaper,
       RealtimeHub,
       NotificationsService,
@@ -139,6 +142,10 @@ export async function createStreamHarness(options: HarnessOptions = {}) {
       {
         provide: NOTIFICATION_READ_EVENTS,
         useExisting: RealtimeNotificationEvents,
+      },
+      {
+        provide: REALTIME_NOTIFICATION_READER,
+        useExisting: PrismaNotificationEventReader,
       },
       { provide: REALTIME_LISTENER, useExisting: PgNotificationListener },
       { provide: REALTIME_STORE, useExisting: PrismaRealtimeEventStore },

@@ -21,6 +21,14 @@ export interface NotificationEventsPort {
     tx: Prisma.TransactionClient,
     event: NotificationCreatedEvent,
   ): Promise<void>;
+  /**
+   * Every recipient of one notice in one call (one lock and one `NOTIFY` for
+   * the batch). Optional: adapters without it get one `publishCreated` each.
+   */
+  publishCreatedMany?(
+    tx: Prisma.TransactionClient,
+    events: readonly NotificationCreatedEvent[],
+  ): Promise<void>;
 }
 
 export const NOTIFICATION_EVENTS = Symbol.for('NotificationEvents');

@@ -165,14 +165,19 @@ export class ChatbotRequestNotifyConsumer {
         select: { id: true, userId: true, type: true, requestId: true },
       });
       await this.enqueueEmails(tx, row.tenantId, notice, created);
-      for (const item of created) {
-        await this.events.publishCreated(tx, {
-          tenantId: row.tenantId,
-          userId: item.userId,
-          notificationId: item.id,
-          type: item.type,
-          requestId: item.requestId,
-        });
+      const events = created.map((item) => ({
+        tenantId: row.tenantId,
+        userId: item.userId,
+        notificationId: item.id,
+        type: item.type,
+        requestId: item.requestId,
+      }));
+      if (this.events.publishCreatedMany) {
+        await this.events.publishCreatedMany(tx, events);
+      } else {
+        for (const event of events) {
+          await this.events.publishCreated(tx, event);
+        }
       }
     }
     await tx.outboxEvent.update({

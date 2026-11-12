@@ -46,6 +46,9 @@ export type StreamState = 'replaying' | 'live' | 'closed';
 /** Time a closing socket gets to flush before it is destroyed. */
 const CLOSE_GRACE_MS = 2_000;
 
+/** Largest delay `setTimeout` honours (2^31-1 ms ≈ 24.8 days); above it fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export interface RealtimeStreamOptions {
   tenantId: string;
   userId: string;
@@ -63,6 +66,7 @@ export class RealtimeStream {
   private readonly logger = new Logger(RealtimeStream.name);
   private readonly now: () => number;
   private timers: NodeJS.Timeout[] = [];
+  private expiryTimer: NodeJS.Timeout | null = null;
   private blockedSince: number | null = null;
   private drainHooked = false;
 
@@ -99,11 +103,29 @@ export class RealtimeStream {
       this.unref(
         setInterval(() => void this.recheck(), STREAM_LIMITS.revalidateEveryMs),
       ),
-      this.unref(
-        setTimeout(
-          () => this.close({ event: 'auth-expired', data: {} }),
-          Math.max(0, this.options.expiresAtMs - this.now()),
-        ),
+    );
+    this.armExpiry();
+  }
+
+  /**
+   * One timer to the token's `exp`. A lifetime beyond the timer limit would
+   * fire at once, so it is armed in hops of at most `MAX_TIMER_MS` and re-armed
+   * until `exp` is really reached.
+   */
+  private armExpiry(): void {
+    const remaining = Math.max(0, this.options.expiresAtMs - this.now());
+    this.expiryTimer = this.unref(
+      setTimeout(
+        () => {
+          this.expiryTimer = null;
+          if (this.closed) return;
+          if (this.options.expiresAtMs - this.now() > 0) {
+            this.armExpiry();
+            return;
+          }
+          this.close({ event: 'auth-expired', data: {} });
+        },
+        Math.min(remaining, MAX_TIMER_MS),
       ),
     );
   }
@@ -151,6 +173,8 @@ export class RealtimeStream {
       clearInterval(timer);
     }
     this.timers = [];
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
     this.buffer.length = 0;
     this.options.sink.end(frame ? formatSseFrame(frame) : undefined);
     if (this.options.sink.bufferedBytes > 0) {

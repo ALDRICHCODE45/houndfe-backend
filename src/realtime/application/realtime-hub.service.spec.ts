@@ -61,6 +61,11 @@ class FakeStore implements HubStore {
   failReads = 0;
   private nextId = 1n;
   hold: Promise<void> | null = null;
+  /**
+   * Holds the per-user (replay) reads AFTER they computed their result, so the
+   * replay sees the log as it was when it read, whatever commits while it waits.
+   */
+  holdReplayReads: Promise<void> | null = null;
 
   add(
     tenantId: string,
@@ -100,7 +105,7 @@ class FakeStore implements HubStore {
       this.failReads -= 1;
       throw new Error('db down');
     }
-    return this.rows
+    const result = this.rows
       .filter(
         (r) =>
           r.tenantId === tenantId &&
@@ -108,6 +113,8 @@ class FakeStore implements HubStore {
           (userId === null || r.userId === null || r.userId === userId),
       )
       .slice(0, limit);
+    if (userId !== null && this.holdReplayReads) await this.holdReplayReads;
+    return result;
   }
 }
 
@@ -140,27 +147,47 @@ const ALLOW = { can: () => true };
 /** The shaper double: the frame says who it was built for. */
 const shaper = (): HubShaper & {
   prepared: number;
+  audiences: string[][];
+  failPrepare: number;
+  prepareGate: Promise<void> | null;
   skip: Set<bigint>;
 } => {
   const state = {
     prepared: 0,
+    audiences: [] as string[][],
+    failPrepare: 0,
+    prepareGate: null as Promise<void> | null,
     skip: new Set<bigint>(),
-    prepare: (_tenant: string, events: RealtimeEventRow[]) => {
+    prepare: async (
+      _tenant: string,
+      events: RealtimeEventRow[],
+      audience: ReadonlySet<string>,
+    ) => {
       state.prepared += 1;
-      return Promise.resolve({ count: events.length });
+      state.audiences.push([...audience].sort());
+      if (state.prepareGate) await state.prepareGate;
+      if (state.failPrepare > 0) {
+        state.failPrepare -= 1;
+        throw new Error('prepare failed');
+      }
+      return { count: events.length, audience };
     },
     shape: (
-      _prepared: unknown,
+      prepared: unknown,
       event: RealtimeEventRow,
       reader: { userId: string },
-    ): SseFrame | null =>
-      state.skip.has(event.id)
+    ): SseFrame | null => {
+      // Like the real shaper: a personal view exists only for the audience.
+      const { audience } = prepared as { audience: ReadonlySet<string> };
+      if (event.userId !== null && !audience.has(reader.userId)) return null;
+      return state.skip.has(event.id)
         ? null
         : {
             id: event.id,
             event: event.type,
             data: { for: reader.userId, v: event.payload },
-          },
+          };
+    },
   };
   return state;
 };
@@ -470,6 +497,92 @@ describe('RealtimeHub', () => {
       await hub.onModuleDestroy();
     });
 
+    it('a stream that goes live while the batch awaits the access checks still gets the batch', async () => {
+      // The replay→live gap: the replay read the log BEFORE the row committed
+      // (empty), the hub's batch is waiting for the live users' access checks,
+      // and the replay finishes (empty buffer → live) before they answer. The
+      // stream was `replaying` when the batch collected its users, so it has no
+      // check of its own; the rows must still reach it.
+      const pending: Array<(r: AccessResult) => void> = [];
+      const { store, listener, open, hub } = setup({
+        access: {
+          check: (_tenant, user) =>
+            user === 'live-user'
+              ? new Promise<AccessResult>((resolve) => pending.push(resolve))
+              : Promise.resolve({ ok: true, ability: ALLOW }),
+        },
+      });
+      store.add('t1', 'request.created'); // id 1: both streams start after it
+      // `live-user` is live from the start (nothing to replay, access primed).
+      const liveUser = await open('t1', 'live-user');
+      // `late` reconnects with Last-Event-ID 1; its replay read is held after
+      // it saw the log up to id 1.
+      let releaseReplay: () => void = () => undefined;
+      store.holdReplayReads = new Promise<void>((resolve) => {
+        releaseReplay = resolve;
+      });
+      const lateOpening = open('t1', 'late', 1n);
+      await flush(30);
+      // Id 2 commits after the replay read; the batch starts and parks on the
+      // access check of `live-user` (the only live stream).
+      store.add('t1', 'request.claimed');
+      listener.notify('t1');
+      await flush(30);
+      expect(pending).toHaveLength(1);
+      // The replay finishes: empty buffer, so `late` flips to live right now.
+      store.holdReplayReads = null;
+      releaseReplay();
+      const late = await lateOpening;
+      expect(late.sink.events).toEqual([]);
+      // Now the checks answer; the batch writes to every live stream.
+      for (const resolve of pending.splice(0)) {
+        resolve({ ok: true, ability: ALLOW });
+      }
+      await settle();
+      expect(liveUser.sink.events).toEqual(['ready:1', 'request.claimed:2']);
+      expect(late.sink.events).toEqual(['request.claimed:2']);
+      // And it is not delivered twice by a later wake-up.
+      listener.notify('t1');
+      await settle();
+      expect(late.sink.events).toEqual(['request.claimed:2']);
+      await hub.onModuleDestroy();
+    });
+
+    it('a stream that went live during the checks is revoked when its own check says so', async () => {
+      const pending: Array<(r: AccessResult) => void> = [];
+      const { store, listener, open, hub } = setup({
+        access: {
+          check: (_tenant, user) =>
+            user === 'live-user'
+              ? new Promise<AccessResult>((resolve) => pending.push(resolve))
+              : Promise.resolve({ ok: false, reason: 'PERMISSION_REVOKED' }),
+        },
+      });
+      store.add('t1', 'request.created');
+      await open('t1', 'live-user');
+      let releaseReplay: () => void = () => undefined;
+      store.holdReplayReads = new Promise<void>((resolve) => {
+        releaseReplay = resolve;
+      });
+      // The guards primed a fresh allow for `late`; the zero-ttl gate forgets it.
+      const lateOpening = open('t1', 'late', 1n);
+      await flush(30);
+      store.add('t1', 'request.claimed');
+      listener.notify('t1');
+      await flush(30);
+      store.holdReplayReads = null;
+      releaseReplay();
+      const late = await lateOpening;
+      for (const resolve of pending.splice(0)) {
+        resolve({ ok: true, ability: ALLOW });
+      }
+      await settle();
+      expect(late.sink.text).toContain('"reason":"PERMISSION_REVOKED"');
+      expect(late.sink.text).not.toContain('request.claimed');
+      expect(late.sink.ended).toBe(true);
+      await hub.onModuleDestroy();
+    });
+
     it('closes a revoked user at connect time of a replay as well', async () => {
       const { store, open, hub } = setup({
         access: {
@@ -514,6 +627,24 @@ describe('RealtimeHub', () => {
       await hub.onModuleDestroy();
     });
 
+    it('never admits more than the cap when connects overlap (the check is repeated after the await)', async () => {
+      const { hub } = setup({ maxStreamsPerReplica: 1 });
+      const connect = (user: string) =>
+        hub.connect({
+          tenantId: 't1',
+          userId: user,
+          ability: ALLOW,
+          sink: new FakeSink(),
+          after: null,
+          expiresAtMs: Date.now() + 60_000,
+        });
+      const handles = await Promise.all([connect('a'), connect('b')]);
+      await settle();
+      expect(handles.filter((h) => h !== null)).toHaveLength(1);
+      expect(hub.openStreams).toBe(1);
+      await hub.onModuleDestroy();
+    });
+
     it('refuses new streams when the replica is full, and frees the slot on close', async () => {
       const { hub, open } = setup({ maxStreamsPerReplica: 2 });
       const a = await open('t1', 'a');
@@ -552,6 +683,24 @@ describe('RealtimeHub', () => {
       await hub.onModuleDestroy();
     });
 
+    it('after 5 failed attempts the batch is skipped with an honest resync reason, and the next event flows', async () => {
+      const { store, listener, shape, open, hub } = setup();
+      const { sink } = await open('t1', 'u1');
+      store.add('t1', 'request.created');
+      shape.failPrepare = 5;
+      listener.notify('t1');
+      for (let i = 0; i < 6; i += 1) await jest.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(sink.events).toEqual(['ready', 'resync:1']);
+      expect(sink.text).toContain('"reason":"DELIVERY_FAILED"');
+      expect(sink.text).not.toContain('REPLAY_TOO_LARGE');
+      store.add('t1', 'request.claimed');
+      listener.notify('t1');
+      await settle();
+      expect(sink.events).toEqual(['ready', 'resync:1', 'request.claimed:2']);
+      await hub.onModuleDestroy();
+    });
+
     it('keeps serving other tenants while one tenant keeps failing', async () => {
       const { store, listener, open, hub } = setup();
       const bad = await open('t1', 'u1');
@@ -561,6 +710,57 @@ describe('RealtimeHub', () => {
       await settle();
       expect(good.sink.events).toEqual(['ready', 'request.created:1']);
       expect(bad.sink.events).toEqual(['ready']);
+      await hub.onModuleDestroy();
+    });
+  });
+
+  describe('what a batch prepares (R12, cost)', () => {
+    it('prepares for the users connected on this replica only, closed streams excluded', async () => {
+      const { store, listener, shape, open, hub } = setup();
+      await open('t1', 'ana');
+      await open('t1', 'ana');
+      const luis = await open('t1', 'luis');
+      const gone = await open('t1', 'gone');
+      gone.handle?.dispose();
+      shape.audiences.length = 0;
+      store.add('t1', 'notification.created', {
+        userId: 'someone-elsewhere',
+        payload: { notificationId: 'n1' },
+      });
+      listener.notify('t1');
+      await settle();
+      expect(shape.audiences).toEqual([['ana', 'luis']]);
+      expect(luis.sink.events).toEqual(['ready']);
+      await hub.onModuleDestroy();
+    });
+
+    it('a replay chunk prepares for its own user alone', async () => {
+      const { store, shape, open, hub } = setup();
+      store.add('t1', 'request.created');
+      await open('t1', 'ana', 0n);
+      expect(shape.audiences).toEqual([['ana']]);
+      await hub.onModuleDestroy();
+    });
+
+    it('a stream that connects while the batch is being prepared still gets its personal event, once', async () => {
+      const { store, listener, shape, open, hub } = setup();
+      await open('t1', 'ana');
+      let release: () => void = () => undefined;
+      shape.prepareGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      store.add('t1', 'notification.created', {
+        userId: 'luis',
+        payload: { notificationId: 'n1' },
+      });
+      listener.notify('t1');
+      await flush(30);
+      // luis connects with the batch in flight: not in the audience it built.
+      shape.prepareGate = null;
+      const luis = await open('t1', 'luis', 0n);
+      release();
+      await settle();
+      expect(luis.sink.events).toEqual(['notification.created:1']);
       await hub.onModuleDestroy();
     });
   });

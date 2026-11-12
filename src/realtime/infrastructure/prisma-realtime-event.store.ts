@@ -1,8 +1,10 @@
 /**
  * Reads and retention of the realtime log (unit 8; contract §5.3, §10.1 R7).
  *
- * System flows on the root client: every statement names `tenantId` itself
- * (the table is deliberately not tenant-extended, see schema.prisma).
+ * System flows on the root client: every statement names `tenantId` itself.
+ * `RealtimeEvent` and `RealtimeEventRetention` are also registered in
+ * `TENANT_SCOPED_MODELS` (defense in depth: a read through
+ * `TenantPrismaService` is tenant-filtered), but this store never relies on it.
  *
  * Reads:
  *   - `readAfter(tenant, null, …)`  every event of the tenant (the hub).

@@ -4103,8 +4103,9 @@ model NotificationPreference {
 // delivery time. Retention 24 h (the purge raises `RealtimeEventRetention`).
 // The partial index `realtime_events_user_idx` (tenantId, userId, id) WHERE
 // "userId" IS NOT NULL is migration-authoritative (Prisma cannot express it).
-// Read and written with raw SQL naming `tenantId` (system flows, root client):
-// it is deliberately NOT in TENANT_SCOPED_MODELS.
+// Read and written with raw SQL naming `tenantId` (system flows, root client).
+// Both models are registered in TENANT_SCOPED_MODELS as defense in depth (a
+// stray read through TenantPrismaService is tenant-filtered, not fail-open).
 model RealtimeEvent {
   id        BigInt   @id @default(autoincrement())
   tenantId  String

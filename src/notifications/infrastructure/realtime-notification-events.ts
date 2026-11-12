@@ -23,15 +23,28 @@ export class RealtimeNotificationEvents
     tx: Prisma.TransactionClient,
     event: NotificationCreatedEvent,
   ): Promise<void> {
-    return emitRealtimeEvents(tx, [
-      {
+    return this.publishCreatedMany(tx, [event]);
+  }
+
+  /**
+   * Every recipient of one notice in ONE call: one advisory lock and one
+   * `NOTIFY` for the batch, one insert per person (calling `publishCreated`
+   * per recipient repeats the lock and the `NOTIFY` for each of them).
+   */
+  publishCreatedMany(
+    tx: Prisma.TransactionClient,
+    events: readonly NotificationCreatedEvent[],
+  ): Promise<void> {
+    return emitRealtimeEvents(
+      tx,
+      events.map((event) => ({
         tenantId: event.tenantId,
         userId: event.userId,
         type: 'notification.created',
         requestId: event.requestId,
         payload: { notificationId: event.notificationId },
-      },
-    ]);
+      })),
+    );
   }
 
   publishRead(
