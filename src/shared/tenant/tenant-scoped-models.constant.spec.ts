@@ -55,3 +55,15 @@ describe('TENANT_SCOPED_MODELS — conversation mirror registration (human-inter
     },
   );
 });
+
+describe('TENANT_SCOPED_MODELS — conversation media intents (human-intervention unit 9, S2)', () => {
+  it('scopes ConversationMediaIntent by tenant', () => {
+    expect(TENANT_SCOPED_MODELS.has('ConversationMediaIntent')).toBe(true);
+  });
+
+  it('leaves the sweep cursor unscoped (a single global row, no tenantId)', () => {
+    expect(TENANT_SCOPED_MODELS.has('ConversationMediaOrphanSweep')).toBe(
+      false,
+    );
+  });
+});

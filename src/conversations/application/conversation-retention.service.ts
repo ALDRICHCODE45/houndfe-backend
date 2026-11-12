@@ -36,10 +36,14 @@
  * fail. A message and its file are due about the same time (the file was
  * uploaded just before the message), the file first.
  */
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { ReceiptStoragePort } from '../../receipts/domain/receipt-storage.port';
 import { PrismaService } from '../../shared/prisma/prisma.service';
+import {
+  CONVERSATION_MEDIA_LISTER,
+  type ConversationMediaLister,
+} from './conversation-media-lister';
 import { CONVERSATION_MEDIA_STORAGE } from './conversation-media.service';
 
 export const CONVERSATION_RETENTION_LIMITS = {
@@ -51,7 +55,18 @@ export const CONVERSATION_RETENTION_LIMITS = {
   leaseMinutes: 5,
   /** An emptied chat must be idle this long before it is deleted. */
   chatIdleDays: 1,
+  /** Media intents (S2) reconciled per batch: each may cost a network delete. */
+  intentBatch: 100,
+  /** Orphan sweep (S2): keys read per `ListObjects` page and pages per run. */
+  orphanPageSize: 1000,
+  orphanPagesPerRun: 5,
+  /** An unowned object must be older than this to be swept (uploads in flight). */
+  orphanGraceHours: 24,
 } as const;
+
+/** `conversation-media/<tenantId>/<mediaId>.<ext>`: the only shape ever written. */
+const MEDIA_KEY = /^conversation-media\/([^/]+)\/([0-9a-f-]{36})\.[a-z0-9]+$/;
+export const CONVERSATION_MEDIA_PREFIX = 'conversation-media/';
 
 export interface ConversationRetentionResult {
   mediaClaimed: number;
@@ -59,6 +74,9 @@ export interface ConversationRetentionResult {
   mediaFailed: number;
   messagesDeleted: number;
   conversationsDeleted: number;
+  /** S2: media intents settled (object deleted or already owned) and failed. */
+  intentsSettled: number;
+  intentsFailed: number;
   /** A batch came back full: more may be due. */
   hasMore: boolean;
 }
@@ -71,6 +89,26 @@ interface Claimed {
   storageKey: string | null;
 }
 
+interface ClaimedIntent {
+  id: string;
+  tenantId: string;
+  storageKey: string;
+  reason: 'UPLOAD' | 'ROW_DELETED';
+}
+
+export interface OrphanSweepResult {
+  /** Keys looked at (listed pages). */
+  scanned: number;
+  /** Unowned objects deleted. */
+  deleted: number;
+  /** Unowned objects whose delete failed (found again on the next pass). */
+  failed: number;
+  /** Keys that do not have the shape we write: never touched. */
+  skipped: number;
+  /** The pass reached the end of the prefix; the next run starts over. */
+  passCompleted: boolean;
+}
+
 @Injectable()
 export class ConversationRetentionService {
   private readonly logger = new Logger(ConversationRetentionService.name);
@@ -80,6 +118,9 @@ export class ConversationRetentionService {
     @Inject(PrismaService) private readonly prisma: Db,
     @Inject(CONVERSATION_MEDIA_STORAGE)
     private readonly storage: ReceiptStoragePort,
+    @Optional()
+    @Inject(CONVERSATION_MEDIA_LISTER)
+    private readonly lister: ConversationMediaLister | null = null,
   ) {}
 
   async purgeBatch(
@@ -96,6 +137,11 @@ export class ConversationRetentionService {
       input.mediaBatchSize ?? CONVERSATION_RETENTION_LIMITS.mediaBatch;
     const runStartedAt = input.runStartedAt ?? new Date();
 
+    // S2 first: an object nobody owns is the oldest debt.
+    const intents = await this.settleIntents(
+      CONVERSATION_RETENTION_LIMITS.intentBatch,
+      runStartedAt,
+    );
     const media = await this.purgeMedia(mediaBatch, runStartedAt);
     const messages = await this.deleteMessages(batchSize);
 
@@ -105,12 +151,246 @@ export class ConversationRetentionService {
       mediaFailed: media.failed,
       messagesDeleted: messages.deleted,
       conversationsDeleted: messages.conversationsDeleted,
+      intentsSettled: intents.settled,
+      intentsFailed: intents.failed,
       // A full batch of files that ALL failed is not progress: counting it would
       // make the scheduler retry the same broken rows on every tick.
       hasMore:
         (media.claimed >= mediaBatch && media.purged > 0) ||
+        (intents.claimed >= CONVERSATION_RETENTION_LIMITS.intentBatch &&
+          intents.settled > 0) ||
         messages.deleted >= batchSize,
     };
+  }
+
+  // ------------------------------------------------- S2: unowned objects
+
+  /**
+   * Reconciles the media intents that are due (see the migration):
+   *   UPLOAD       a media row exists for the id -> the upload finished, drop the
+   *                intent (the row owns the object and retention purges it);
+   *                no row -> the upload died: delete the object, then the intent.
+   *   ROW_DELETED  the row is gone (tenant deletion): delete the object, then
+   *                the intent.
+   * A failed delete keeps the intent (`attempts`, `lastErrorAt`) and is retried
+   * by a later run, after the rows never tried, so one stuck object cannot
+   * starve the rest. Deleting a missing object succeeds. Only keys inside the
+   * row's own tenant prefix are ever deleted.
+   */
+  private async settleIntents(batch: number, runStartedAt: Date) {
+    const claimed = await this.prisma.$queryRaw<ClaimedIntent[]>(Prisma.sql`
+      UPDATE "conversation_media_intents" i
+      SET "leaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
+      WHERE i."id" IN (
+        SELECT "id" FROM "conversation_media_intents"
+        WHERE "dueAt" < now()
+          AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
+          AND ("lastErrorAt" IS NULL OR "lastErrorAt" < ${runStartedAt})
+        ORDER BY "attempts", "dueAt", "id"
+        LIMIT ${batch} FOR UPDATE SKIP LOCKED)
+      RETURNING i."id", i."tenantId", i."storageKey", i."reason"`);
+
+    let settled = 0;
+    let failed = 0;
+    for (const intent of claimed) {
+      const prefix = `conversation-media/${intent.tenantId}/`;
+      if (!intent.storageKey.startsWith(prefix)) {
+        // Never delete an object this row does not own; the row is useless.
+        this.logger.error(
+          `Conversation media intent ${intent.id} has no key inside its tenant prefix; dropped`,
+        );
+        await this.dropIntent(intent.id);
+        continue;
+      }
+      try {
+        if (
+          intent.reason === 'UPLOAD' &&
+          (await this.mediaRowExists(intent.id))
+        ) {
+          await this.dropIntent(intent.id);
+          settled += 1;
+          continue;
+        }
+        await this.storage.remove(intent.storageKey);
+      } catch (error) {
+        this.logger.warn(
+          `Conversation media intent ${intent.id} not settled, will retry (${error instanceof Error ? error.name : 'error'})`,
+        );
+        await this.recordIntentFailure(intent.id, runStartedAt);
+        failed += 1;
+        continue;
+      }
+      await this.dropIntent(intent.id);
+      settled += 1;
+    }
+    if (settled > 0 || failed > 0) {
+      this.logger.log(
+        `Conversation media intents: claimed=${claimed.length} settled=${settled} failed=${failed}`,
+      );
+    }
+    return { claimed: claimed.length, settled, failed };
+  }
+
+  private async mediaRowExists(id: string): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT "id" FROM "conversation_media" WHERE "id" = ${id}`,
+    );
+    return rows.length > 0;
+  }
+
+  private async dropIntent(id: string): Promise<void> {
+    await this.prisma.$executeRaw(
+      Prisma.sql`DELETE FROM "conversation_media_intents" WHERE "id" = ${id}`,
+    );
+  }
+
+  private async recordIntentFailure(
+    id: string,
+    runStartedAt: Date,
+  ): Promise<void> {
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "conversation_media_intents"
+      SET "attempts" = "attempts" + 1, "lastErrorAt" = ${runStartedAt}, "leaseUntil" = NULL
+      WHERE "id" = ${id}`);
+  }
+
+  /**
+   * The safety net under the intents: objects under `conversation-media/` that
+   * no media row and no intent own (made before the intents existed, or by a bug)
+   * are deleted once they are a day old. Bounded and resumable: at most
+   * `orphanPagesPerRun` pages of `orphanPageSize` keys per call, the position
+   * kept in `conversation_media_orphan_sweep` (a lease keeps replicas on
+   * different pages) so a deploy never restarts the pass. Prefix-guarded twice:
+   * the listing is `conversation-media/` only and an object is touched only when
+   * its name has exactly the shape this module writes. An object is an orphan
+   * when its media id has no row that names this very object and no intent.
+   * Without a lister (no listing capability configured) it does nothing.
+   */
+  async sweepOrphans(
+    input: { now?: Date; maxPages?: number } = {},
+  ): Promise<OrphanSweepResult> {
+    const result: OrphanSweepResult = {
+      scanned: 0,
+      deleted: 0,
+      failed: 0,
+      skipped: 0,
+      passCompleted: false,
+    };
+    if (!this.lister) return result;
+    const now = input.now ?? new Date();
+    const maxPages =
+      input.maxPages ?? CONVERSATION_RETENTION_LIMITS.orphanPagesPerRun;
+    const cutoff = new Date(
+      now.getTime() -
+        CONVERSATION_RETENTION_LIMITS.orphanGraceHours * 3_600_000,
+    );
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "conversation_media_orphan_sweep" ("id") VALUES ('conversation-media')
+      ON CONFLICT ("id") DO NOTHING`);
+    const claimed = await this.prisma.$queryRaw<
+      Array<{ cursor: string | null }>
+    >(Prisma.sql`
+      UPDATE "conversation_media_orphan_sweep"
+      SET "leaseUntil" = now() + (${CONVERSATION_RETENTION_LIMITS.leaseMinutes} * interval '1 minute')
+      WHERE "id" = 'conversation-media'
+        AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
+      RETURNING "cursor"`);
+    if (claimed.length === 0) return result; // another replica is on it
+    let position = claimed[0].cursor;
+
+    try {
+      for (let page = 0; page < maxPages; page += 1) {
+        const listed = await this.lister.list({
+          prefix: CONVERSATION_MEDIA_PREFIX,
+          startAfter: position,
+          limit: CONVERSATION_RETENTION_LIMITS.orphanPageSize,
+        });
+        result.scanned += listed.objects.length;
+        await this.sweepPage(listed.objects, cutoff, result);
+        const names = listed.objects.map((o) => o.key);
+        const lastName = names[names.length - 1];
+        position = listed.truncated && lastName ? lastName : null;
+        await this.saveOrphanPosition(position, true);
+        if (position === null) {
+          result.passCompleted = true;
+          break;
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `Conversation media orphan sweep failed (${error instanceof Error ? error.name : 'unknown'})`,
+      );
+    } finally {
+      await this.saveOrphanPosition(position, false);
+    }
+    if (result.deleted > 0 || result.failed > 0) {
+      this.logger.log(
+        `Conversation media orphan sweep: scanned=${result.scanned} deleted=${result.deleted} failed=${result.failed} skipped=${result.skipped}`,
+      );
+    }
+    return result;
+  }
+
+  private async saveOrphanPosition(
+    position: string | null,
+    keepLease: boolean,
+  ): Promise<void> {
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "conversation_media_orphan_sweep"
+      SET "cursor" = ${position}, "updatedAt" = now(),
+          "leaseUntil" = ${keepLease ? Prisma.sql`"leaseUntil"` : Prisma.sql`NULL`}
+      WHERE "id" = 'conversation-media'`);
+  }
+
+  private async sweepPage(
+    objects: Array<{ key: string; lastModified: Date | null }>,
+    cutoff: Date,
+    result: OrphanSweepResult,
+  ): Promise<void> {
+    const candidates: Array<{ name: string; tenantId: string; id: string }> =
+      [];
+    for (const object of objects) {
+      const match = MEDIA_KEY.exec(object.key);
+      if (!match) {
+        result.skipped += 1;
+        continue;
+      }
+      // Unknown age, or too young to tell from an upload in flight.
+      if (!object.lastModified || object.lastModified >= cutoff) continue;
+      candidates.push({ name: object.key, tenantId: match[1], id: match[2] });
+    }
+    if (candidates.length === 0) return;
+    const ids = candidates.map((c) => c.id);
+    const [rows, intents] = await Promise.all([
+      this.prisma.$queryRaw<
+        Array<{ id: string; tenantId: string; storageKey: string | null }>
+      >(Prisma.sql`
+        SELECT "id", "tenantId", "storageKey" FROM "conversation_media"
+        WHERE "id" = ANY(${ids}::text[])`),
+      this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT "id" FROM "conversation_media_intents"
+        WHERE "id" = ANY(${ids}::text[])`),
+    ]);
+    const owned = new Set(
+      rows
+        .filter((r) => r.storageKey !== null)
+        .map((r) => `${r.tenantId}|${r.storageKey}`),
+    );
+    const pending = new Set(intents.map((i) => i.id));
+    for (const candidate of candidates) {
+      if (pending.has(candidate.id)) continue;
+      if (owned.has(`${candidate.tenantId}|${candidate.name}`)) continue;
+      try {
+        await this.storage.remove(candidate.name);
+        result.deleted += 1;
+      } catch (error) {
+        result.failed += 1;
+        this.logger.warn(
+          `Conversation media orphan not deleted, found again on the next pass (${error instanceof Error ? error.name : 'error'})`,
+        );
+      }
+    }
   }
 
   // ------------------------------------------------------------- files
@@ -235,6 +515,13 @@ export class ConversationRetentionService {
           AND k."updatedAt" < now() - (${CONVERSATION_RETENTION_LIMITS.chatIdleDays} * interval '1 day')
           AND NOT EXISTS (
             SELECT 1 FROM "conversation_messages" m WHERE m."conversationId" = k."id")
+          -- N3: staff reach a chat only through a request, and the FE keeps its
+          -- paging cursor (a seq) per request. A chat some request points at
+          -- keeps its row so nextSeq never restarts under a held cursor; only
+          -- chats no request ever referenced (nobody can hold a cursor) go.
+          AND NOT EXISTS (
+            SELECT 1 FROM "chatbot_requests" r
+            WHERE r."tenantId" = k."tenantId" AND r."conversationRef" = k."conversationRef")
         FOR UPDATE SKIP LOCKED)`);
   }
 }

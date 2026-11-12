@@ -80,8 +80,10 @@ async function bootstrap() {
   installSupplierBodyParser(app);
   installPurchaseOrderBodyParser(app);
   installInventoryBodyParser(app);
-  // Bot conversation mirror batches (up to 50 messages, ~200 KB) exceed the
-  // default 100 KB JSON limit; this route-scoped parser raises it for them only.
+  // Bot conversation mirror batches (up to 50 messages: ~200 KB raw, ~2.5 MB
+  // worst case with every character \uXXXX-escaped) exceed the default 100 KB
+  // JSON limit; this route-scoped parser allows 3 MiB for them only and answers
+  // its parse errors in the bot envelope.
   installConversationBatchBodyParser(app);
 
   const port = process.env.PORT ?? 3000;

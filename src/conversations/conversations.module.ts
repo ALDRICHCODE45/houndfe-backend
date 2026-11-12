@@ -7,7 +7,8 @@
  *          POST /chatbot-api/media
  *   staff  GET  /chatbot-requests/:id/conversation
  *          GET  /chatbot-media/:id
- *   retention: hourly `@Interval` purge of messages, files and emptied chats.
+ *   retention: hourly `@Interval` purge of messages, files and emptied chats,
+ *   plus the S2 reconciliation of media intents and the bucket orphan sweep.
  *
  * Files go to Spaces with a PRIVATE ACL through the receipts adapter (the same
  * `SPACES_*` client; `RECEIPTS_SPACES_BUCKET` or `SPACES_BUCKET`) under the
@@ -38,6 +39,8 @@ import {
 } from './application/conversation-reads.service';
 import { ConversationRetentionService } from './application/conversation-retention.service';
 import { ConversationRetentionScheduler } from './infrastructure/conversation-retention.scheduler';
+import { CONVERSATION_MEDIA_LISTER } from './application/conversation-media-lister';
+import { SpacesConversationMediaLister } from './infrastructure/spaces-conversation-media.lister';
 import { PrismaConversationMediaStore } from './infrastructure/prisma-conversation-media.store';
 import { PrismaConversationMirrorStore } from './infrastructure/prisma-conversation-mirror.store';
 import { PrismaConversationReadStore } from './infrastructure/prisma-conversation-read.store';
@@ -72,6 +75,17 @@ import { ChatbotRequestHttpFilter } from '../chatbot-requests/presentation/chatb
     {
       provide: CONVERSATION_MEDIA_STORE,
       useClass: PrismaConversationMediaStore,
+    },
+    // S2: read-only listing of the same bucket for the orphan sweep.
+    {
+      provide: CONVERSATION_MEDIA_LISTER,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
+        new SpacesConversationMediaLister(
+          createSpacesClient(config),
+          config.get<string>('RECEIPTS_SPACES_BUCKET') ||
+            config.getOrThrow<string>('SPACES_BUCKET'),
+        ),
     },
     {
       provide: CONVERSATION_MEDIA_STORAGE,

@@ -12,7 +12,7 @@
  *     phone), no customer key and no storage key: the customer card comes from
  *     the request detail, through `toStaffPhone`.
  */
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ChatbotRequestCommandError } from '../../chatbot-requests/application/chatbot-request-commands.service';
 import type { PermissionCheck } from '../../chatbot-requests/domain/resolve-permissions';
 import { InsufficientPermissionsError } from '../../shared/domain/domain-error';
@@ -50,6 +50,11 @@ export interface ConversationReadStore {
     conversationRef: string,
     query: ConversationPageQuery,
   ): Promise<ConversationPageRows>;
+  /**
+   * S12: staff were shown the chat up to `seq`: advance the chat's read marker
+   * (never back) and tell the open requests' screens when it moved.
+   */
+  markRead(conversationRef: string, seq: number): Promise<boolean>;
   media(ids: string[]): Promise<MediaRecord[]>;
   users(
     ids: string[],
@@ -97,6 +102,8 @@ export async function toMessageViews(
 
 @Injectable()
 export class ConversationReadsService {
+  private readonly logger = new Logger(ConversationReadsService.name);
+
   constructor(
     @Inject(CONVERSATION_READ_STORE)
     private readonly store: ConversationReadStore,
@@ -126,6 +133,21 @@ export class ConversationReadsService {
       query,
     );
     if (rows.length === 0) return EMPTY;
-    return { items: await toMessageViews(this.store, rows), hasMoreBefore };
+    const items = await toMessageViews(this.store, rows);
+    // S12: only a reader of the whole chat "opens" it, and only up to the
+    // newest message this page actually showed (an older page moves nothing; a
+    // message that arrived while the page was being built stays unread). The
+    // marker never blocks the read: a failure to move it is logged, not thrown.
+    try {
+      await this.store.markRead(
+        request.conversationRef,
+        rows[rows.length - 1].seq,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `conversation read marker not moved (${error instanceof Error ? error.name : 'unknown'})`,
+      );
+    }
+    return { items, hasMoreBefore };
   }
 }

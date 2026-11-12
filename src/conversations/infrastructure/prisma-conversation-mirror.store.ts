@@ -39,25 +39,20 @@ import {
   canAdvanceDeliveryStatus,
   initialDeliveryStatus,
 } from '../domain/delivery-status';
+import { openRequestIds } from './open-request-ids';
 
-/** The chat's open requests that get a realtime event (the open limit is 20). */
-const OPEN_REQUESTS_PER_CHAT = 20;
+/** PostgreSQL `unique_violation`, as Prisma reports it for a raw statement. */
+function isUniqueViolation(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === 'P2002') return true;
+  const meta = error.meta as { code?: unknown; message?: unknown } | undefined;
+  return (
+    meta?.code === '23505' ||
+    (typeof meta?.message === 'string' && meta.message.includes('23505'))
+  );
+}
 
 type Db = ReturnType<TenantPrismaService['getClient']>;
-
-/** Open requests of one chat (by `conversationRef`), oldest first. */
-async function openRequestIds(
-  db: Db,
-  tenantId: string,
-  conversationRef: string,
-): Promise<string[]> {
-  const rows = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-    SELECT "id" FROM "chatbot_requests"
-    WHERE "tenantId" = ${tenantId} AND "conversationRef" = ${conversationRef}
-      AND "status" IN ('NEW', 'IN_PROGRESS')
-    ORDER BY "createdAt", "id" LIMIT ${OPEN_REQUESTS_PER_CHAT}`);
-  return rows.map((r) => r.id);
-}
 
 @Injectable()
 export class PrismaConversationMirrorStore implements ConversationMirrorStore {
@@ -108,7 +103,8 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         id: randomUUID(),
         seq: chat.nextSeq + i,
       }));
-      await db.$executeRaw(Prisma.sql`
+      try {
+        await db.$executeRaw(Prisma.sql`
         INSERT INTO "conversation_messages"
           ("id", "tenantId", "conversationId", "seq", "direction", "author",
            "waMessageId", "type", "text", "mediaId", "providerTimestamp",
@@ -125,6 +121,16 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
               now() + interval '12 months')`,
           ),
         )}`);
+      } catch (error) {
+        // Two chats of one tenant that post the same wamid at the same moment
+        // both pass the check above; the unique index decides. The loser is the
+        // same 409 the sequential case gets (the transaction is aborted, so
+        // nothing of this batch is stored).
+        if (isUniqueViolation(error)) {
+          throw new ChatbotRequestCommandError('MESSAGE_ID_CONFLICT', 409);
+        }
+        throw error;
+      }
 
       const latestCustomer = stored
         .filter(({ message }) => message.direction === 'IN')
@@ -155,6 +161,21 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
           payload: { messageId: id, seq },
         })),
       );
+      // S12: a customer message changes `unreadCustomerMessages` of every open
+      // request of the chat, so each gets ONE `request.updated` per batch (the
+      // row is built at delivery and carries the new count). Bot-only batches
+      // change no count and send none.
+      if (stored.some(({ message }) => message.direction === 'IN')) {
+        for (const requestId of requestIds) {
+          drafts.push({
+            tenantId,
+            userId: null,
+            type: 'request.updated',
+            requestId,
+            payload: { cause: 'CUSTOMER_MESSAGE' },
+          });
+        }
+      }
       await emitRealtimeEvents(db, drafts);
 
       return {
@@ -175,22 +196,46 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
   ): Promise<void> {
     const wanted = messages.filter((m) => m.mediaId !== null);
     if (wanted.length === 0) return;
+    // N4. The rows are LOCKED (`FOR UPDATE`, in id order so two batches never
+    // wait on each other in a cycle): the retention claim skips a locked row, so
+    // a purge cannot start on a file this batch is about to reference. A file
+    // that is already due, or that a purge has claimed (lease), cannot be
+    // referenced any more: the message would point at a file being deleted.
     const rows = await db.$queryRaw<
-      Array<{ id: string; mimeType: string; purgedAt: Date | null }>
+      Array<{
+        id: string;
+        mimeType: string;
+        purgedAt: Date | null;
+        referenceable: boolean;
+        purgeAfter: Date;
+      }>
     >(Prisma.sql`
-      SELECT "id", "mimeType", "purgedAt" FROM "conversation_media"
+      SELECT "id", "mimeType", "purgedAt", "purgeAfter",
+             ("purgedAt" IS NULL AND "purgeAfter" > now()
+              AND ("purgeLeaseUntil" IS NULL OR "purgeLeaseUntil" < now())) AS "referenceable"
+      FROM "conversation_media"
       WHERE "tenantId" = ${tenantId}
-        AND "id" = ANY(${wanted.map((m) => m.mediaId as string)}::text[])`);
+        AND "id" = ANY(${wanted.map((m) => m.mediaId as string)}::text[])
+      ORDER BY "id" FOR UPDATE`);
     const byId = new Map(rows.map((row) => [row.id, row]));
     for (const message of wanted) {
       const media = byId.get(message.mediaId as string);
-      if (!media || media.purgedAt) {
+      if (!media || media.purgedAt || !media.referenceable) {
         throw new ChatbotRequestCommandError('MEDIA_NOT_FOUND', 422);
       }
       if (!mediaMatchesMessageType(message.type, media.mimeType)) {
         throw new ChatbotRequestCommandError('MEDIA_TYPE_MISMATCH', 422);
       }
     }
+    // A file is purged when the LAST message that shows it is due: its purge
+    // time is the latest `purgeAfter` of its references (the messages of this
+    // batch are stamped `now() + 12 months`).
+    await db.$executeRaw(Prisma.sql`
+      UPDATE "conversation_media"
+      SET "purgeAfter" = now() + interval '12 months'
+      WHERE "tenantId" = ${tenantId}
+        AND "id" = ANY(${[...byId.keys()]}::text[])
+        AND "purgeAfter" < now() + interval '12 months'`);
   }
 
   applyStatuses(statuses: ParsedStatus[]): Promise<StatusResult> {

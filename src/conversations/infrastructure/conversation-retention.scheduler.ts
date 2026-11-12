@@ -19,7 +19,8 @@
  *
  * Cadence: the contract speaks of a daily cron (§3.6); hourly keeps each purge
  * small and still satisfies "at least daily". It is the sixteenth `@Interval`
- * of the system (`scheduler-gate.integration.spec.ts`).
+ * of the system (`scheduler-gate.integration.spec.ts`); the S2 media intents and
+ * the bucket sweep run inside it, so the count of jobs did not change.
  *
  * Logging: counts only. Never a storage key, a message or a phone.
  */
@@ -29,6 +30,7 @@ import {
   CONVERSATION_RETENTION_LIMITS,
   ConversationRetentionService,
   type ConversationRetentionResult,
+  type OrphanSweepResult,
 } from '../application/conversation-retention.service';
 
 /** The one method of the service the schedule needs. */
@@ -38,6 +40,8 @@ export interface ConversationRetentionPort {
     mediaBatchSize?: number;
     runStartedAt?: Date;
   }): Promise<ConversationRetentionResult>;
+  /** S2: the bucket sweep, once per run (optional: specs may not need it). */
+  sweepOrphans?(): Promise<OrphanSweepResult>;
 }
 
 /** Engineering-only overrides (no product semantics); all optional. */
@@ -59,6 +63,10 @@ export interface ConversationRetentionRun {
   mediaPurged: number;
   mediaFailed: number;
   conversationsDeleted: number;
+  /** S2: media intents settled / failed, and unowned objects the sweep deleted. */
+  intentsSettled: number;
+  intentsFailed: number;
+  orphansDeleted: number;
   /** The run stopped at the cap while the last batch was still full. */
   hasMore: boolean;
 }
@@ -143,8 +151,12 @@ export class ConversationRetentionScheduler {
       mediaPurged: 0,
       mediaFailed: 0,
       conversationsDeleted: 0,
+      intentsSettled: 0,
+      intentsFailed: 0,
+      orphansDeleted: 0,
       hasMore: false,
     };
+    let drained = false;
     while (run.batches < this.maxBatchesPerTick) {
       const result = await this.retention.purgeBatch({
         batchSize: CONVERSATION_RETENTION_LIMITS.messageBatch,
@@ -155,9 +167,32 @@ export class ConversationRetentionScheduler {
       run.mediaPurged += result.mediaPurged;
       run.mediaFailed += result.mediaFailed;
       run.conversationsDeleted += result.conversationsDeleted;
-      if (!result.hasMore) return run;
+      run.intentsSettled += result.intentsSettled;
+      run.intentsFailed += result.intentsFailed;
+      if (!result.hasMore) {
+        drained = true;
+        break;
+      }
     }
-    run.hasMore = true;
+    run.hasMore = !drained;
+    await this.sweepOrphans(run);
     return run;
+  }
+
+  /**
+   * S2: one bounded page window of the bucket sweep per run. It never fails the
+   * run: a storage outage or a lock problem is logged (class only) and retried
+   * at the next interval.
+   */
+  private async sweepOrphans(run: ConversationRetentionRun): Promise<void> {
+    if (!this.retention.sweepOrphans) return;
+    try {
+      const swept = await this.retention.sweepOrphans();
+      run.orphansDeleted += swept.deleted;
+    } catch (error) {
+      this.logger.error('conversation media orphan sweep failed', {
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+    }
   }
 }

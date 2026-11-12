@@ -85,7 +85,7 @@ What each type means:
 | `request.resolved` | Resolved, including zone siblings resolved together and legacy-route resolves. |
 | `request.cancelled` | Cancelled by staff or by the customer, **or merged into another request** (the source of a merge: `cancelReason: "SUPERSEDED"`, `mergedInto` set). |
 | `request.overdue` | The SLA sweep marked it overdue (`overdueAt` set). |
-| `request.updated` | A row change that is not a transition: an SLA milestone that moved `slaLevel` (50 % / 80 %), `link-customer`. |
+| `request.updated` | A row change that is not a transition: an SLA milestone that moved `slaLevel` (50 % / 80 %), `link-customer`, and (unit 9, S12) a change of `unreadCustomerMessages`: a customer message arrived in the request's chat, or someone opened the conversation. `version` does not change; apply it by the equal-version rule above. |
 
 Events that are **not** announced: replies, templates, finish and reschedule (units 10 and 11), delivery outcomes of the bot feed, and the **target** of a merge (its row did not change). New customer or bot messages are **not** a request event: they arrive as `conversation.message` (section 3.3) and do not change `version`.
 

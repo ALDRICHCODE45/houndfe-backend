@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'crypto';
 import { PrismaConversationMirrorStore } from '../conversations/infrastructure/prisma-conversation-mirror.store';
+import { PrismaConversationReadStore } from '../conversations/infrastructure/prisma-conversation-read.store';
 import type { ParsedMessage } from '../conversations/domain/conversation-message';
 import { SseClient } from './test-support/sse-client';
 import {
@@ -208,6 +209,60 @@ describeIfDb('realtime conversation events (PostgreSQL, real HTTP)', () => {
       .of('conversation.message')
       .map((m) => requestIdOf(m.data));
     expect(new Set(requestIds)).toEqual(new Set([w.request.id, second.id]));
+  });
+
+  it('S12: the row on the stream carries the unread count: up on a customer message, to 0 when someone opens the chat, for readers with or without the conversation permission', async () => {
+    const w = await world();
+    const reads = new PrismaConversationReadStore(h.tenantPrisma);
+    const withPermission = await connect(w.tenantId, w.manager.userId);
+    const withoutPermission = await connect(
+      w.tenantId,
+      w.noConversation.userId,
+    );
+    const counts = (client: SseClient) =>
+      client
+        .of('request.updated')
+        .map(
+          (m) =>
+            (m.data as { request: { unreadCustomerMessages: number } }).request
+              .unreadCustomerMessages,
+        );
+    await ingest(w.tenantId, [
+      message(),
+      message({ author: 'BOT', direction: 'OUT' }),
+      message(),
+    ]);
+    await withoutPermission.waitForEvent('request.updated');
+    await withPermission.waitForEvent('request.updated');
+    // Customer messages only; the version of the row did not move.
+    expect(counts(withoutPermission).at(-1)).toBe(2);
+    expect(counts(withPermission).at(-1)).toBe(2);
+    expect(
+      (
+        withoutPermission.of('request.updated')[0].data as {
+          request: { version: number };
+        }
+      ).request.version,
+    ).toBe(1);
+    // The person without the permission got no message content.
+    expect(withoutPermission.of('conversation.message')).toEqual([]);
+
+    // Someone opens the chat: every screen's badge clears.
+    const opened = await h.cls.runWith(
+      { tenantId: w.tenantId, userId: w.manager.userId, isSuperAdmin: false },
+      () => reads.markRead(REF, 3),
+    );
+    expect(opened).toBe(true);
+    await withoutPermission.waitForEvent('request.updated', 2);
+    await withPermission.waitForEvent('request.updated', 2);
+    expect(counts(withoutPermission).at(-1)).toBe(0);
+    expect(counts(withPermission).at(-1)).toBe(0);
+    // Opening again with nothing newer moves nothing and sends nothing.
+    const again = await h.cls.runWith(
+      { tenantId: w.tenantId, userId: w.manager.userId, isSuperAdmin: false },
+      () => reads.markRead(REF, 3),
+    );
+    expect(again).toBe(false);
   });
 
   it('is tenant isolated: another tenant never sees the messages, even for the same chat reference', async () => {

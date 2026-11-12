@@ -137,6 +137,8 @@ export interface RequestRecord {
   lastReleasedAt?: Date | null;
   /** DELIVERY_ZONE only: the zone request has a validation (the detail's `zoneImpact` rule). */
   zoneHasValidation?: boolean | null;
+  /** S12: customer messages since a staff member last opened the chat (open requests). */
+  unreadCustomerMessages?: number;
 }
 
 export interface GroupRecord {
@@ -855,7 +857,7 @@ export class ChatbotRequestReadsService {
       slaPaused: paused,
       slaResumesAt: paused ? iso(pause.resumesAt) : null,
       whatsappWindowClosesAt: iso(r.whatsappWindowClosesAt),
-      unreadCustomerMessages: 0,
+      unreadCustomerMessages: r.unreadCustomerMessages ?? 0,
       scheduledFor: iso(r.scheduledFor),
       requiresTemplateAtStart: r.requiresTemplateAtStart,
       needsReschedule: r.needsReschedule,

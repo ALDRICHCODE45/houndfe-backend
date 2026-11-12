@@ -441,6 +441,47 @@ describeIfDb('conversation mirror (PostgreSQL)', () => {
       expect(await rows(b.tenantId, 'wa:5215500000002')).toEqual([]);
     });
 
+    it('N1: the same wamid posted to two chats at the same moment is a 409, never a raw unique violation', async () => {
+      const b = await bot();
+      const wamid = `wamid.${randomUUID()}`;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let inserted!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        inserted = resolve;
+      });
+      // Chat A inserts the wamid inside a transaction that stays open: chat B
+      // cannot see it (it passes the "already mirrored?" check) and blocks on
+      // the unique index until A commits, then loses it.
+      const holder = prisma.$transaction(async (tx) => {
+        const chatId = randomUUID();
+        await tx.$executeRaw`
+          INSERT INTO "chatbot_conversations" ("id", "tenantId", "conversationRef", "updatedAt", "nextSeq")
+          VALUES (${chatId}, ${b.tenantId}, 'wa:5215500000101', now(), 2)`;
+        await tx.$executeRaw`
+          INSERT INTO "conversation_messages"
+            ("id", "tenantId", "conversationId", "seq", "direction", "author", "waMessageId",
+             "type", "text", "receivedAt", "purgeAfter")
+          VALUES (${randomUUID()}, ${b.tenantId}, ${chatId}, 1, 'IN', 'CUSTOMER', ${wamid},
+                  'TEXT', 'hola', now(), now() + interval '12 months')`;
+        inserted();
+        await held;
+      });
+      await ready;
+      const pending = post(b, 'wa:5215500000102', {
+        messages: [msg({ waMessageId: wamid })],
+      }).then((res) => res);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      release();
+      await holder;
+      const res = await pending;
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('MESSAGE_ID_CONFLICT');
+      expect(await rows(b.tenantId, 'wa:5215500000102')).toEqual([]);
+    });
+
     it('updates lastCustomerMessageAt from the customer messages only', async () => {
       const b = await bot();
       const customerAt = '2026-11-12T10:00:00.000Z';
@@ -827,6 +868,34 @@ describeIfDb('conversation mirror (PostgreSQL)', () => {
       );
     });
 
+    it('N5: a DELETE issued from another trigger is rejected while the tenant exists (only the tenant cascade is exempt)', async () => {
+      const { stored } = await oneMessage();
+      const probe = `zz_probe_${randomUUID().slice(0, 8)}`;
+      await prisma.$executeRawUnsafe(`CREATE TABLE "${probe}" ("id" int)`);
+      await prisma.$executeRawUnsafe(`
+        CREATE FUNCTION "${probe}_fn"() RETURNS trigger LANGUAGE plpgsql AS $f$
+        BEGIN
+          DELETE FROM "conversation_messages" WHERE "id" = '${stored[0].id}';
+          RETURN NEW;
+        END $f$`);
+      await prisma.$executeRawUnsafe(`
+        CREATE TRIGGER "${probe}_trg" AFTER INSERT ON "${probe}"
+        FOR EACH ROW EXECUTE FUNCTION "${probe}_fn"()`);
+      try {
+        await rejected(
+          prisma.$executeRawUnsafe(`INSERT INTO "${probe}" VALUES (1)`),
+        );
+        expect(
+          await prisma.conversationMessage.count({
+            where: { id: stored[0].id },
+          }),
+        ).toBe(1);
+      } finally {
+        await prisma.$executeRawUnsafe(`DROP TABLE "${probe}"`);
+        await prisma.$executeRawUnsafe(`DROP FUNCTION "${probe}_fn"()`);
+      }
+    });
+
     it('a conversation with messages cannot be deleted directly; a tenant delete cascades', async () => {
       const { b } = await oneMessage();
       await rejected(
@@ -1187,4 +1256,10 @@ describeIfDb('conversation mirror (PostgreSQL)', () => {
   it('keeps cls typed (the harness reads the tenant from the stub)', () => {
     expect(cls).toBeDefined();
   });
+});
+
+// The shared client keeps a pool open for the whole run unless it is closed:
+// the integration suite runs every spec in one process against one database.
+afterAll(async () => {
+  await integrationPrisma().$disconnect();
 });

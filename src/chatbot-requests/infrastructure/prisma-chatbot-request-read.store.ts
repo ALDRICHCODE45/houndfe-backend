@@ -71,6 +71,24 @@ const ZONE_HAS_VALIDATION = Prisma.sql`(CASE WHEN r."subtype" = 'DELIVERY_ZONE' 
   SELECT 1 FROM "delivery_zone_requests" z
   WHERE z."tenantId" = r."tenantId" AND z."id" = r."deliveryZoneRequestId"
     AND z."validationId" IS NOT NULL) END)`;
+/**
+ * S12 `unreadCustomerMessages`: the CUSTOMER messages of the request's chat
+ * after the conversation's staff-read marker (`lastStaffReadSeq`, moved by
+ * `GET …/conversation`). Open requests only (a closed one waits for nobody);
+ * the CASE keeps the subquery off every other row. A correlated scalar subquery
+ * in the page's own statement: one conversation lookup by its unique
+ * `(tenantId, conversationRef)` index plus an index range scan over the partial
+ * index `conversation_messages_customer_seq_idx`, per row of the page, with no
+ * extra round trip (no N+1).
+ */
+const UNREAD_CUSTOMER_MESSAGES = Prisma.sql`(CASE WHEN r."conversationRef" IS NOT NULL
+    AND r."status" IN ('NEW', 'IN_PROGRESS') THEN (
+  SELECT count(*)::int FROM "chatbot_conversations" cv
+  JOIN "conversation_messages" cm
+    ON cm."conversationId" = cv."id" AND cm."seq" > cv."lastStaffReadSeq"
+   AND cm."author" = 'CUSTOMER'
+  WHERE cv."tenantId" = r."tenantId" AND cv."conversationRef" = r."conversationRef"
+    AND cm."tenantId" = r."tenantId") ELSE 0 END)`;
 const COLUMNS = Prisma.sql`
   r."id", r."folio", r."kind"::text AS "kind", r."subtype"::text AS "subtype",
   r."status"::text AS "status", r."version", r."customerKey", r."customerId",
@@ -83,7 +101,8 @@ const COLUMNS = Prisma.sql`
   r."staffCancelReason"::text AS "staffCancelReason",
   ${MERGED_INTO} AS "mergedInto",
   ${LAST_RELEASED_NEW} AS "lastReleasedAt",
-  ${ZONE_HAS_VALIDATION} AS "zoneHasValidation"`;
+  ${ZONE_HAS_VALIDATION} AS "zoneHasValidation",
+  ${UNREAD_CUSTOMER_MESSAGES} AS "unreadCustomerMessages"`;
 /**
  * S9: open requests of the group's customer with `overdueAt` set, exact. A
  * correlated scalar subquery in the page CTE: it runs once per group of the

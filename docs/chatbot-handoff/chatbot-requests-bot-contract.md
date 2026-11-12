@@ -436,14 +436,14 @@ Answer `200`:
 | `200` | Done (see above). | ACK the row(s). |
 | `400 VALIDATION_ERROR` | The body is wrong. It will not get better by retrying. | Park the row as failed and alert; do not retry in a loop. |
 | `401`, `403 INSUFFICIENT_SCOPE`, `403 FORBIDDEN` | Credential, scope (`conversation:write`) or `X-Branch-Id`. | Stop and alert; retrying is pointless until the credential is fixed. |
-| `409 MESSAGE_ID_CONFLICT` | A `waMessageId` of this batch is already stored in **another** chat (a reused wamid: a bug). Nothing was stored. | Park and alert. |
+| `409 MESSAGE_ID_CONFLICT` | A `waMessageId` of this batch is already stored in **another** chat (a reused wamid: a bug), including when two chats post the same id at the same moment (never a 500). Nothing was stored. | Park and alert. |
 | `413 BATCH_TOO_LARGE` | Over 50 messages. | Split and resend. |
-| `422 MEDIA_NOT_FOUND` | A `mediaId` does not exist for this branch, or its file was already purged. | Upload the file again (new key if the old media is gone) and resend. |
+| `422 MEDIA_NOT_FOUND` | A `mediaId` does not exist for this branch, its file was already purged, or it is past its retention time / being purged right now (only possible for a file about 12 months old: a file is kept until the newest message that shows it is due). | Upload the file again (new key if the old media is gone) and resend. |
 | `422 MEDIA_TYPE_MISMATCH` | The file kind does not match the type (`IMAGE`/`STICKER` need an image, `DOCUMENT` a PDF, `AUDIO` audio). | Park and alert (a bug in the mapping). |
 | `429 RATE_LIMITED` | The `write` budget; `Retry-After` in seconds. | Wait `Retry-After`, then retry. |
 | `5xx`, timeout, network | Transient. | Retry with backoff, **same body**: it is idempotent. |
 
-**Body size.** A full batch (50 × 4 096 characters) is about 200 KB of JSON; the server's default JSON limit is **100 KB** until the route-scoped 1 MB parser (`installConversationBatchBodyParser`) is mounted in `main.ts` (a one-line deploy item, below). Until the backend confirms it, keep each call under **90 KB serialized** (split by size as well as by count); a larger one is rejected by the framework with a `413` that does **not** use the envelope above.
+**Body size.** The route-scoped parser (`installConversationBatchBodyParser`, mounted in `main.ts`) accepts a JSON body of **at most 3 MiB (3 145 728 bytes)** on this route only (every other bot route keeps the framework default of 100 KB). A full batch (50 messages × 4 096 characters) is about 200 KB when non-ASCII is sent as raw UTF-8, but a JSON encoder that escapes it as `\uXXXX` writes 6 bytes per character and 12 per emoji (a surrogate pair): the worst case, 50 × 4 096 emoji, is **about 2.5 MB**, which fits. So **a full batch never needs splitting by size**: split by count (50) only. If a body is still over the bound the answer is `413 {statusCode, code: "BODY_TOO_LARGE", message}`; a body that is not valid JSON is `400 {statusCode, code: "VALIDATION_ERROR", message}`. Both use the envelope above, carry fixed texts and never echo any part of your body.
 
 ### `POST /chatbot-api/messages/statuses:batch`
 
@@ -496,7 +496,7 @@ The file is stored privately (never public, never a URL back to you); staff read
 For each inbound or outbound WhatsApp message of a chat, in the chat's outbox order:
 
 1. If it has a file you can store (image, sticker, PDF, audio ≤ 10 MiB): download it from Meta, `POST /chatbot-api/media` with a stable `X-Idempotency-Key`, keep `mediaId`. Video / location / other: no upload, `type: UNSUPPORTED` with `kind`.
-2. Build the message (table above) and `POST …/messages:batch` (up to 50 rows of one chat, under 90 KB). ACK the rows on `200`.
+2. Build the message (table above) and `POST …/messages:batch` (up to 50 rows of one chat; the whole body at most 3 MiB, which a full batch always fits). ACK the rows on `200`.
 3. When Meta reports a status for a message you sent, `POST …/statuses:batch` (up to 100). ACK on `200`; retry `unknown` ids for at most 24 h.
 4. Never mirror staff messages (the backend owns them), never send tenant, `seq`, author `STAFF`/`SYSTEM` or a status the backend owns.
 
@@ -511,5 +511,5 @@ For each inbound or outbound WhatsApp message of a chat, in the chat's outbox or
 1. Migration `20261112020000_conversation_mirror` (three new tables, triggers, one partial index on `chatbot_requests`; brief locks, deploy at low traffic; recovery note in the file).
 2. The credential has `conversation:write` and `media:write`; the `write` budget (`rateLimits.write`, default 300 a minute) covers messages, statuses and uploads together.
 3. Spaces: the same `SPACES_*` configuration as receipts (`RECEIPTS_SPACES_BUCKET` or `SPACES_BUCKET`); objects live under `conversation-media/<tenantId>/`.
-4. `main.ts` mounts `installConversationBatchBodyParser(app)` (from `src/conversations/presentation/conversation-body-parser.ts`) next to the other `install*BodyParser` calls, before `app.listen`. Until it is mounted, keep batches under 90 KB.
+4. `main.ts` mounts `installConversationBatchBodyParser(app)` (from `src/conversations/presentation/conversation-body-parser.ts`) next to the other `install*BodyParser` calls, before `app.listen` (done: it is mounted, with a 3 MiB limit for that route only).
 5. The retention purge runs hourly on every replica (no setup).

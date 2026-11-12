@@ -170,4 +170,8 @@ export const TENANT_SCOPED_MODELS = new Set([
   'ChatbotConversation',
   'ConversationMessage',
   'ConversationMedia',
+  // S2: the durable record of objects written (or orphaned) in storage. It has
+  // a `tenantId` and no foreign key (it outlives the tenant on purpose); the
+  // sweep that settles it is a system flow on the global client.
+  'ConversationMediaIntent',
 ]);

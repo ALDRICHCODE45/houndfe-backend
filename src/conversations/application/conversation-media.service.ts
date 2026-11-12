@@ -12,6 +12,11 @@
  * one key race on a unique index; the loser deletes its object and answers the
  * winner's row.
  *
+ * Retention of the OBJECT (S2): an intent row is committed before the object is
+ * written and dropped once a media row owns it or the object is deleted; the
+ * retention sweep reconciles the intents a crash or a failed delete left, and
+ * `media_tombstone` covers rows deleted with their object (tenant deletion).
+ *
  * Staff read (`GET /chatbot-media/:id`): an authenticated proxy, never a signed
  * or public URL (§12.5): the permission is checked on EVERY request by the
  * controller and the bytes stream through the backend. A purged file is a 410.
@@ -46,6 +51,10 @@ export interface MediaRow {
 export interface ConversationMediaStore {
   tenantId(): string;
   findByKey(idempotencyKey: string): Promise<MediaRow | null>;
+  /** S2: written and committed BEFORE the object is (see the store). */
+  recordIntent(row: { id: string; storageKey: string }): Promise<void>;
+  /** S2: the object is owned by a row or deleted: the intent is done. */
+  dropIntent(id: string): Promise<void>;
   /** `false` when the key already has a row (another request won the race). */
   insert(row: {
     id: string;
@@ -117,6 +126,12 @@ export class ConversationMediaService {
 
     const id = randomUUID();
     const storageKey = `conversation-media/${this.store.tenantId()}/${id}.${detected.extension}`;
+    // S2 (PII retention): the intent is durable BEFORE the object exists. Every
+    // path below ends with the object owned by a media row, or deleted, and the
+    // intent dropped; a crash anywhere in between leaves the intent, which the
+    // retention sweep reconciles (row exists -> drop it; no row -> delete the
+    // object, then the intent).
+    await this.store.recordIntent({ id, storageKey });
     try {
       await this.storage.putPrivate({
         key: storageKey,
@@ -127,6 +142,9 @@ export class ConversationMediaService {
       this.logger.error(
         `Conversation media upload to private storage failed (${errorClass(error)})`,
       );
+      // A timeout can still have written the object: clean up like any other
+      // failure after the write.
+      await this.discard(id, storageKey);
       throw new ChatbotRequestCommandError(
         'MEDIA_STORAGE_FAILED',
         503,
@@ -148,10 +166,11 @@ export class ConversationMediaService {
         idempotencyKey: key,
       });
     } catch (error) {
-      await this.storage.delete(storageKey);
+      await this.discard(id, storageKey);
       throw error;
     }
     if (inserted) {
+      await this.settleIntent(id);
       return {
         created: true,
         media: {
@@ -163,12 +182,40 @@ export class ConversationMediaService {
       };
     }
     // Lost the race for this key: no row points at our object any more.
-    await this.storage.delete(storageKey);
+    await this.discard(id, storageKey);
     const winner = await this.store.findByKey(key);
     if (!winner) {
       throw new ChatbotRequestCommandError('MEDIA_STORAGE_FAILED', 503);
     }
     return { created: false, media: replay(winner, sha256) };
+  }
+
+  /**
+   * Deletes an object this call wrote and no row owns, REPORTING failure (the
+   * adapter's `delete` swallows it and logs the key). The intent is dropped only
+   * after the delete succeeded; otherwise it stays and the sweep retries.
+   */
+  private async discard(id: string, storageKey: string): Promise<void> {
+    try {
+      await this.storage.remove(storageKey);
+    } catch (error) {
+      this.logger.warn(
+        `Conversation media ${id} not deleted, left for the retention sweep (${errorClass(error)})`,
+      );
+      return;
+    }
+    await this.settleIntent(id);
+  }
+
+  /** A failed drop is harmless (the sweep sees the row / the missing object). */
+  private async settleIntent(id: string): Promise<void> {
+    try {
+      await this.store.dropIntent(id);
+    } catch (error) {
+      this.logger.warn(
+        `Conversation media ${id} intent not dropped (${errorClass(error)})`,
+      );
+    }
   }
 
   /** `variant`: absent or `original`; `thumb` has no file yet (no image library). */

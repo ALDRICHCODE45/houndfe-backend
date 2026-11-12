@@ -19,6 +19,8 @@ const result = (hasMore: boolean): ConversationRetentionResult => ({
   mediaFailed: 0,
   messagesDeleted: 2,
   conversationsDeleted: 0,
+  intentsSettled: 0,
+  intentsFailed: 0,
   hasMore,
 });
 
@@ -79,6 +81,41 @@ describe('ConversationRetentionScheduler.purge', () => {
     const run = await scheduler.purge();
     expect(calls).toHaveLength(3);
     expect(run).toMatchObject({ batches: 3, hasMore: true });
+  });
+
+  it('S2: sweeps the bucket once per run (not once per batch) and counts what it deleted', async () => {
+    const sweepOrphans = jest.fn(() =>
+      Promise.resolve({
+        scanned: 10,
+        deleted: 3,
+        failed: 0,
+        skipped: 0,
+        passCompleted: false,
+      }),
+    );
+    const port: ConversationRetentionPort = {
+      purgeBatch: () => Promise.resolve(result(true)),
+      sweepOrphans,
+    };
+    const scheduler = new ConversationRetentionScheduler(port, {
+      maxBatchesPerTick: 3,
+    });
+    const run = await scheduler.purge();
+    expect(run.batches).toBe(3);
+    expect(sweepOrphans).toHaveBeenCalledTimes(1);
+    expect(run.orphansDeleted).toBe(3);
+  });
+
+  it('S2: a failing bucket sweep never fails the run', async () => {
+    const port: ConversationRetentionPort = {
+      purgeBatch: () => Promise.resolve(result(false)),
+      sweepOrphans: () => Promise.reject(new Error('list failed')),
+    };
+    const scheduler = new ConversationRetentionScheduler(port);
+    await expect(scheduler.purge()).resolves.toMatchObject({
+      batches: 1,
+      orphansDeleted: 0,
+    });
   });
 
   it('rejects a batch cap or interval that is not valid', () => {

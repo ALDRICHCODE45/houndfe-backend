@@ -5,6 +5,12 @@
  * unique index in both directions: one index range scan per page.
  */
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import {
+  emitRealtimeEvents,
+  type RealtimeEventDraft,
+} from '../../shared/realtime/realtime-event-writes';
+import { openRequestIds } from './open-request-ids';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
   ConversationPageRows,
@@ -88,6 +94,40 @@ export class PrismaConversationReadStore implements ConversationReadStore {
       rows: found.slice(0, query.limit).reverse(),
       hasMoreBefore: found.length > query.limit,
     };
+  }
+
+  /**
+   * S12: a staff member was shown messages up to `seq`. Moves the chat's
+   * marker forward only (`GREATEST`, never back) and, when it moved, logs one
+   * `request.updated` per open request of the chat in the same transaction, so
+   * every staff screen refreshes its row (the count is read at delivery). The
+   * UPDATE writes nothing when the marker is already there (a poll that shows
+   * nothing new costs a no-op). Lock order = the mirror's: chat row, then the
+   * realtime lock last.
+   */
+  markRead(conversationRef: string, seq: number): Promise<boolean> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    return this.tenantPrisma.runInTransaction(async () => {
+      const db = this.tenantPrisma.getClient();
+      const moved = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        UPDATE "chatbot_conversations"
+        SET "lastStaffReadSeq" = ${seq}, "lastStaffReadAt" = now()
+        WHERE "tenantId" = ${tenantId} AND "conversationRef" = ${conversationRef}
+          AND "lastStaffReadSeq" < ${seq}
+        RETURNING "id"`);
+      if (moved.length === 0) return false;
+      const drafts: RealtimeEventDraft[] = (
+        await openRequestIds(db, tenantId, conversationRef)
+      ).map((requestId) => ({
+        tenantId,
+        userId: null,
+        type: 'request.updated',
+        requestId,
+        payload: { cause: 'CONVERSATION_READ' },
+      }));
+      await emitRealtimeEvents(db, drafts);
+      return true;
+    });
   }
 
   /** The realtime shaper's batch read: current rows by id, this tenant only. */

@@ -124,6 +124,22 @@ describe('realtime request rows (unit 8)', () => {
     expect(store.byIds).toHaveBeenCalledTimes(1);
   });
 
+  it('S12: the row carries the stored unread count, and 0 when the store does not say', async () => {
+    const { service } = build([
+      record({ id: 'r-1', unreadCustomerMessages: 4 }),
+      record({ id: 'r-2' }),
+    ]);
+    const batch = await service.loadEventRows(['r-1', 'r-2']);
+    expect(
+      service.shapeEventRow(batch, 'r-1', as('u-1', MANAGER))?.request
+        .unreadCustomerMessages,
+    ).toBe(4);
+    expect(
+      service.shapeEventRow(batch, 'r-2', as('u-1', MANAGER))?.request
+        .unreadCustomerMessages,
+    ).toBe(0);
+  });
+
   it('shapes the same row as the inbox: version, SLA fields and actions', async () => {
     const { service } = build([record()]);
     const batch = await service.loadEventRows(['r-1']);

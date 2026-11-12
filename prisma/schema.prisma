@@ -4158,6 +4158,12 @@ model ChatbotConversation {
   mode                  ConversationMode @default(BOT)
   handoffEpoch          Int              @default(0)
   nextSeq               Int              @default(1)
+  // S12: the highest `seq` any staff member has been shown through the
+  // conversation read, and when that last moved. `unreadCustomerMessages` of a
+  // request row = CUSTOMER messages of its chat with seq > lastStaffReadSeq.
+  // Migration-only: partial index conversation_messages_customer_seq_idx.
+  lastStaffReadSeq      Int              @default(0)
+  lastStaffReadAt       DateTime?
   createdAt             DateTime         @default(now())
   updatedAt             DateTime         @updatedAt
 
@@ -4274,4 +4280,36 @@ model ConversationMedia {
   @@unique([tenantId, id])
   @@unique([tenantId, idempotencyKey])
   @@map("conversation_media")
+}
+
+// S2: every object the media upload is about to write (UPLOAD) and every object
+// whose media row was deleted while it still owned one (ROW_DELETED, written by
+// the trigger `conversation_media_tombstone`, e.g. a tenant deletion). The row
+// goes only after the object is deleted or a media row owns it, so a crash or a
+// failed delete can never leave a file nobody will purge. No relation to Tenant
+// on purpose: it must outlive the tenant. Accessed with raw SQL only.
+model ConversationMediaIntent {
+  id          String    @id
+  tenantId    String
+  storageKey  String
+  reason      String
+  createdAt   DateTime  @default(now())
+  dueAt       DateTime
+  attempts    Int       @default(0)
+  lastErrorAt DateTime?
+  leaseUntil  DateTime?
+
+  @@index([dueAt])
+  @@map("conversation_media_intents")
+}
+
+// S2: cursor of the bucket sweep (objects under `conversation-media/` that no
+// media row and no intent own). One row, id `conversation-media`.
+model ConversationMediaOrphanSweep {
+  id         String    @id
+  cursor     String?
+  leaseUntil DateTime?
+  updatedAt  DateTime  @default(now())
+
+  @@map("conversation_media_orphan_sweep")
 }

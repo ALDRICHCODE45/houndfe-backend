@@ -402,3 +402,9 @@ describeIfDb('conversation retention (PostgreSQL)', () => {
     expect(ids.sort()).toEqual([stays.id, human.id, recent.id].sort());
   });
 });
+
+// The shared client keeps a pool open for the whole run unless it is closed:
+// the integration suite runs every spec in one process against one database.
+afterAll(async () => {
+  await integrationPrisma().$disconnect();
+});
