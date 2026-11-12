@@ -16,6 +16,7 @@ import {
   type ExecutionContext,
   type INestApplication,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -2027,6 +2028,50 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       ).toContain('FAILED');
     });
 
+    it('A2: the same attemptId replayed after that settle answers the original response (200, same body); another attemptId is 409 OUTCOME_ALREADY_RECORDED; a different body under the same attemptId is 409 IDEMPOTENCY_CONFLICT', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      const sent = (await say(b, l.id, 1, 'repetida').expect(200)).body.message
+        .id;
+      const feed = await items(b, l.id, 'conversation.staff_message');
+      await finish(b, l.id, version).expect(200);
+      const body = deferral();
+      const first = await outcome(b, feed[0].deliveryId, body).expect(200);
+      expect(first.body.outcome).toBe('DEFERRED_WINDOW_CLOSED');
+      expect(await status(sent)).toBe('FAILED');
+
+      const again = await outcome(b, feed[0].deliveryId, body).expect(200);
+      expect(again.body).toEqual(first.body);
+      const third = await outcome(b, feed[0].deliveryId, body).expect(200);
+      expect(third.body).toEqual(first.body);
+      expect(await status(sent)).toBe('FAILED');
+      // nothing was applied twice: one audit event, one FAILED announcement
+      const events = await prisma.chatbotRequestEvent.count({
+        where: {
+          tenantId: b.tenantId,
+          requestId: l.id,
+          type: 'DELIVERY_OUTCOME',
+        },
+      });
+      expect(events).toBe(1);
+      expect(
+        (await statusEvents(b, l.id)).filter(
+          (e) => e.messageId === sent && e.deliveryStatus === 'FAILED',
+        ),
+      ).toHaveLength(1);
+
+      const other = await outcome(b, feed[0].deliveryId, deferral()).expect(
+        409,
+      );
+      expect(other.body.code).toBe('OUTCOME_ALREADY_RECORDED');
+      const changed = await outcome(b, feed[0].deliveryId, {
+        ...body,
+        outcome: 'STALE',
+      }).expect(409);
+      expect(changed.body.code).toBe('IDEMPOTENCY_CONFLICT');
+    });
+
     // Verify F1: an ACK that deferred a message while staff finished can commit
     // AFTER the finish skipped its item (SKIP LOCKED) and read the session as
     // ACTIVE: the epoch is over but the item is still DEFERRED_WINDOW_CLOSED
@@ -3934,6 +3979,242 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       expect((await sessions(b, l.id))[0].state).toBe('ENDED');
       expect((await row(l.id)).status).toBe('NEW');
       await readChat(b, l.id, users.ana).expect(403);
+    });
+  });
+
+  // Review advisories A3 / A4: a batch of 100 must never be filled by rows that
+  // cannot be acted on, whatever they are, ahead of a row that can.
+  describe('A3 / A4: stuck rows never starve a due session', () => {
+    const DAY = 24 * 60 * MIN;
+    const STUCK_PREFIX = '00000000-0000-4000-8000-';
+    let stuckSeq = 0;
+    const stuckId = (i: number) =>
+      `${STUCK_PREFIX}${i.toString(16).padStart(12, '0')}`;
+
+    /**
+     * `n` sessions in `state` whose ids sort BEFORE any random uuid (so the old
+     * `(tenantId, id)` order put them first), each with its own chat and
+     * request. `over` shapes what makes them stuck.
+     */
+    async function seedStuck(
+      b: Branch,
+      n: number,
+      state: 'STARTING' | 'ACTIVE',
+      over: {
+        request?: Record<string, unknown>;
+        conversation?: Record<string, unknown>;
+        session?: Record<string, unknown>;
+        withRef?: boolean;
+      } = {},
+    ) {
+      const idx = Array.from({ length: n }, () => ++stuckSeq);
+      const tag = randomUUID().slice(0, 8);
+      const conversationIds = idx.map(() => randomUUID());
+      const requestIds = idx.map(() => randomUUID());
+      await prisma.chatbotConversation.createMany({
+        data: idx.map((i) => ({
+          id: conversationIds[idx.indexOf(i)],
+          tenantId: b.tenantId,
+          conversationRef: `wa:stuck${tag}${i}`,
+          ...over.conversation,
+        })),
+      });
+      await prisma.chatbotRequest.createMany({
+        data: idx.map((i) => ({
+          id: requestIds[idx.indexOf(i)],
+          tenantId: b.tenantId,
+          folio: ++b.folio,
+          kind: 'CONVERSATION' as const,
+          subtype: 'TALK_TO_HUMAN' as const,
+          customerKey: `stuck${tag}${i}`,
+          conversationRef: over.withRef === false ? null : `wa:stuck${tag}${i}`,
+          summary: 'Atascada',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          ...over.request,
+        })),
+      });
+      await prisma.chatbotLiveSession.createMany({
+        data: idx.map((i) => ({
+          id: stuckId(i),
+          tenantId: b.tenantId,
+          requestId: requestIds[idx.indexOf(i)],
+          conversationId: conversationIds[idx.indexOf(i)],
+          epoch: 1,
+          state,
+          staffUserId: users.ana,
+          startSeq: 1,
+          ...over.session,
+        })),
+      });
+      return async () => {
+        await prisma.chatbotLiveSession.deleteMany({
+          where: { id: { in: idx.map(stuckId) }, tenantId: b.tenantId },
+        });
+      };
+    }
+
+    it('A3: more than 100 waiting sessions whose request is not IN_PROGRESS or has no assignee are not candidates: the due session behind them is noticed in one tick', async () => {
+      const b = await branch();
+      const now = Date.now();
+      const clean = await seedStuck(b, 60, 'ACTIVE', {
+        // NEW and nobody holds it
+        request: { status: 'NEW' },
+        conversation: { lastCustomerMessageAt: new Date(now - MIN) },
+        session: {
+          activeAt: new Date(now),
+          lastStaffActivityAt: new Date(now - 10 * MIN),
+        },
+      });
+      const cleanHeld = await seedStuck(b, 50, 'ACTIVE', {
+        // resolved, with a (former) assignee
+        request: {
+          status: 'RESOLVED',
+          assigneeUserId: users.ana,
+          assigneeDisplayName: 'Ana',
+          claimedAt: new Date(now - 20 * MIN),
+          resolvedAt: new Date(now - MIN),
+          closedAt: new Date(now - MIN),
+        },
+        conversation: { lastCustomerMessageAt: new Date(now - MIN) },
+        session: {
+          activeAt: new Date(now),
+          lastStaffActivityAt: new Date(now - 10 * MIN),
+        },
+      });
+      try {
+        const l = await liveRequest(b);
+        await activeSession(b, l);
+        await mirrorIn(b, l.ref, 'hola, ¿alguien?').expect(200);
+        const res = await sweepScheduler().tick(new Date());
+        expect(
+          await notifyRowsOf(b, l.id, 'CONVERSATION_CUSTOMER_MESSAGE'),
+        ).toHaveLength(1);
+        expect(res.noticed).toBeGreaterThanOrEqual(1);
+      } finally {
+        await clean();
+        await cleanHeld();
+      }
+    });
+
+    const notifyRowsOf = async (b: Branch, requestId: string, type: string) =>
+      (
+        await prisma.outboxEvent.findMany({
+          where: {
+            tenantId: b.tenantId,
+            aggregateId: requestId,
+            eventType: 'chatbot_request.notify',
+          },
+        })
+      ).filter((r) => (r.payload as Record<string, unknown>).type === type);
+
+    it('A4: 100+ rows that are due in SQL but come back null from the handling do not starve the genuinely due session (paged past within the tick)', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      const clean = await seedStuck(b, 105, 'STARTING', {
+        // no conversationRef on the request: `handle` answers null
+        withRef: false,
+        session: { startDeadlineAt: new Date(Date.now() - DAY) },
+      });
+      try {
+        const res = await sweepScheduler().tick(new Date(Date.now() + 125_000));
+        expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+        expect(res.reverted).toBeGreaterThanOrEqual(1);
+        expect(res.skipped).toBeGreaterThanOrEqual(105);
+      } finally {
+        await clean();
+      }
+    });
+
+    it('A4: 100+ rows whose handling throws are counted in failed and do not starve the genuinely due session', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      const clean = await seedStuck(b, 105, 'STARTING', {
+        session: { startDeadlineAt: new Date(Date.now() - DAY) },
+      });
+      const store = new LiveSessionSweepStore(
+        prisma as unknown as PrismaService,
+      );
+      const handle = (
+        store as unknown as {
+          handle: (...args: unknown[]) => Promise<unknown>;
+        }
+      ).handle.bind(store);
+      jest
+        .spyOn(store as unknown as { handle: () => Promise<unknown> }, 'handle')
+        .mockImplementation(((
+          tx: unknown,
+          candidate: { id: string },
+          now: Date,
+        ) => {
+          if (candidate.id.startsWith(STUCK_PREFIX)) {
+            throw new Error('boom');
+          }
+          return handle(tx, candidate, now);
+        }) as never);
+      const quiet = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        const res = await new LiveSessionSweepScheduler(store).tick(
+          new Date(Date.now() + 125_000),
+        );
+        expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+        expect(res.failed).toBeGreaterThanOrEqual(105);
+      } finally {
+        quiet.mockRestore();
+        await clean();
+      }
+    });
+
+    it('A4: due sessions are taken oldest due first, whatever their tenant or id', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      // due LATER than the claim's own deadline (+120 s) but with lower ids
+      const clean = await seedStuck(b, 3, 'STARTING', {
+        session: { startDeadlineAt: new Date(Date.now() + 124_000) },
+      });
+      const stuck = (
+        await prisma.chatbotLiveSession.findMany({
+          where: { tenantId: b.tenantId, id: { startsWith: STUCK_PREFIX } },
+        })
+      ).map((r) => r.id);
+      try {
+        const store = new LiveSessionSweepStore(
+          prisma as unknown as PrismaService,
+        );
+        const seen: string[] = [];
+        const handle = (
+          store as unknown as {
+            handle: (...args: unknown[]) => Promise<unknown>;
+          }
+        ).handle.bind(store);
+        jest
+          .spyOn(
+            store as unknown as { handle: () => Promise<unknown> },
+            'handle',
+          )
+          .mockImplementation(((
+            tx: unknown,
+            candidate: { id: string },
+            now: Date,
+          ) => {
+            seen.push(candidate.id);
+            return handle(tx, candidate, now);
+          }) as never);
+        await store.runBatch(new Date(Date.now() + 125_000));
+        const mine = (await sessions(b, l.id))[0].id;
+        expect(stuck).toHaveLength(3);
+        for (const id of stuck) {
+          expect(seen).toContain(id);
+          expect(seen.indexOf(mine)).toBeLessThan(seen.indexOf(id));
+        }
+      } finally {
+        await clean();
+      }
     });
   });
 

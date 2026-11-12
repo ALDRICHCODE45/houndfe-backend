@@ -83,24 +83,13 @@ export class CancelDto extends ExpectedVersionDto {
 /**
  * Unit 10 (§3.8 `reply {text ≤ 1500}`). `text` is `unknown` here on purpose:
  * `parseReplyText` (domain) owns the rules (sanitising, trim, 1..1500
- * characters), so the DTO only requires that the key is present.
+ * characters), so the DTO only requires that the key is present. No other key
+ * is accepted (a `mediaId`, `type` or `caption` is 400): media belongs to the
+ * live conversation's own body, `StaffMessageDto`.
  */
 export class ReplyDto extends ExpectedVersionDto {
-  @IsOptional()
-  @IsIn(['TEXT', 'IMAGE', 'DOCUMENT'])
-  type?: string;
-
-  /** Required for TEXT; refused for IMAGE/DOCUMENT (the domain decides). */
-  @IsOptional()
-  text?: unknown;
-
-  /** S15 Q5: a media this attendee uploaded for this request. */
-  @IsOptional()
-  @IsUUID()
-  mediaId?: string;
-
-  @IsOptional()
-  caption?: unknown;
+  @IsDefined()
+  text!: unknown;
 }
 
 /** §12.11: the target is the request that stays; both versions are checked. */

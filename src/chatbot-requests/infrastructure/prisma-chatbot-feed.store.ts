@@ -188,6 +188,26 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
 
       const decision = classifyOutcome(row, input, hash);
       if (decision === 'REPLAY') {
+        // A2: an ACK `DEFERRED_WINDOW_CLOSED` that landed after the session
+        // left ACTIVE rewrote the item to STALE in its own transaction while
+        // answering the deferral. The replay answers what the bot was told
+        // then, from the audit event of that attempt (also the answer of a
+        // plain STALE report, which the event holds as STALE).
+        if (row.outcome === 'STALE' && row.attemptId !== null) {
+          const original = await this.findAppliedAttempt(
+            row.requestId,
+            deliveryId,
+            row.attemptId,
+          );
+          if (original) {
+            return this.toAck(
+              deliveryId,
+              original.outcome,
+              row.attemptId,
+              original.ackReceivedAt ? new Date(original.ackReceivedAt) : null,
+            );
+          }
+        }
         return this.toAck(deliveryId, row.outcome, row.attemptId, row.ackedAt);
       }
       if (decision === 'IDEMPOTENCY_CONFLICT') {

@@ -3,9 +3,11 @@
  * §4.2, §4.6, §12.15, §10.1 R11). System flow on the root client: every
  * statement names its tenant. One candidate = ONE short transaction:
  *
- *   1. the candidates are read without locks, oldest due first, `LIMIT n`,
- *      through the partial indexes of the migration (STARTING / ENDING /
- *      ACTIVE);
+ *   1. the candidates are read without locks, oldest due first (each state's
+ *      own due instant, then id), `LIMIT n`, through the partial indexes of the
+ *      migration (STARTING / ENDING / ACTIVE). A caller pages past rows it
+ *      could not act on with the keyset `after` (the last row it saw), so a
+ *      run of skipped or failing rows never hides a due one behind it;
  *   2. per candidate the REQUEST row is taken `FOR UPDATE SKIP LOCKED` (a staff
  *      command or another replica holding it means "not now", never a wait),
  *      then the session and the chat row are re-read under the lock and the
@@ -53,13 +55,29 @@ export interface SessionSweepResult {
   /** S16 3 backstop: deferred staff messages settled FAILED by `runDeferredBatch`. */
   settledDeferred: number;
   skipped: number;
+  /** Candidates whose transaction failed, plus failed notice / deferred rows. */
   failed: number;
+}
+
+/** Keyset of `runBatch`: the (due instant, id) of the last candidate seen. */
+export interface DueCursor {
+  dueAt: Date;
+  id: string;
 }
 
 interface Candidate {
   id: string;
   tenantId: string;
   requestId: string;
+}
+
+interface DueCandidate extends Candidate {
+  dueAt: Date;
+}
+
+/** A trusted constant (`SESSION_TIMING`), never user input. */
+function msInterval(ms: number): Prisma.Sql {
+  return Prisma.raw(`interval '${Math.trunc(ms)} milliseconds'`);
 }
 
 @Injectable()
@@ -69,7 +87,10 @@ export class LiveSessionSweepStore {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async runBatch(now: Date = new Date()): Promise<SessionSweepResult> {
+  async runBatch(
+    now: Date = new Date(),
+    after: DueCursor | null = null,
+  ): Promise<SessionSweepResult & { last: DueCursor | null }> {
     const result: SessionSweepResult = {
       candidates: 0,
       reverted: 0,
@@ -94,27 +115,43 @@ export class LiveSessionSweepStore {
     // the table made the planner walk (tenantId, id) and filter every row, and
     // not-due candidates filled the batch ahead of due ones (docs/perf/
     // unit-11-live-conversation.md).
-    const candidates = await this.prisma.$queryRaw<Candidate[]>(Prisma.sql`
-      SELECT d."id", d."tenantId", d."requestId" FROM (
-        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+    // `dueAt` is the instant the session became due (its own deadline, or the
+    // state's start plus its timeout); the batch is read oldest due first.
+    const candidates = await this.prisma.$queryRaw<DueCandidate[]>(Prisma.sql`
+      SELECT d."id", d."tenantId", d."requestId", d."dueAt" FROM (
+        SELECT s."id", s."tenantId", s."requestId",
+               s."startDeadlineAt" AS "dueAt"
+        FROM "chatbot_live_sessions" s
         WHERE s."state" = 'STARTING' AND s."startDeadlineAt" <= ${now}
         UNION ALL
-        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        SELECT s."id", s."tenantId", s."requestId",
+               s."startedAt" + ${msInterval(SESSION_TIMING.startTimeoutMs)}
+        FROM "chatbot_live_sessions" s
         WHERE s."state" = 'STARTING' AND s."startDeadlineAt" IS NULL
           AND s."startedAt" <= ${startCut}
         UNION ALL
-        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        SELECT s."id", s."tenantId", s."requestId",
+               s."endingAt" + ${msInterval(SESSION_TIMING.endingTimeoutMs)}
+        FROM "chatbot_live_sessions" s
         WHERE s."state" = 'ENDING' AND s."endingAt" <= ${endCut}
         UNION ALL
-        SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
+        SELECT s."id", s."tenantId", s."requestId",
+               GREATEST(s."activeAt", COALESCE(c."lastCustomerMessageAt", s."activeAt"))
+                 + ${msInterval(SESSION_TIMING.idleEndMs)}
+        FROM "chatbot_live_sessions" s
         JOIN "chatbot_conversations" c
           ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
         WHERE s."state" = 'ACTIVE' AND s."activeAt" <= ${idleCut}
           AND (c."lastCustomerMessageAt" IS NULL
                OR c."lastCustomerMessageAt" <= ${idleCut})
       ) d
-      ORDER BY d."tenantId", d."id" LIMIT ${this.batchSize}`);
+      ${after ? Prisma.sql`WHERE (d."dueAt", d."id") > (${after.dueAt}, ${after.id})` : Prisma.empty}
+      ORDER BY d."dueAt", d."id" LIMIT ${this.batchSize}`);
     result.candidates = candidates.length;
+    const tail = candidates[candidates.length - 1];
+    const last: DueCursor | null = tail
+      ? { dueAt: tail.dueAt, id: tail.id }
+      : null;
     for (const candidate of candidates) {
       try {
         const action = await this.prisma.$transaction((tx) =>
@@ -131,7 +168,7 @@ export class LiveSessionSweepStore {
         );
       }
     }
-    return result;
+    return { ...result, last };
   }
 
   /**
@@ -153,12 +190,16 @@ export class LiveSessionSweepStore {
    * a notice. These clocks never pause outside business hours (§4.6): the
    * notice is not held.
    */
-  async runNoticeBatch(now: Date = new Date()): Promise<{ noticed: number }> {
+  async runNoticeBatch(
+    now: Date = new Date(),
+  ): Promise<{ noticed: number; failed: number }> {
     // Only DUE sessions are candidates: a new customer message to announce, or
     // a level whose wait has elapsed (the same rule `notify` applies under the
     // lock). A waiting session that is not due yet used to stay a candidate
     // until its 15 min level was written, and with enough of them the batch of
-    // 100 never reached the due ones.
+    // 100 never reached the due ones. The request must also be one `notify`
+    // acts on (IN_PROGRESS with an assignee: its first early return), or a
+    // session of a closed or unheld request would stay a candidate forever.
     const fiveCut = new Date(
       now.getTime() - SESSION_TIMING.unansweredAttendeeMs,
     );
@@ -170,7 +211,10 @@ export class LiveSessionSweepStore {
       FROM "chatbot_live_sessions" s
       JOIN "chatbot_conversations" c
         ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
+      JOIN "chatbot_requests" r
+        ON r."tenantId" = s."tenantId" AND r."id" = s."requestId"
       WHERE s."state" = 'ACTIVE'
+        AND r."status" = 'IN_PROGRESS' AND r."assigneeUserId" IS NOT NULL
         AND c."lastCustomerMessageAt" > s."lastStaffActivityAt"
         AND (s."customerNoticeAt" IS DISTINCT FROM c."lastCustomerMessageAt"
              OR (s."unansweredLevel" < 5
@@ -179,18 +223,20 @@ export class LiveSessionSweepStore {
                  AND c."lastCustomerMessageAt" <= ${fifteenCut}))
       ORDER BY s."tenantId", s."id" LIMIT ${this.batchSize}`);
     let noticed = 0;
+    let failed = 0;
     for (const candidate of candidates) {
       try {
         noticed += await this.prisma.$transaction((tx) =>
           this.notify(asTenantClient(tx), candidate, now),
         );
       } catch (error) {
+        failed += 1;
         this.logger.error(
           `session notice failed for session ${candidate.id}: ${error instanceof Error ? error.name : 'unknown'}`,
         );
       }
     }
-    return { noticed };
+    return { noticed, failed };
   }
 
   /**
@@ -205,7 +251,10 @@ export class LiveSessionSweepStore {
    * the batch (they would crowd out the due ones). One request per candidate,
    * one short transaction, request row `SKIP LOCKED` like the other phases.
    */
-  async runDeferredBatch(): Promise<{ settledDeferred: number }> {
+  async runDeferredBatch(): Promise<{
+    settledDeferred: number;
+    failed: number;
+  }> {
     const candidates = await this.prisma.$queryRaw<
       Array<{ tenantId: string; requestId: string }>
     >(Prisma.sql`
@@ -225,18 +274,20 @@ export class LiveSessionSweepStore {
         ORDER BY f."cursor" LIMIT ${this.batchSize}
       ) f`);
     let settledDeferred = 0;
+    let failed = 0;
     for (const candidate of candidates) {
       try {
         settledDeferred += await this.prisma.$transaction((tx) =>
           this.settleDeferred(asTenantClient(tx), candidate),
         );
       } catch (error) {
+        failed += 1;
         this.logger.error(
           `deferred settle failed for request ${candidate.requestId}: ${error instanceof Error ? error.name : 'unknown'}`,
         );
       }
     }
-    return { settledDeferred };
+    return { settledDeferred, failed };
   }
 
   private async settleDeferred(

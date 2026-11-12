@@ -13,7 +13,7 @@ A **clarification** (`kind = CLARIFICATION`, subtype `UNKNOWN_QUESTION`: a custo
 | Permission | `read:ChatbotRequest` + `update:ChatbotRequest` |
 | Who | The **assignee**, or **anyone with the permission when the request is `NEW`**: replying to a `NEW` clarification **claims it for you and resolves it in one step** (owner decision S13, like `resolve` does for decisions; no separate `claim` needed). A request held by **someone else** can only be answered by its holder: `403 NOT_ASSIGNEE`, with no override (not even `update:ChatbotRequestAssignment`) |
 | Headers | `Idempotency-Key: <uuid>` (required), JWT |
-| Body | `{ "expectedVersion": 2, "text": "Sí, es apto desde las 8 semanas." }`, nothing else (unknown fields are `400`) |
+| Body | `{ "expectedVersion": 2, "text": "Sí, es apto desde las 8 semanas." }`, nothing else (unknown fields are `400`, including `type`, `mediaId` and `caption`: photos and PDFs belong to the live conversation's `POST …/messages`, handoff 20) |
 
 `text` rules (contract §6.4: ≤ 1500):
 

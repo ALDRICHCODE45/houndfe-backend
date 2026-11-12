@@ -9,6 +9,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import {
+  type DueCursor,
   LiveSessionSweepStore,
   type SessionSweepResult,
 } from './live-session-sweep.store';
@@ -33,12 +34,13 @@ export class LiveSessionSweepScheduler {
         total.reverted +
           total.ended +
           total.idleEnded +
+          total.noticed +
           total.settledDeferred +
           total.failed >
         0
       ) {
         this.logger.log(
-          `live session sweep: ${total.reverted} reverted, ${total.ended} ended, ${total.idleEnded} idle-ended, ${total.failed} failed`,
+          `live session sweep: ${total.reverted} reverted, ${total.ended} ended, ${total.idleEnded} idle-ended, ${total.noticed} noticed, ${total.settledDeferred} deferred settled, ${total.skipped} skipped, ${total.failed} failed`,
         );
       }
     } catch (error) {
@@ -62,26 +64,35 @@ export class LiveSessionSweepScheduler {
       skipped: 0,
       failed: 0,
     };
+    // Rows are read oldest due first and each page starts after the last row
+    // of the previous one (keyset), so rows that are locked, skipped or failing
+    // are paged past within the tick instead of being re-read forever or
+    // hiding the due rows behind them. The cap bounds the work of one tick; a
+    // backlog beyond it continues next tick.
+    let after: DueCursor | null = null;
+    let capped = false;
     for (let batch = 0; batch < MAX_BATCHES_PER_TICK; batch++) {
-      const result = await this.store.runBatch(now);
+      const { last, ...result } = await this.store.runBatch(now, after);
       for (const key of Object.keys(total) as Array<keyof SessionSweepResult>) {
         total[key] += result[key];
       }
-      // Stop on a short batch, or when nothing in it could be done (rows that
-      // are locked or not due would otherwise be re-read forever).
-      if (
-        result.candidates < this.store.batchSize ||
-        result.candidates === result.skipped + result.failed
-      ) {
-        break;
-      }
+      if (result.candidates < this.store.batchSize || last === null) break;
+      after = last;
+      capped = batch === MAX_BATCHES_PER_TICK - 1;
+    }
+    if (capped) {
+      this.logger.warn(
+        `live session sweep: per-tick cap of ${MAX_BATCHES_PER_TICK} batches reached with more due rows; the rest continues next tick`,
+      );
     }
     // T11d: the notice phase (customer wrote, 5 and 15 min unanswered).
-    total.noticed += (await this.store.runNoticeBatch(now)).noticed;
+    const notices = await this.store.runNoticeBatch(now);
+    total.noticed += notices.noticed;
+    total.failed += notices.failed;
     // S16 3 backstop: deferred staff messages of an epoch that is over.
-    total.settledDeferred += (
-      await this.store.runDeferredBatch()
-    ).settledDeferred;
+    const deferred = await this.store.runDeferredBatch();
+    total.settledDeferred += deferred.settledDeferred;
+    total.failed += deferred.failed;
     return total;
   }
 }
