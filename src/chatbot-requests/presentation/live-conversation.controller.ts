@@ -6,7 +6,7 @@
  *   POST /chatbot-requests/:id/messages   {clientMessageId, expectedEpoch, text}
  *        `Idempotency-Key` MUST equal `clientMessageId` (§12.12).
  * Bot (`svc_` credential; the tenant comes from the guard):
- *   POST /chatbot-api/conversations/:conversationRef/session-ack  `conversation:write`, `write`
+ *   POST /chatbot-api/conversations/:conversationRef/session-ack  `conversation:write`, `control`
  *   GET  /chatbot-api/conversations/:conversationRef/state        `requests:read`, `read`
  *
  * `@Body()` of the bot route is `unknown`: the exact parser below owns the
@@ -144,7 +144,7 @@ export class BotLiveConversationController {
 
   @Post('conversations/:conversationRef/session-ack')
   @HttpCode(HttpStatus.OK)
-  @BotRouteClass('write')
+  @BotRouteClass('control')
   @RequiredScopes(BOT_SCOPES.conversationWrite)
   sessionAck(
     @Param('conversationRef') conversationRef: string,

@@ -20,6 +20,8 @@ export const FEED_TYPE = {
   staffMessage: 'conversation.staff_message',
   templateRequested: 'template.requested',
   conversationEnded: 'conversation.ended',
+  /** S15 Q2 / S16 10: an ACTIVE session was handed to another attendee. */
+  conversationReassigned: 'conversation.reassigned',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -265,6 +267,7 @@ export function classifyOutcome(
       // the customer, and the bot is in a human session by definition.
       current.type === FEED_TYPE.conversationStarted ||
       current.type === FEED_TYPE.conversationEnded ||
+      current.type === FEED_TYPE.conversationReassigned ||
       current.type === FEED_TYPE.templateRequested)
   ) {
     return 'OUTCOME_NOT_ALLOWED';
@@ -561,31 +564,55 @@ export function buildConversationStartedPayload(input: {
   };
 }
 
-/** `conversation.staff_message` (§4.4): text only in this unit's first slice. */
-export function buildStaffMessagePayload(input: {
-  requestId: string;
-  handoffEpoch: number;
-  seq: number;
-  messageId: string;
-  text: string;
-}): Record<string, unknown> {
-  return {
+/** The media of a staff IMAGE/DOCUMENT message (S15 Q5, S16 9). */
+export interface StaffMessageMedia {
+  type: 'IMAGE' | 'DOCUMENT';
+  mediaId: string;
+  mimeType: string;
+  filename: string | null;
+  caption: string | null;
+}
+
+/**
+ * `conversation.staff_message` (§4.4): TEXT carries `text`; IMAGE/DOCUMENT
+ * carry `mediaId`, `mimeType`, `filename` and `caption` (the bot downloads the
+ * file with `GET /chatbot-api/media/:id`, scope `media:read`).
+ */
+export function buildStaffMessagePayload(
+  input: {
+    requestId: string;
+    handoffEpoch: number;
+    seq: number;
+    messageId: string;
+  } & ({ text: string; media?: undefined } | { media: StaffMessageMedia }),
+): Record<string, unknown> {
+  const head = {
     requestId: input.requestId,
     handoffEpoch: input.handoffEpoch,
     seq: input.seq,
     messageId: input.messageId,
-    type: 'TEXT',
-    text: input.text,
   };
+  if (input.media) {
+    return {
+      ...head,
+      type: input.media.type,
+      mediaId: input.media.mediaId,
+      mimeType: input.media.mimeType,
+      filename: input.media.filename,
+      caption: input.media.caption,
+    };
+  }
+  return { ...head, type: 'TEXT', text: input.text };
 }
 
-/** `template.requested` (§4.5): only the staff button creates it. */
+/** `template.requested` (§4.5): only the staff button creates it (S16 8). */
 export function buildTemplateRequestedPayload(input: {
   requestId: string;
   handoffEpoch: number;
   seq: number;
   messageId: string;
   templateName: string;
+  languageCode: string;
 }): Record<string, unknown> {
   return {
     requestId: input.requestId,
@@ -593,6 +620,20 @@ export function buildTemplateRequestedPayload(input: {
     seq: input.seq,
     messageId: input.messageId,
     templateName: input.templateName,
+    languageCode: input.languageCode,
+  };
+}
+
+/** `conversation.reassigned` (S15 Q2): the bot says "Ahora te atiende <nombre>". */
+export function buildConversationReassignedPayload(input: {
+  requestId: string;
+  handoffEpoch: number;
+  staffFirstName: string | null;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    handoffEpoch: input.handoffEpoch,
+    staffFirstName: input.staffFirstName,
   };
 }
 
@@ -606,11 +647,15 @@ export function buildConversationEndedPayload(input: {
   handoffEpoch: number;
   reason: string;
   farewell: boolean;
+  resumeNotice: boolean;
 } {
   return {
     requestId: input.requestId,
     handoffEpoch: input.handoffEpoch,
     reason: input.reason,
     farewell: input.reason !== 'START_TIMEOUT',
+    // S15 Q1: after a start revert the bot sends a short "seguimos por aquí"
+    // ONLY if it already told the customer it was handing over (it greeted).
+    resumeNotice: input.reason === 'START_TIMEOUT',
   };
 }
