@@ -81,6 +81,7 @@ import {
   CHATBOT_REQUEST_RELATION_STORE,
   ChatbotRequestRelationsService,
 } from './application/chatbot-request-relations.service';
+import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-settings';
 import { CustomerKeySealer } from './domain/customer-key-sealer';
 import { ChatbotSlaSweepStore } from './infrastructure/chatbot-sla-sweep.store';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
@@ -461,6 +462,36 @@ describeIfDb('live conversation (PostgreSQL)', () => {
     return { version: await versionOf(l.id), claimed };
   }
 
+  /** Makes `userId` assignable in the branch (read + update:ChatbotRequest). */
+  async function makeAssignable(b: Branch, userId: string) {
+    const grant = (action: string) =>
+      prisma.permission.upsert({
+        where: { subject_action: { subject: 'ChatbotRequest', action } },
+        update: {},
+        create: { subject: 'ChatbotRequest', action },
+      });
+    const [read, update] = [await grant('read'), await grant('update')];
+    const role = await prisma.role.create({
+      data: {
+        tenantId: b.tenantId,
+        name: `Atiende ${randomUUID()}`,
+        permissions: {
+          create: [{ permissionId: read.id }, { permissionId: update.id }],
+        },
+      },
+    });
+    await prisma.tenantMembership.create({
+      data: { userId, tenantId: b.tenantId, roleId: role.id },
+    });
+  }
+  const reassign = (b: Branch, id: string, version: number, toUserId: string) =>
+    staffPost(
+      b,
+      `/chatbot-requests/${id}/reassign`,
+      { expectedVersion: version, toUserId },
+      { role: 'manager', userId: users.ana },
+    );
+
   const row = (id: string) =>
     prisma.chatbotRequest.findUniqueOrThrow({ where: { id } });
   const versionOf = async (id: string) => (await row(id)).version;
@@ -749,8 +780,10 @@ describeIfDb('live conversation (PostgreSQL)', () => {
 
       // the window closes (the customer wrote > 24 h ago)
       const c = await conversation(b, l.ref);
-      await prisma.$executeRaw`UPDATE "chatbot_conversations"
-        SET "lastCustomerMessageAt" = now() - interval '25 hours' WHERE "id" = ${c.id}`;
+      await prisma.chatbotConversation.update({
+        where: { id: c.id },
+        data: { lastCustomerMessageAt: new Date(Date.now() - 25 * 60 * MIN) },
+      });
       await prisma.chatbotRequest.update({
         where: { id: l.id },
         data: { lastCustomerMessageAt: new Date(Date.now() - 25 * 60 * MIN) },
@@ -809,10 +842,16 @@ describeIfDb('live conversation (PostgreSQL)', () => {
 
       // the database itself refuses a second wamid or any other column edit
       await expect(
-        prisma.$executeRaw`UPDATE "conversation_messages" SET "waMessageId" = 'wamid.hack' WHERE "id" = ${res.body.message.id}`,
+        prisma.conversationMessage.update({
+          where: { id: res.body.message.id },
+          data: { waMessageId: 'wamid.hack' },
+        }),
       ).rejects.toThrow(/immutable/);
       await expect(
-        prisma.$executeRaw`UPDATE "conversation_messages" SET "text" = 'editado' WHERE "id" = ${res.body.message.id}`,
+        prisma.conversationMessage.update({
+          where: { id: res.body.message.id },
+          data: { text: 'editado' },
+        }),
       ).rejects.toThrow(/immutable/);
 
       // the bot's later statuses:batch finds the message by that wamid
@@ -1079,7 +1118,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
   // ------------------------------------------------------------ the sweep
 
   describe('the sweep (time driven through tick(now))', () => {
-    it('START timeout: STARTING with no ack for 60 s reverts the claim (NEW, mode BOT, epoch kept) and sends conversation.ended{START_TIMEOUT, farewell false}; a late ack STARTED is 409 STALE_EPOCH; a new claim is epoch 2', async () => {
+    it('START timeout: STARTING with no ack for 120 s (the default) reverts the claim (NEW, mode BOT, epoch kept) and sends conversation.ended{START_TIMEOUT, farewell false}; a late ack STARTED is 409 STALE_EPOCH; a new claim is epoch 2', async () => {
       const b = await branch();
       const l = await liveRequest(b);
       await claim(b, l.id).expect(200);
@@ -1090,7 +1129,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await tickAt(30_000);
       expect((await sessions(b, l.id))[0].state).toBe('STARTING');
 
-      await tickAt(61_000);
+      await tickAt(121_000);
       const [session] = await sessions(b, l.id);
       expect(session).toMatchObject({
         state: 'ENDED',
@@ -1133,7 +1172,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         'session.ended',
       ]);
       // a second tick does nothing more
-      await tickAt(120_000);
+      await tickAt(180_000);
       expect(await items(b, l.id, 'conversation.ended')).toHaveLength(1);
       expect(await versionOf(l.id)).toBe(3);
 
@@ -1226,10 +1265,14 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await activeSession(b, l);
       // the customer's last message was 90 minutes ago
       const c = await conversation(b, l.ref);
-      await prisma.$executeRaw`UPDATE "chatbot_live_sessions"
-        SET "activeAt" = now() - interval '3 hours' WHERE "requestId" = ${l.id}`;
-      await prisma.$executeRaw`UPDATE "chatbot_conversations"
-        SET "lastCustomerMessageAt" = now() - interval '90 minutes' WHERE "id" = ${c.id}`;
+      await prisma.chatbotLiveSession.updateMany({
+        where: { requestId: l.id },
+        data: { activeAt: new Date(Date.now() - 180 * MIN) },
+      });
+      await prisma.chatbotConversation.update({
+        where: { id: c.id },
+        data: { lastCustomerMessageAt: new Date(Date.now() - 90 * MIN) },
+      });
       await sweepScheduler().tick(new Date());
       expect((await sessions(b, l.id))[0].state).toBe('ACTIVE');
       await sweepScheduler().tick(new Date(Date.now() + 31 * MIN));
@@ -1317,7 +1360,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       await claim(b, l.id).expect(200);
       const [ack] = await Promise.all([
         sessionAck(b, l.ref, { epoch: 1, state: 'STARTED' }),
-        sweepScheduler().tick(new Date(Date.now() + 61_000)),
+        sweepScheduler().tick(new Date(Date.now() + 121_000)),
       ]);
       const [session] = await sessions(b, l.id);
       const ended = await items(b, l.id, 'conversation.ended');
@@ -1576,4 +1619,819 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       );
     });
   });
+
+  // ---------------------------------------------- slice 2 (S15 Q2, S16)
+
+  describe('S15 Q2: reassigning a live session', () => {
+    it('reassign of an ACTIVE session keeps the epoch, moves the session to the new attendee and enqueues conversation.reassigned{handoffEpoch, staffFirstName}; the old attendee can no longer write, the new one can', async () => {
+      const b = await branch();
+      await makeAssignable(b, users.luis);
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+
+      const res = await reassign(b, l.id, version, users.luis).expect(200);
+      expect(res.body.request).toMatchObject({
+        assignee: { id: users.luis },
+        version: version + 1,
+      });
+      const [session] = await sessions(b, l.id);
+      expect(session).toMatchObject({
+        epoch: 1,
+        state: 'ACTIVE',
+        staffUserId: users.luis,
+      });
+      const reassigned = await items(b, l.id, 'conversation.reassigned');
+      expect(reassigned).toHaveLength(1);
+      expect(reassigned[0].payload).toEqual({
+        requestId: l.id,
+        handoffEpoch: 1,
+        staffFirstName: 'Luis',
+      });
+      expect(reassigned[0].conversationRef).toBe(l.ref);
+      expect(await conversation(b, l.ref)).toMatchObject({
+        mode: 'HUMAN',
+        handoffEpoch: 1,
+      });
+
+      await say(b, l.id, 1, 'ya no soy yo').expect(403);
+      const clientMessageId = randomUUID();
+      await staffPost(
+        b,
+        `/chatbot-requests/${l.id}/messages`,
+        { clientMessageId, expectedEpoch: 1, text: 'Hola, soy Luis' },
+        { userId: users.luis, key: clientMessageId },
+      ).expect(200);
+
+      // the outcome table: sent / unknown / stale only
+      for (const name of ['DEFERRED_WINDOW_CLOSED', 'DEFERRED_HUMAN_SESSION']) {
+        const refused = await outcome(b, reassigned[0].deliveryId, {
+          attemptId: randomUUID(),
+          outcome: name,
+          attemptedAt: AT,
+        }).expect(422);
+        expect(refused.body.code).toBe('OUTCOME_NOT_ALLOWED');
+      }
+      await outcome(
+        b,
+        reassigned[0].deliveryId,
+        accepted('wamid.reass'),
+      ).expect(200);
+    });
+
+    it('reassign of a STARTING session also tells the bot; reassigning to the same person (422) enqueues nothing and keeps the unit 6 notice', async () => {
+      const b = await branch();
+      await makeAssignable(b, users.luis);
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      await reassign(b, l.id, 2, users.ana).expect(422);
+      expect(await items(b, l.id, 'conversation.reassigned')).toHaveLength(0);
+
+      await reassign(b, l.id, 2, users.luis).expect(200);
+      const reassigned = await items(b, l.id, 'conversation.reassigned');
+      expect(reassigned).toHaveLength(1);
+      expect(reassigned[0].payload).toMatchObject({
+        handoffEpoch: 1,
+        staffFirstName: 'Luis',
+      });
+      expect((await sessions(b, l.id))[0]).toMatchObject({
+        state: 'STARTING',
+        staffUserId: users.luis,
+      });
+      // the staff notice of the unit 6 reassignment is still produced
+      const notices = await prisma.outboxEvent.findMany({
+        where: { tenantId: b.tenantId, aggregateId: l.id },
+      });
+      expect(
+        notices.filter((n) => (n.payload as any).type === 'REQUEST_REASSIGNED'),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('S16 1a: the start timeout is a per-tenant setting snapshotted at the claim', () => {
+    /** A settings row with the defaults except the start timeout. */
+    async function settingsWith(b: Branch, startTimeoutSeconds: number) {
+      const d = defaultSettings();
+      await prisma.chatbotAttentionSettings.create({
+        data: {
+          tenantId: b.tenantId,
+          timeZone: d.openingHours.timeZone,
+          days: d.openingHours.days as never,
+          closedDates: [],
+          slas: d.slas as never,
+          windowWarningMinutes: d.windowWarningMinutes,
+          templateCostText: d.templateCostText,
+          enabledSubtypes: d.enabledSubtypes,
+          receiptCloseMarginMinutes: d.receiptCloseMarginMinutes,
+          schedulingEnabled: false,
+          slotMinutes: d.scheduling.slotMinutes,
+          slotsOffered: d.scheduling.slotsOffered,
+          maxScheduledPerSlot: d.scheduling.maxScheduledPerSlot,
+          startTimeoutSeconds,
+        },
+      });
+    }
+    const tickAt = (ms: number) =>
+      sweepScheduler().tick(new Date(Date.now() + ms));
+
+    it('a tenant without settings: startDeadlineAt = startedAt + 120 s; not reverted at 119 s, reverted after 121 s', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      const [session] = await sessions(b, l.id);
+      expect(session.startDeadlineAt).not.toBeNull();
+      expect(
+        session.startDeadlineAt!.getTime() - session.startedAt.getTime(),
+      ).toBe(120_000);
+      await tickAt(119_000);
+      expect((await sessions(b, l.id))[0].state).toBe('STARTING');
+      await tickAt(121_000);
+      expect((await sessions(b, l.id))[0]).toMatchObject({
+        state: 'ENDED',
+        endReason: 'START_TIMEOUT',
+      });
+    });
+
+    it('a tenant with startTimeoutSeconds 45 reverts at 46 s, and a later settings change does not move the deadline of a session that already started', async () => {
+      const b = await branch();
+      await settingsWith(b, 45);
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      const [session] = await sessions(b, l.id);
+      expect(
+        session.startDeadlineAt!.getTime() - session.startedAt.getTime(),
+      ).toBe(45_000);
+
+      // the tenant raises the setting after the claim: the session keeps 45 s
+      await prisma.chatbotAttentionSettings.update({
+        where: { tenantId: b.tenantId },
+        data: { startTimeoutSeconds: 600 },
+      });
+      await tickAt(44_000);
+      expect((await sessions(b, l.id))[0].state).toBe('STARTING');
+      await tickAt(46_000);
+      expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+
+      // the next claim snapshots the new value
+      await claim(b, l.id, 3).expect(200);
+      const second = (await sessions(b, l.id))[1];
+      expect(
+        second.startDeadlineAt!.getTime() - second.startedAt.getTime(),
+      ).toBe(600_000);
+      await tickAt(300_000);
+      expect((await sessions(b, l.id))[1].state).toBe('STARTING');
+    });
+
+    it('a session created before the migration (no snapshot) uses startedAt + 120 s', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await claim(b, l.id).expect(200);
+      await prisma.chatbotLiveSession.updateMany({
+        where: { requestId: l.id },
+        data: { startDeadlineAt: null },
+      });
+      await tickAt(119_000);
+      expect((await sessions(b, l.id))[0].state).toBe('STARTING');
+      await tickAt(121_000);
+      expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+    });
+  });
+
+  describe('S16 2: an in-flight BOT message mirrored after the claim', () => {
+    const mirrorOut = (b: Branch, ref: string, text: string, ts = new Date()) =>
+      asBot(
+        b,
+        server().post(
+          `/chatbot-api/conversations/${encodeURIComponent(ref)}/messages:batch`,
+        ),
+      ).send({
+        messages: [
+          {
+            waMessageId: `wamid.out.${randomUUID()}`,
+            direction: 'OUT',
+            type: 'TEXT',
+            text,
+            providerTimestamp: ts.toISOString(),
+            observedAt: ts.toISOString(),
+          },
+        ],
+      });
+
+    it.each(['STARTING', 'ACTIVE'])(
+      'a bot OUT message mirrored while the session is %s is accepted (200), stored as author BOT, readable in the session and enqueues nothing',
+      async (stateName) => {
+        const b = await branch();
+        const l = await liveRequest(b);
+        if (stateName === 'ACTIVE') await activeSession(b, l);
+        else await claim(b, l.id).expect(200);
+        const feedBefore = await prisma.chatbotFeedItem.count({
+          where: { tenantId: b.tenantId },
+        });
+
+        const res = await mirrorOut(b, l.ref, 'Te paso con una persona').expect(
+          200,
+        );
+        expect(res.body.accepted).toHaveLength(1);
+        expect(res.body.accepted[0].seq).toBe(3);
+        const [stored] = (await msgs(b, l.ref)).filter((m) => m.seq === 3);
+        expect(stored).toMatchObject({
+          direction: 'OUT',
+          author: 'BOT',
+          staffUserId: null,
+          text: 'Te paso con una persona',
+        });
+        // mode, epoch and session untouched
+        expect(await conversation(b, l.ref)).toMatchObject({
+          mode: 'HUMAN',
+          handoffEpoch: 1,
+        });
+        expect((await sessions(b, l.id))[0].state).toBe(stateName);
+        expect(
+          await prisma.chatbotFeedItem.count({
+            where: { tenantId: b.tenantId },
+          }),
+        ).toBe(feedBefore);
+
+        // the attendee reads it as a bot message from startSeq
+        const page = await server()
+          .get(`/chatbot-requests/${l.id}/conversation`)
+          .set(as(b, 'attendee'))
+          .expect(200);
+        expect(page.body.items.map((m: any) => m.seq)).toEqual([3]);
+        expect(page.body.items[0]).toMatchObject({
+          direction: 'OUT',
+          author: 'BOT',
+          text: 'Te paso con una persona',
+        });
+        // a replay of the same wamid is a duplicate, not a 4xx
+        const body = res.body;
+        expect(body.duplicates ?? []).toEqual([]);
+      },
+    );
+
+    it('the staff composer still works after the bot message (the bot message takes its own seq, the staff message the next)', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      await mirrorOut(b, l.ref, 'Un segundo, te comunico').expect(200);
+      const res = await say(b, l.id, 1, 'Hola, soy Ana').expect(200);
+      expect(res.body.message.seq).toBe(4);
+    });
+  });
+
+  describe('S16 3: deferred staff messages are terminal when the session ends', () => {
+    const deferral = (name = 'DEFERRED_WINDOW_CLOSED') => ({
+      attemptId: randomUUID(),
+      outcome: name,
+      attemptedAt: AT,
+    });
+    const pending = (b: Branch, ref: string) =>
+      asBot(
+        b,
+        server().get(
+          `/chatbot-api/requests/pending-deliveries?conversationRef=${encodeURIComponent(ref)}`,
+        ),
+      );
+    const status = async (id: string) =>
+      (await prisma.conversationMessage.findUniqueOrThrow({ where: { id } }))
+        .deliveryStatus;
+    const statusEvents = async (b: Branch, requestId: string) =>
+      (
+        await prisma.$queryRaw<
+          Array<{ payload: { messageId: string; deliveryStatus: string } }>
+        >`SELECT "payload" FROM "realtime_events"
+          WHERE "tenantId" = ${b.tenantId} AND "requestId" = ${requestId}
+            AND "type" = 'message.status' ORDER BY "id"`
+      ).map((e) => e.payload);
+
+    /** An ACTIVE session with two DEFERRED staff messages and one SENT. */
+    async function withDeferred(b: Branch) {
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      const ids: string[] = [];
+      for (const text of ['uno', 'dos', 'tres']) {
+        ids.push((await say(b, l.id, 1, text).expect(200)).body.message.id);
+      }
+      const feed = await items(b, l.id, 'conversation.staff_message');
+      await outcome(b, feed[0].deliveryId, deferral()).expect(200);
+      await outcome(b, feed[1].deliveryId, deferral()).expect(200);
+      await outcome(b, feed[2].deliveryId, accepted('wamid.s16.3')).expect(200);
+      return { l, version, ids, feed };
+    }
+
+    it('while the epoch is ACTIVE the deferred items are served with deferredReason WINDOW_CLOSED, in seq order', async () => {
+      const b = await branch();
+      const { l, ids } = await withDeferred(b);
+      expect(await status(ids[0])).toBe('DEFERRED');
+      const res = await pending(b, l.ref).expect(200);
+      expect(res.body.items.map((i: any) => i.payload.text)).toEqual([
+        'uno',
+        'dos',
+      ]);
+      expect(res.body.items[0].deferredReason).toBe('WINDOW_CLOSED');
+    });
+
+    it('finish makes the deferred messages FAILED (terminal, announced live), takes them off pending-deliveries and a later PROVIDER_ACCEPTED is 409; the SENT message is untouched', async () => {
+      const b = await branch();
+      const { l, version, ids, feed } = await withDeferred(b);
+      await finish(b, l.id, version).expect(200);
+
+      expect(await status(ids[0])).toBe('FAILED');
+      expect(await status(ids[1])).toBe('FAILED');
+      expect(await status(ids[2])).toBe('SENT');
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+      const failed = (await statusEvents(b, l.id)).filter(
+        (e) => e.deliveryStatus === 'FAILED',
+      );
+      expect(failed.map((e) => e.messageId).sort()).toEqual(
+        [ids[0], ids[1]].sort(),
+      );
+      // the resend after the end is refused: not coming
+      const late = await outcome(
+        b,
+        feed[0].deliveryId,
+        accepted('wamid.too.late'),
+      ).expect(409);
+      expect(late.body.code).toBe('OUTCOME_ALREADY_RECORDED');
+      expect(await status(ids[0])).toBe('FAILED');
+    });
+
+    it('the idle end fails them too, and a new claim (epoch 2) does not bring them back', async () => {
+      const b = await branch();
+      const { l, ids } = await withDeferred(b);
+      await sweepScheduler().tick(new Date(Date.now() + 125 * MIN));
+      expect((await sessions(b, l.id))[0].state).toBe('ENDING');
+      expect(await status(ids[0])).toBe('FAILED');
+      expect(await status(ids[1])).toBe('FAILED');
+      await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+
+      // the request was resolved by the idle end; a fresh live request of the
+      // same chat claims epoch 2 and still sees nothing of epoch 1
+      const second = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: b.tenantId,
+          folio: ++b.folio,
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          customerKey: l.key,
+          conversationRef: l.ref,
+          summary: 'Otra vez',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          lastCustomerMessageAt: new Date(),
+          whatsappWindowClosesAt: new Date(Date.now() + 23 * 60 * MIN),
+        },
+      });
+      await claim(b, second.id).expect(200);
+      await sessionAck(b, l.ref, { epoch: 2, state: 'STARTED' }).expect(200);
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+    });
+
+    it('a deferral reported AFTER the session left ACTIVE is terminal at once: message FAILED, item not pending, ack answered 200', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      const sent = (await say(b, l.id, 1, 'tarde').expect(200)).body.message.id;
+      const feed = await items(b, l.id, 'conversation.staff_message');
+      await finish(b, l.id, version).expect(200);
+      // QUEUED at the end: stays QUEUED until the bot says something
+      expect(await status(sent)).toBe('QUEUED');
+      const res = await outcome(b, feed[0].deliveryId, deferral()).expect(200);
+      expect(res.body.outcome).toBe('DEFERRED_WINDOW_CLOSED');
+      expect(await status(sent)).toBe('FAILED');
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+      expect(
+        (await statusEvents(b, l.id))
+          .filter((e) => e.messageId === sent)
+          .map((e) => e.deliveryStatus),
+      ).toContain('FAILED');
+    });
+  });
+
+  describe('S16 5: the idle clock counts from the customer message providerTimestamp', () => {
+    const mirrorInAt = (b: Branch, ref: string, providerTimestamp: Date) =>
+      asBot(
+        b,
+        server().post(
+          `/chatbot-api/conversations/${encodeURIComponent(ref)}/messages:batch`,
+        ),
+      ).send({
+        messages: [
+          {
+            waMessageId: `wamid.in.${randomUUID()}`,
+            direction: 'IN',
+            type: 'TEXT',
+            text: 'Sigo aquí',
+            providerTimestamp: providerTimestamp.toISOString(),
+            observedAt: new Date().toISOString(),
+          },
+        ],
+      });
+
+    it('a customer message that ARRIVES now but was written 115 minutes ago starts the idle clock 115 minutes ago: ACTIVE at 119 minutes, ending after 121', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      const c = await conversation(b, l.ref);
+      await prisma.chatbotLiveSession.updateMany({
+        where: { requestId: l.id },
+        data: { activeAt: new Date(Date.now() - 300 * MIN) },
+      });
+      await prisma.chatbotConversation.update({
+        where: { id: c.id },
+        data: { lastCustomerMessageAt: new Date(Date.now() - 300 * MIN) },
+      });
+      const wrote = new Date(Date.now() - 115 * MIN);
+      await mirrorInAt(b, l.ref, wrote).expect(200);
+      expect((await conversation(b, l.ref)).lastCustomerMessageAt).toEqual(
+        wrote,
+      );
+
+      await sweepScheduler().tick(new Date(Date.now() + 4 * MIN));
+      expect((await sessions(b, l.id))[0].state).toBe('ACTIVE');
+      await sweepScheduler().tick(new Date(Date.now() + 6 * MIN));
+      expect((await sessions(b, l.id))[0]).toMatchObject({
+        state: 'ENDING',
+        endReason: 'IDLE_TIMEOUT',
+      });
+    });
+
+    it('a late-arriving OLD customer message never moves the idle clock backwards', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      const before = (await conversation(b, l.ref)).lastCustomerMessageAt!;
+      await mirrorInAt(b, l.ref, new Date(Date.now() - 600 * MIN)).expect(200);
+      expect((await conversation(b, l.ref)).lastCustomerMessageAt).toEqual(
+        before,
+      );
+      await sweepScheduler().tick(new Date(Date.now() + 119 * MIN));
+      expect((await sessions(b, l.id))[0].state).toBe('ACTIVE');
+    });
+  });
+
+  describe('S16 7a: bulk GET /chatbot-api/conversations/state?mode=HUMAN', () => {
+    const bulk = (b: Branch, query: string) =>
+      asBot(b, server().get(`/chatbot-api/conversations/state${query}`));
+
+    it('lists the HUMAN conversations (STARTING and ACTIVE) with the single-state shape plus conversationRef, paged by an opaque cursor, and leaves out BOT and ended ones', async () => {
+      const b = await branch();
+      const starting = await liveRequest(b);
+      const active = await liveRequest(b);
+      const ended = await liveRequest(b);
+      const idle = await liveRequest(b); // never claimed: stays BOT
+      await claim(b, starting.id).expect(200);
+      await claim(b, active.id).expect(200);
+      await sessionAck(b, active.ref, { epoch: 1, state: 'STARTED' }).expect(
+        200,
+      );
+      await claim(b, ended.id).expect(200);
+      await sessionAck(b, ended.ref, { epoch: 1, state: 'STARTED' }).expect(
+        200,
+      );
+      await finish(b, ended.id, await versionOf(ended.id)).expect(200);
+      await sessionAck(b, ended.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+
+      const first = await bulk(b, '?mode=HUMAN&limit=1').expect(200);
+      expect(first.headers['cache-control']).toBe('no-store');
+      expect(first.body.items).toHaveLength(1);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+      const second = await bulk(
+        b,
+        `?mode=HUMAN&limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      ).expect(200);
+      expect(second.body.items).toHaveLength(1);
+      expect(second.body.nextCursor).toBeNull();
+
+      const all = await bulk(b, '?mode=HUMAN').expect(200);
+      expect(all.body.nextCursor).toBeNull();
+      const byRef = new Map<string, any>(
+        all.body.items.map((i: any) => [i.conversationRef, i]),
+      );
+      expect([...byRef.keys()].sort()).toEqual(
+        [starting.ref, active.ref].sort(),
+      );
+      expect(byRef.get(starting.ref)).toEqual({
+        conversationRef: starting.ref,
+        mode: 'HUMAN',
+        handoffEpoch: 1,
+        sessionState: 'STARTING',
+        requestId: starting.id,
+        assigneeFirstName: 'Ana',
+      });
+      expect(byRef.get(active.ref)).toMatchObject({
+        sessionState: 'ACTIVE',
+        requestId: active.id,
+      });
+      // the pages cover exactly the same set, in a stable order
+      expect(
+        [...first.body.items, ...second.body.items].map(
+          (i: any) => i.conversationRef,
+        ),
+      ).toEqual(all.body.items.map((i: any) => i.conversationRef));
+      expect(byRef.has(idle.ref)).toBe(false);
+      expect(byRef.has(ended.ref)).toBe(false);
+      // each entry equals the single-conversation state route
+      for (const item of all.body.items) {
+        const { conversationRef, ...rest } = item;
+        expect((await state(b, conversationRef).expect(200)).body).toEqual(
+          rest,
+        );
+      }
+    });
+
+    it('is tenant-scoped, needs mode=HUMAN and a sane limit/cursor, and the bot scope requests:read', async () => {
+      const b = await branch();
+      const other = await branch();
+      const l = await liveRequest(other);
+      await claim(other, l.id).expect(200);
+      expect((await bulk(b, '?mode=HUMAN').expect(200)).body).toEqual({
+        items: [],
+        nextCursor: null,
+      });
+      for (const query of [
+        '',
+        '?mode=BOT',
+        '?mode=human',
+        '?mode=HUMAN&limit=0',
+        '?mode=HUMAN&limit=501',
+        '?mode=HUMAN&limit=x',
+        '?mode=HUMAN&cursor=%25%25%25',
+      ]) {
+        const res = await bulk(b, query).expect(400);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+      }
+      // a credential without requests:read is refused
+      const token = `svc_${randomUUID()}`;
+      const credential = await prisma.serviceCredential.create({
+        data: {
+          tenantId: b.tenantId,
+          name: 'no-read',
+          hashedKey: createHash('sha256').update(token).digest('hex'),
+          scopes: ['feed:read'],
+          rateLimit: 600,
+        },
+      });
+      credentials.push(credential.id);
+      await server()
+        .get('/chatbot-api/conversations/state?mode=HUMAN')
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Branch-Id', b.tenantId)
+        .expect(403);
+    });
+
+    it('a conversation whose ref is literally "state" is still reachable through the single route', async () => {
+      const b = await branch();
+      await mirrorIn(b, 'state', 'hola').expect(200);
+      expect((await state(b, 'state').expect(200)).body).toMatchObject({
+        mode: 'BOT',
+        handoffEpoch: 0,
+      });
+    });
+  });
+
+  describe('S16 7b: messages:batch answers {mode, handoffEpoch} of the chat', () => {
+    it('is BOT/0 for a new chat, HUMAN/1 during the session (also on a batch that is all duplicates) and BOT/1 after it ended', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      const first = await mirrorIn(b, l.ref, 'otro').expect(200);
+      expect(first.body).toMatchObject({ mode: 'BOT', handoffEpoch: 0 });
+      expect(first.body.accepted).toHaveLength(1);
+
+      const { version } = await activeSession(b, l);
+      const during = await mirrorIn(b, l.ref, 'sigo aquí').expect(200);
+      expect(during.body).toMatchObject({ mode: 'HUMAN', handoffEpoch: 1 });
+      // a batch that is only duplicates still says it
+      const wamid = `wamid.dup.${randomUUID()}`;
+      const body = {
+        messages: [
+          {
+            waMessageId: wamid,
+            direction: 'IN',
+            type: 'TEXT',
+            text: 'x',
+            providerTimestamp: new Date().toISOString(),
+            observedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const send = () =>
+        asBot(
+          b,
+          server().post(
+            `/chatbot-api/conversations/${encodeURIComponent(l.ref)}/messages:batch`,
+          ),
+        ).send(body);
+      await send().expect(200);
+      const dup = await send().expect(200);
+      expect(dup.body).toMatchObject({
+        accepted: [],
+        duplicates: [wamid],
+        mode: 'HUMAN',
+        handoffEpoch: 1,
+      });
+
+      await finish(b, l.id, version).expect(200);
+      await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
+      const after = await mirrorIn(b, l.ref, 'gracias').expect(200);
+      expect(after.body).toMatchObject({ mode: 'BOT', handoffEpoch: 1 });
+    });
+  });
+
+  describe('S16 4: statuses:batch FAILED 131047 on a staff message means the window closed', () => {
+    const statuses = (b: Branch, list: object[]) =>
+      asBot(b, server().post('/chatbot-api/messages/statuses:batch')).send({
+        statuses: list,
+      });
+    const failed131047 = (wamid: string, errorCode = '131047') => ({
+      providerMessageId: wamid,
+      status: 'FAILED',
+      occurredAt: new Date().toISOString(),
+      errorCode,
+    });
+    const pending = (b: Branch, ref: string) =>
+      asBot(
+        b,
+        server().get(
+          `/chatbot-api/requests/pending-deliveries?conversationRef=${encodeURIComponent(ref)}`,
+        ),
+      );
+    const messageOf = (id: string) =>
+      prisma.conversationMessage.findUniqueOrThrow({ where: { id } });
+    const statusEvents = async (b: Branch, requestId: string) =>
+      (
+        await prisma.$queryRaw<
+          Array<{ payload: { messageId: string; deliveryStatus: string } }>
+        >`SELECT "payload" FROM "realtime_events"
+          WHERE "tenantId" = ${b.tenantId} AND "requestId" = ${requestId}
+            AND "type" = 'message.status' ORDER BY "id"`
+      ).map((e) => e.payload);
+
+    /** An ACTIVE session with one staff message the bot sent (SENT, wamid). */
+    async function sentMessage(b: Branch, wamid: string) {
+      const l = await liveRequest(b);
+      const { version } = await activeSession(b, l);
+      const id = (await say(b, l.id, 1, 'hola').expect(200)).body.message.id;
+      const [item] = await items(b, l.id, 'conversation.staff_message');
+      await outcome(b, item.deliveryId, accepted(wamid)).expect(200);
+      return { l, version, id, item };
+    }
+
+    it('SENT -> DEFERRED (not FAILED): the item is pending again with WINDOW_CLOSED, the attendee is told, the chat window is corrected, and a replay is ignored', async () => {
+      const b = await branch();
+      const wamid = `wamid.s16.${randomUUID()}`;
+      const { l, id } = await sentMessage(b, wamid);
+      expect((await messageOf(id)).deliveryStatus).toBe('SENT');
+
+      const res = await statuses(b, [failed131047(wamid)]).expect(200);
+      expect(res.body).toMatchObject({ applied: 1, ignored: 0, unknown: [] });
+      expect(await messageOf(id)).toMatchObject({
+        deliveryStatus: 'DEFERRED',
+        waMessageId: wamid,
+      });
+      const list = await pending(b, l.ref).expect(200);
+      expect(list.body.items).toHaveLength(1);
+      expect(list.body.items[0]).toMatchObject({
+        type: 'conversation.staff_message',
+        deferredReason: 'WINDOW_CLOSED',
+      });
+      expect(list.body.items[0].payload.messageId).toBe(id);
+      expect((await statusEvents(b, l.id)).at(-1)).toMatchObject({
+        messageId: id,
+        deliveryStatus: 'DEFERRED',
+      });
+      // Meta's verdict corrects the backend's window: the attendee cannot
+      // write until the customer does
+      const closed = await say(b, l.id, 1, 'otra').expect(409);
+      expect(closed.body.code).toBe('WINDOW_CLOSED');
+
+      // a replay of the same status changes nothing
+      const again = await statuses(b, [failed131047(wamid)]).expect(200);
+      expect(again.body).toMatchObject({ applied: 0, ignored: 1 });
+      expect((await pending(b, l.ref).expect(200)).body.items).toHaveLength(1);
+    });
+
+    it('the DEFERRED_WINDOW_CLOSED outcome path closes the window too: the next staff message is 409 WINDOW_CLOSED', async () => {
+      const b = await branch();
+      // a staff message the bot has not acknowledged yet (one outcome per item)
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      const id = (await say(b, l.id, 1, 'hola').expect(200)).body.message.id;
+      const [item] = await items(b, l.id, 'conversation.staff_message');
+      const res = await outcome(b, item.deliveryId, {
+        attemptId: randomUUID(),
+        outcome: 'DEFERRED_WINDOW_CLOSED',
+        attemptedAt: new Date().toISOString(),
+      }).expect(200);
+      expect(res.body.outcome).toBe('DEFERRED_WINDOW_CLOSED');
+      expect((await messageOf(id)).deliveryStatus).toBe('DEFERRED');
+      const closed = await say(b, l.id, 1, 'otra').expect(409);
+      expect(closed.body.code).toBe('WINDOW_CLOSED');
+    });
+
+    it("a customer message AFTER Meta's verdict reopens the window: the attendee can write again", async () => {
+      const b = await branch();
+      const wamid = `wamid.s16.${randomUUID()}`;
+      const { l } = await sentMessage(b, wamid);
+      await statuses(b, [failed131047(wamid)]).expect(200);
+      await say(b, l.id, 1, 'cerrada').expect(409);
+
+      await new Promise((r) => setTimeout(r, 25));
+      await mirrorIn(b, l.ref, 'ya volví').expect(200);
+      await say(b, l.id, 1, 'bienvenido').expect(200);
+    });
+
+    it('the resend (new attemptId, new wamid) makes it SENT with the NEW wamid, which later statuses find; the pending list empties', async () => {
+      const b = await branch();
+      const first = `wamid.s16.${randomUUID()}`;
+      const second = `wamid.s16.${randomUUID()}`;
+      const { l, id, item } = await sentMessage(b, first);
+      await statuses(b, [failed131047(first)]).expect(200);
+
+      await outcome(b, item.deliveryId, accepted(second)).expect(200);
+      expect(await messageOf(id)).toMatchObject({
+        deliveryStatus: 'SENT',
+        waMessageId: second,
+      });
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+      const delivered = await statuses(b, [
+        {
+          providerMessageId: second,
+          status: 'DELIVERED',
+          occurredAt: new Date().toISOString(),
+        },
+      ]).expect(200);
+      expect(delivered.body.applied).toBe(1);
+      expect((await messageOf(id)).deliveryStatus).toBe('DELIVERED');
+      // the dead wamid is just unknown now
+      const dead = await statuses(b, [failed131047(first)]).expect(200);
+      expect(dead.body.unknown).toEqual([first]);
+    });
+
+    it('any other error (or none) is a plain FAILED and leaves the feed item alone; a DELIVERED message is never moved', async () => {
+      const b = await branch();
+      const wamid = `wamid.s16.${randomUUID()}`;
+      const { l, id } = await sentMessage(b, wamid);
+      await statuses(b, [failed131047(wamid, '131026')]).expect(200);
+      expect((await messageOf(id)).deliveryStatus).toBe('FAILED');
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+
+      const other = await branch();
+      const w2 = `wamid.s16.${randomUUID()}`;
+      const sent2 = await sentMessage(other, w2);
+      await statuses(other, [
+        {
+          providerMessageId: w2,
+          status: 'DELIVERED',
+          occurredAt: new Date().toISOString(),
+        },
+      ]).expect(200);
+      await statuses(other, [failed131047(w2)]).expect(200);
+      expect((await messageOf(sent2.id)).deliveryStatus).toBe('DELIVERED');
+    });
+
+    it('131047 on a bot message is a plain FAILED (the rule is for staff messages)', async () => {
+      const b = await branch();
+      const l = await liveRequest(b);
+      await activeSession(b, l);
+      const wamid = `wamid.bot.${randomUUID()}`;
+      const ts = new Date().toISOString();
+      await asBot(
+        b,
+        server().post(
+          `/chatbot-api/conversations/${encodeURIComponent(l.ref)}/messages:batch`,
+        ),
+      )
+        .send({
+          messages: [
+            {
+              waMessageId: wamid,
+              direction: 'OUT',
+              type: 'TEXT',
+              text: 'bot',
+              providerTimestamp: ts,
+              observedAt: ts,
+            },
+          ],
+        })
+        .expect(200);
+      await statuses(b, [failed131047(wamid)]).expect(200);
+      const stored = await prisma.conversationMessage.findFirstOrThrow({
+        where: { waMessageId: wamid },
+      });
+      expect(stored.deliveryStatus).toBe('FAILED');
+    });
+
+    it('after the session left ACTIVE the window verdict is terminal: FAILED, nothing pending', async () => {
+      const b = await branch();
+      const wamid = `wamid.s16.${randomUUID()}`;
+      const { l, version, id } = await sentMessage(b, wamid);
+      await finish(b, l.id, version).expect(200);
+      await statuses(b, [failed131047(wamid)]).expect(200);
+      expect((await messageOf(id)).deliveryStatus).toBe('FAILED');
+      expect((await pending(b, l.ref).expect(200)).body.items).toEqual([]);
+    });
+  });
+
+  // SLICE2-END
 });

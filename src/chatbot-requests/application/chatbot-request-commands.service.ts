@@ -201,6 +201,12 @@ export interface ChatbotRequestView {
   closedAt: string | null;
 }
 
+/** A window-deferred staff message that became terminal FAILED (S16 3). */
+export interface FailedStaffMessage {
+  messageId: string;
+  seq: number;
+}
+
 export interface ChatbotRequestCommandStore {
   transaction<T>(work: () => Promise<T>): Promise<T>;
   lockIdempotencyKey(actorId: string, key: string): Promise<void>;
@@ -254,16 +260,28 @@ export interface ChatbotRequestCommandStore {
    * patch and before the group refresh (feed rule 6).
    */
   startLiveSession(row: ChatbotRequestRow, actor: StaffActor): Promise<void>;
+  /**
+   * Unit 11 (S15 Q2): reassign of a live request: the patch, the unit 6 notice
+   * and `conversation.reassigned` for a STARTING/ACTIVE session (same epoch),
+   * without the group refresh.
+   */
+  reassignLiveSession(
+    row: ChatbotRequestRow,
+    patch: ChatbotRequestPatch,
+    event: ChatbotRequestEventDraft,
+    toUser: StaffActor,
+  ): Promise<void>;
   /** Unit 11 (§4.8): ACTIVE -> ENDING and `conversation.ended` after a finish. */
   beginLiveSessionEnding(
     row: ChatbotRequestRow,
     reason: 'FINISHED' | 'FORCED',
-  ): Promise<void>;
+  ): Promise<FailedStaffMessage[]>;
   /** The LAST write of the transaction: `session.*` with the row (§12.8). */
   emitSessionEvent(
     requestId: string,
     type: 'session.starting' | 'session.ending',
     version: number,
+    failedMessages?: FailedStaffMessage[],
   ): Promise<void>;
   /**
    * Takes the postal-code lock of a DELIVERY_ZONE request (a no-op for any
@@ -536,9 +554,23 @@ export class ChatbotRequestCommandsService {
           'session.starting',
           result.patch.version,
         );
+      } else if (
+        input.command.kind === 'reassign' &&
+        row.kind === 'CONVERSATION' &&
+        row.conversationRef !== null &&
+        isLiveSubtype(row.subtype)
+      ) {
+        // Unit 11 (S15 Q2): the bot tells the customer who attends now.
+        await this.store.reassignLiveSession(
+          row,
+          result.patch,
+          result.event,
+          toUser as StaffActor,
+        );
+        await this.store.refreshGroups([row.customerKey]);
       } else if (input.command.kind === 'finish') {
         await this.store.applyPatch(row, result.patch, result.event);
-        await this.store.beginLiveSessionEnding(
+        const failed = await this.store.beginLiveSessionEnding(
           row,
           result.event.data.forced === true ? 'FORCED' : 'FINISHED',
         );
@@ -547,6 +579,7 @@ export class ChatbotRequestCommandsService {
           row.id,
           'session.ending',
           result.patch.version,
+          failed,
         );
       } else if (input.command.kind === 'reply') {
         // Unit 10: the answer for the bot joins the same transaction, after

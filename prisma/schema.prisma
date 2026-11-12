@@ -3700,6 +3700,11 @@ model ChatbotAttentionSettings {
   templateCostText          String
   enabledSubtypes           ChatbotRequestSubtype[]
   receiptCloseMarginMinutes Int
+  // Unit 11 slice 2 (S16 1a): seconds to wait for `session-ack STARTED`
+  // before a claim reverts; CHECK 30..600 (migration-authoritative).
+  startTimeoutSeconds       Int                     @default(120)
+  // Unit 11 slice 2 (S16 8): language code of `template.requested`.
+  templateLanguageCode      String                  @default("es_MX")
   schedulingEnabled         Boolean
   slotMinutes               Int
   slotsOffered              Int
@@ -4174,6 +4179,11 @@ model ChatbotConversation {
   conversationRef       String           @db.VarChar(200)
   customerKey           String?
   lastCustomerMessageAt DateTime?
+  // S16 4: Meta's own verdict that the 24 h window is closed (error 131047 or a
+  // DEFERRED_WINDOW_CLOSED outcome), the instant it was reported. Only moves
+  // forward; a customer message newer than it reopens the window. Kept on the
+  // chat row so the statuses path never locks the request row.
+  windowClosedAt        DateTime?
   mode                  ConversationMode @default(BOT)
   handoffEpoch          Int              @default(0)
   nextSeq               Int              @default(1)
@@ -4358,6 +4368,9 @@ model ChatbotLiveSession {
   staffUserId         String
   startSeq            Int
   startedAt           DateTime  @default(now())
+  // S16 1a: `startedAt + the tenant's startTimeoutSeconds`, snapshotted at the
+  // claim. NULL (created before slice 2) means `startedAt + 120 s`.
+  startDeadlineAt     DateTime?
   activeAt            DateTime?
   endingAt            DateTime?
   endedAt             DateTime?

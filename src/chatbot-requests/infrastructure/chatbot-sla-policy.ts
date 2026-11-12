@@ -58,6 +58,8 @@ export interface SettingsRow {
   templateCostText: string;
   enabledSubtypes: string[];
   receiptCloseMarginMinutes: number;
+  startTimeoutSeconds: number;
+  templateLanguageCode: string;
   schedulingEnabled: boolean;
   slotMinutes: number;
   slotsOffered: number;
@@ -89,6 +91,8 @@ export function rowToSettings(row: SettingsRow): AttentionSettings {
     templateCostText: row.templateCostText,
     enabledSubtypes: row.enabledSubtypes as SettingsSubtype[],
     receiptCloseMarginMinutes: row.receiptCloseMarginMinutes,
+    startTimeoutSeconds: row.startTimeoutSeconds,
+    templateLanguageCode: row.templateLanguageCode,
     scheduling: {
       enabled: row.schedulingEnabled,
       slotMinutes: row.slotMinutes,
@@ -128,7 +132,8 @@ export async function readSettingsRow(
       SELECT "version", "timeZone", "days", "closedDates", "closedDateReasons", "slas",
              "windowWarningMinutes", "templateName", "templateCostText",
              "enabledSubtypes"::text[] AS "enabledSubtypes",
-             "receiptCloseMarginMinutes", "schedulingEnabled", "slotMinutes",
+             "receiptCloseMarginMinutes", "startTimeoutSeconds",
+             "templateLanguageCode", "schedulingEnabled", "slotMinutes",
              "slotsOffered", "maxScheduledPerSlot"
       FROM "chatbot_attention_settings"
       WHERE "tenantId" = ${tenantId}

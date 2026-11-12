@@ -360,7 +360,9 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
         'receiptCloseMarginMinutes',
         'scheduling',
         'slas',
+        'startTimeoutSeconds',
         'templateCostText',
+        'templateLanguageCode',
         'templateName',
         'updatedAt',
         'updatedBy',
@@ -1954,6 +1956,156 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       } finally {
         await prisma.tenant.delete({ where: { id: tenant } });
       }
+    });
+  });
+
+  // ------------------------------------- unit 11 slice 2 (S16 1a, S16 8)
+
+  describe('S16: start timeout and template language code (additive fields)', () => {
+    const tenantG: string = randomUUID();
+
+    beforeAll(async () => {
+      await prisma.tenant.create({
+        data: { id: tenantG, name: 'Sucursal G', slug: `cs-${tenantG}` },
+      });
+    });
+
+    afterAll(async () => {
+      await prisma.tenant.delete({ where: { id: tenantG } });
+    });
+
+    it('GET without a row answers startTimeoutSeconds 120 and templateLanguageCode es_MX', async () => {
+      const res = await get(tenantG).expect(200);
+      expect(res.body).toMatchObject({
+        version: 0,
+        startTimeoutSeconds: 120,
+        templateLanguageCode: 'es_MX',
+      });
+    });
+
+    it('a PUT without the fields keeps the defaults; a PUT with them saves and audits them; a later PUT without them keeps the stored values', async () => {
+      const first = await put(tenantG, body(ALWAYS_OPEN(), 0)).expect(200);
+      expect(first.body).toMatchObject({
+        version: 1,
+        startTimeoutSeconds: 120,
+        templateLanguageCode: 'es_MX',
+      });
+
+      const saved = await put(
+        tenantG,
+        body(
+          {
+            ...ALWAYS_OPEN(),
+            startTimeoutSeconds: 45,
+            templateLanguageCode: 'es_US',
+          },
+          1,
+        ),
+      ).expect(200);
+      expect(saved.body).toMatchObject({
+        version: 2,
+        startTimeoutSeconds: 45,
+        templateLanguageCode: 'es_US',
+      });
+      const events = await prisma.chatbotAttentionSettingsEvent.findMany({
+        where: { tenantId: tenantG, toVersion: 2 },
+      });
+      expect((events[0].data as { changed: string[] }).changed).toEqual(
+        expect.arrayContaining(['startTimeoutSeconds', 'templateLanguageCode']),
+      );
+
+      // an older client that does not know the fields must not reset them
+      const older = await put(
+        tenantG,
+        body({ ...ALWAYS_OPEN(), windowWarningMinutes: 90 }, 2),
+      ).expect(200);
+      expect(older.body).toMatchObject({
+        version: 3,
+        windowWarningMinutes: 90,
+        startTimeoutSeconds: 45,
+        templateLanguageCode: 'es_US',
+      });
+      // the same content again is a no-op
+      const same = await put(
+        tenantG,
+        body(
+          {
+            ...ALWAYS_OPEN(),
+            windowWarningMinutes: 90,
+            startTimeoutSeconds: 45,
+            templateLanguageCode: 'es_US',
+          },
+          3,
+        ),
+      ).expect(200);
+      expect(same.body.version).toBe(3);
+      // stale version still 409 with the new fields in `current`
+      const stale = await put(
+        tenantG,
+        body({ ...ALWAYS_OPEN(), startTimeoutSeconds: 60 }, 1),
+      ).expect(409);
+      expect(stale.body.current).toMatchObject({ startTimeoutSeconds: 45 });
+    });
+
+    it.each([
+      [29, 'OUT_OF_RANGE'],
+      [601, 'OUT_OF_RANGE'],
+      [1.5, 'INVALID_TYPE'],
+      ['60', 'INVALID_TYPE'],
+    ])(
+      'startTimeoutSeconds %p is a 400 with fieldErrors and nothing saved',
+      async (value, code) => {
+        const before = (await get(tenantG)).body.version;
+        const res = await put(
+          tenantG,
+          body({ ...ALWAYS_OPEN(), startTimeoutSeconds: value }, before),
+        ).expect(400);
+        expect(res.body.fieldErrors).toEqual([
+          { path: 'startTimeoutSeconds', code },
+        ]);
+        expect((await get(tenantG)).body.version).toBe(before);
+      },
+    );
+
+    it('the bounds 30 and 600 are accepted', async () => {
+      for (const value of [30, 600]) {
+        const version = (await get(tenantG)).body.version;
+        await put(
+          tenantG,
+          body({ ...ALWAYS_OPEN(), startTimeoutSeconds: value }, version),
+        ).expect(200);
+      }
+      expect((await get(tenantG)).body.startTimeoutSeconds).toBe(600);
+    });
+
+    it.each(['ES-mx', 'es_mx', 'español', '', 'es_MXX', 'e'])(
+      'templateLanguageCode %p is a 400 INVALID_LANGUAGE_CODE and nothing saved',
+      async (value) => {
+        const before = (await get(tenantG)).body.version;
+        const res = await put(
+          tenantG,
+          body({ ...ALWAYS_OPEN(), templateLanguageCode: value }, before),
+        ).expect(400);
+        expect(res.body.fieldErrors).toEqual([
+          { path: 'templateLanguageCode', code: 'INVALID_LANGUAGE_CODE' },
+        ]);
+        expect((await get(tenantG)).body.version).toBe(before);
+      },
+    );
+
+    it('apply-to-all does not copy the two fields (they belong to the branch bot, like templateName)', async () => {
+      const source = (await get(tenantA)).body;
+      expect(source.startTimeoutSeconds).toBeDefined();
+      const target = await root.chatbotAttentionSettings.findUnique({
+        where: { tenantId: tenantG },
+      });
+      expect(target?.templateLanguageCode).toBe('es_US');
+      await applyAll(tenantA, {}).expect(200);
+      const after = await root.chatbotAttentionSettings.findUnique({
+        where: { tenantId: tenantG },
+      });
+      expect(after?.templateLanguageCode).toBe('es_US');
+      expect(after?.startTimeoutSeconds).toBe(600);
     });
   });
 });

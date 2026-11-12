@@ -195,6 +195,72 @@ export class PrismaLiveConversationStore {
   }
 
   /**
+   * S16 7a: the bot's bulk reconciliation read: the conversations that are in
+   * `HUMAN` mode (a STARTING, ACTIVE or ENDING session), each with the shape of
+   * the single-conversation state plus `conversationRef`, in `conversationRef`
+   * order and paged by keyset (`after` is the last ref of the previous page).
+   * `nextCursor` is the last ref of a full page that has more behind it.
+   */
+  async listHumanConversations(
+    limit: number,
+    after: string | null,
+  ): Promise<{
+    items: Array<{
+      conversationRef: string;
+      mode: 'BOT' | 'HUMAN';
+      handoffEpoch: number;
+      sessionState: string | null;
+      requestId: string | null;
+      assigneeFirstName: string | null;
+    }>;
+    nextLast: string | null;
+  }> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const tx = this.tenantPrisma.getClient();
+    const rows = await tx.$queryRaw<
+      {
+        conversationRef: string;
+        mode: 'BOT' | 'HUMAN';
+        handoffEpoch: number;
+        sessionState: string | null;
+        requestId: string | null;
+        assigneeDisplayName: string | null;
+      }[]
+    >(Prisma.sql`
+      SELECT c."conversationRef", c."mode"::text AS "mode", c."handoffEpoch",
+             s."state" AS "sessionState", s."requestId", r."assigneeDisplayName"
+      FROM "chatbot_conversations" c
+      LEFT JOIN LATERAL (
+        SELECT s."state", s."requestId" FROM "chatbot_live_sessions" s
+        WHERE s."tenantId" = c."tenantId" AND s."conversationId" = c."id"
+          AND s."state" <> 'ENDED'
+        ORDER BY s."epoch" DESC LIMIT 1) s ON TRUE
+      LEFT JOIN "chatbot_requests" r
+        ON r."tenantId" = c."tenantId" AND r."id" = s."requestId"
+      WHERE c."tenantId" = ${tenantId} AND c."mode" = 'HUMAN'
+        ${after === null ? Prisma.empty : Prisma.sql`AND c."conversationRef" > ${after}`}
+      ORDER BY c."conversationRef" LIMIT ${limit + 1}`);
+    const page = rows.slice(0, limit);
+    return {
+      items: page.map((row) => {
+        const live = row.sessionState !== null;
+        return {
+          conversationRef: row.conversationRef,
+          mode: row.mode,
+          handoffEpoch: row.handoffEpoch,
+          sessionState: live ? row.sessionState : null,
+          requestId: live ? row.requestId : null,
+          assigneeFirstName: live
+            ? staffFirstName(row.assigneeDisplayName)
+            : null,
+        };
+      }),
+      nextLast:
+        rows.length > limit ? page[page.length - 1].conversationRef : null,
+    };
+  }
+
+  /**
    * §4.4 "Personal → cliente": ONE transaction. Order of checks: request open
    * and the caller its assignee; replay of the same `clientMessageId`;
    * session ACTIVE; `expectedEpoch` current; 24 h window open. A message that
@@ -298,6 +364,7 @@ export class PrismaLiveConversationStore {
       const closesAt = whatsappWindowClosesAt(
         conversation.lastCustomerMessageAt,
         window?.lastCustomerMessageAt ?? null,
+        conversation.windowClosedAt,
       );
       if (!closesAt || closesAt.getTime() <= Date.now()) {
         throw new ChatbotRequestCommandError('WINDOW_CLOSED', 409, current, {

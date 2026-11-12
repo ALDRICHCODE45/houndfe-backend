@@ -8,6 +8,7 @@
  * Bot (`svc_` credential; the tenant comes from the guard):
  *   POST /chatbot-api/conversations/:conversationRef/session-ack  `conversation:write`, `control`
  *   GET  /chatbot-api/conversations/:conversationRef/state        `requests:read`, `read`
+ *   GET  /chatbot-api/conversations/state?mode=HUMAN&limit=&cursor=   same scope (S16 7a)
  *
  * `@Body()` of the bot route is `unknown`: the exact parser below owns the
  * validation (no other key is accepted).
@@ -23,6 +24,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   Res,
   UseFilters,
@@ -99,6 +101,37 @@ export function parseSessionAck(raw: unknown): {
   return { epoch: epoch as number, state: state as 'STARTED' | 'ENDED' };
 }
 
+const BULK_LIMIT = { default: 100, max: 500 } as const;
+
+/** `mode=HUMAN` (the only mode), `limit` 1..500, opaque `cursor`. */
+function parseBulkQuery(query: Record<string, unknown>): {
+  limit: number;
+  after: string | null;
+} {
+  const bad = (): never => {
+    throw new InvalidArgumentError('Invalid request', 'VALIDATION_ERROR');
+  };
+  const known = new Set(['mode', 'limit', 'cursor']);
+  if (Object.keys(query).some((key) => !known.has(key))) bad();
+  if (query.mode !== 'HUMAN') bad();
+  let limit: number = BULK_LIMIT.default;
+  if (query.limit !== undefined) {
+    if (typeof query.limit !== 'string' || !/^\d{1,4}$/.test(query.limit)) {
+      bad();
+    }
+    limit = Number(query.limit);
+    if (limit < 1 || limit > BULK_LIMIT.max) bad();
+  }
+  let after: string | null = null;
+  if (query.cursor !== undefined) {
+    if (typeof query.cursor !== 'string' || query.cursor.length > 400) bad();
+    if (!/^[A-Za-z0-9_-]+$/.test(query.cursor as string)) bad();
+    after = Buffer.from(query.cursor as string, 'base64url').toString('utf8');
+    if (!REF.test(after)) bad();
+  }
+  return { limit, after };
+}
+
 type StaffRequest = Request & { user?: AuthenticatedUser };
 
 @Controller('chatbot-requests')
@@ -158,6 +191,34 @@ export class BotLiveConversationController {
       ack.epoch,
       ack.state,
     );
+  }
+
+  /**
+   * S16 7a: every conversation the backend holds in `HUMAN` mode, so the bot
+   * reconciles after an outage with one read instead of one per chat. Only
+   * `mode=HUMAN` exists (a list of every `BOT` chat has no use). Paged by an
+   * opaque `cursor`; `nextCursor` is `null` on the last page.
+   */
+  @Get('conversations/state')
+  @BotRouteClass('read')
+  @RequiredScopes(BOT_SCOPES.requestsRead)
+  async humanConversations(
+    @Query() query: Record<string, unknown>,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    response.setHeader('Cache-Control', 'no-store');
+    const { limit, after } = parseBulkQuery(query);
+    const { items, nextLast } = await this.store.listHumanConversations(
+      limit,
+      after,
+    );
+    return {
+      items,
+      nextCursor:
+        nextLast === null
+          ? null
+          : Buffer.from(nextLast, 'utf8').toString('base64url'),
+    };
   }
 
   @Get('conversations/:conversationRef/state')

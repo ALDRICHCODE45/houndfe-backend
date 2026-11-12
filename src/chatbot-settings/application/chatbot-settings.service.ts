@@ -161,6 +161,8 @@ const toColumns = (s: AttentionSettings) => ({
   templateCostText: s.templateCostText,
   enabledSubtypes: s.enabledSubtypes,
   receiptCloseMarginMinutes: s.receiptCloseMarginMinutes,
+  startTimeoutSeconds: s.startTimeoutSeconds,
+  templateLanguageCode: s.templateLanguageCode,
   schedulingEnabled: s.scheduling.enabled,
   slotMinutes: s.scheduling.slotMinutes,
   slotsOffered: s.scheduling.slotsOffered,
@@ -263,7 +265,9 @@ export class ChatbotSettingsService {
     expectedVersion: number,
     input: AttentionSettingsInput,
   ): Promise<PutResponse> {
-    const next = normalizeSettingsInput(input);
+    // Validates the whole body once, outside the transaction (an additive
+    // field that is absent counts as its default only for this check).
+    const validated = normalizeSettingsInput(input);
     const actor = await this.actorName(actorUserId);
     let changed: boolean;
     try {
@@ -275,8 +279,21 @@ export class ChatbotSettingsService {
             await this.getIn(tx, tenantId),
           );
         }
-        if (row && settingsEqual(rowToSettings(row), next)) return false;
         const before = row ? rowToSettings(row) : defaultSettings();
+        // S16: a client that does not know the additive fields must not reset
+        // them; absent (or null) keeps what is stored.
+        const next =
+          input.startTimeoutSeconds == null ||
+          input.templateLanguageCode == null
+            ? normalizeSettingsInput({
+                ...input,
+                startTimeoutSeconds:
+                  input.startTimeoutSeconds ?? before.startTimeoutSeconds,
+                templateLanguageCode:
+                  input.templateLanguageCode ?? before.templateLanguageCode,
+              })
+            : validated;
+        if (row && settingsEqual(before, next)) return false;
         if (row) {
           await tx.chatbotAttentionSettings.update({
             where: { tenantId },

@@ -30,9 +30,10 @@ import type {
   IngestResult,
   StatusResult,
 } from '../application/conversation-mirror.service';
-import type {
-  ParsedMessage,
-  ParsedStatus,
+import {
+  WINDOW_CLOSED_ERROR_CODE,
+  type ParsedMessage,
+  type ParsedStatus,
 } from '../domain/conversation-message';
 import { mediaMatchesMessageType } from '../domain/conversation-media';
 import {
@@ -80,6 +81,8 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
           id: string;
           nextSeq: number;
           lastCustomerMessageAt: Date | null;
+          mode: 'BOT' | 'HUMAN';
+          handoffEpoch: number;
         }>
       >(Prisma.sql`
         INSERT INTO "chatbot_conversations"
@@ -87,7 +90,8 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         VALUES (${randomUUID()}, ${tenantId}, ${input.conversationRef}, ${input.customerKey}, now())
         ON CONFLICT ("tenantId", "conversationRef")
           DO UPDATE SET "updatedAt" = now()
-        RETURNING "id", "nextSeq", "lastCustomerMessageAt"`);
+        RETURNING "id", "nextSeq", "lastCustomerMessageAt",
+                  "mode"::text AS "mode", "handoffEpoch"`);
 
       const ids = input.messages.map((m) => m.waMessageId);
       const existing = await db.$queryRaw<
@@ -103,7 +107,8 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
       const duplicates = input.messages
         .filter((m) => known.has(m.waMessageId))
         .map((m) => m.waMessageId);
-      if (fresh.length === 0) return { accepted: [], duplicates };
+      const handoff = { mode: chat.mode, handoffEpoch: chat.handoffEpoch };
+      if (fresh.length === 0) return { accepted: [], duplicates, ...handoff };
 
       await this.assertMedia(db, tenantId, fresh);
       const replies = await this.resolveReplies(
@@ -218,6 +223,7 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
           seq,
         })),
         duplicates,
+        ...handoff,
       };
     });
   }
@@ -334,11 +340,90 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
         AND "purgeAfter" < now() + interval '12 months'`);
   }
 
+  /**
+   * S16 4: the staff-message feed items behind the `FAILED 131047` statuses of
+   * a batch, keyed by message id, locked in cursor order. Empty when the batch
+   * has none (no extra query).
+   */
+  private async lockWindowClosedItems(
+    db: ReturnType<TenantPrismaService['getClient']>,
+    tenantId: string,
+    statuses: ParsedStatus[],
+  ): Promise<
+    Map<string, { cursor: bigint; requestId: string; epoch: number }>
+  > {
+    const wamids = [
+      ...new Set(
+        statuses
+          .filter(
+            (s) =>
+              s.status === 'FAILED' && s.errorCode === WINDOW_CLOSED_ERROR_CODE,
+          )
+          .map((s) => s.providerMessageId),
+      ),
+    ];
+    if (wamids.length === 0) return new Map();
+    const staff = await db.$queryRaw<
+      Array<{ id: string; conversationRef: string }>
+    >(Prisma.sql`
+      SELECT m."id", c."conversationRef"
+      FROM "conversation_messages" m
+      JOIN "chatbot_conversations" c
+        ON c."tenantId" = m."tenantId" AND c."id" = m."conversationId"
+      WHERE m."tenantId" = ${tenantId} AND m."waMessageId" = ANY(${wamids}::text[])
+        AND m."author" = 'STAFF' AND m."direction" = 'OUT'`);
+    if (staff.length === 0) return new Map();
+    const items = await db.$queryRaw<
+      Array<{
+        cursor: bigint;
+        messageId: string;
+        requestId: string;
+        epoch: number;
+      }>
+    >(Prisma.sql`
+      SELECT f."cursor", f."payload"->>'messageId' AS "messageId", f."requestId",
+             (f."payload"->>'handoffEpoch')::int AS "epoch"
+      FROM "chatbot_feed_items" f
+      WHERE f."tenantId" = ${tenantId}
+        AND f."conversationRef" = ANY(${[...new Set(staff.map((m) => m.conversationRef))]}::text[])
+        AND f."type" = 'conversation.staff_message'
+        AND f."payload"->>'messageId' = ANY(${staff.map((m) => m.id)}::text[])
+      ORDER BY f."cursor"
+      FOR UPDATE`);
+    return new Map(
+      items.map((i) => [
+        i.messageId,
+        { cursor: i.cursor, requestId: i.requestId, epoch: i.epoch },
+      ]),
+    );
+  }
+
+  /** The item's own epoch is still an ACTIVE session (it can be resent). */
+  private async epochIsActive(
+    db: ReturnType<TenantPrismaService['getClient']>,
+    tenantId: string,
+    item: { requestId: string; epoch: number },
+  ): Promise<boolean> {
+    const [row] = await db.$queryRaw<Array<{ one: number }>>(Prisma.sql`
+      SELECT 1 AS "one" FROM "chatbot_live_sessions"
+      WHERE "tenantId" = ${tenantId} AND "requestId" = ${item.requestId}
+        AND "epoch" = ${item.epoch} AND "state" = 'ACTIVE'`);
+    return row !== undefined;
+  }
+
   applyStatuses(statuses: ParsedStatus[]): Promise<StatusResult> {
     const tenantId = this.tenantPrisma.getTenantId();
     return this.tenantPrisma.runInTransaction(async () => {
       const db = this.tenantPrisma.getClient();
       const ids = [...new Set(statuses.map((s) => s.providerMessageId))];
+      // S16 4: a FAILED 131047 on a staff message is a closed window. Its feed
+      // item is locked BEFORE the message rows (the ACK of the same delivery
+      // locks item then message), never after.
+      const windowClosed = await this.lockWindowClosedItems(
+        db,
+        tenantId,
+        statuses,
+      );
       // Locked in id order so two status batches never wait on each other in a
       // cycle.
       const rows = await db.$queryRaw<
@@ -348,11 +433,13 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
           conversationId: string;
           waMessageId: string;
           direction: string;
+          author: string;
           deliveryStatus: string | null;
         }>
       >(Prisma.sql`
         SELECT "id", "seq", "conversationId", "waMessageId",
-               "direction"::text AS "direction", "deliveryStatus"::text AS "deliveryStatus"
+               "direction"::text AS "direction", "author"::text AS "author",
+               "deliveryStatus"::text AS "deliveryStatus"
         FROM "conversation_messages"
         WHERE "tenantId" = ${tenantId} AND "waMessageId" = ANY(${ids}::text[])
         ORDER BY "id" FOR UPDATE`);
@@ -362,6 +449,11 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
       let applied = 0;
       let ignored = 0;
       const unknown = new Set<string>();
+      const reopened: Array<{
+        cursor: bigint;
+        conversationId: string;
+        at: Date;
+      }> = [];
       // Statuses arrive out of order and repeated: fold them in the order the
       // bot sent them, each only if it moves the message forward.
       for (const status of statuses) {
@@ -370,7 +462,32 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
           unknown.add(status.providerMessageId);
           continue;
         }
+        const item = windowClosed.get(row.id);
         if (
+          item &&
+          status.errorCode === WINDOW_CLOSED_ERROR_CODE &&
+          current.get(row.id) === 'SENT'
+        ) {
+          // The window is closed, not the message: it waits for the customer
+          // while its session is ACTIVE, and is terminal once it is not.
+          const waits = await this.epochIsActive(db, tenantId, item);
+          current.set(row.id, waits ? 'DEFERRED' : 'FAILED');
+          if (waits) {
+            reopened.push({
+              cursor: item.cursor,
+              conversationId: row.conversationId,
+              at: status.occurredAt,
+            });
+          }
+          applied += 1;
+        } else if (
+          status.errorCode === WINDOW_CLOSED_ERROR_CODE &&
+          current.get(row.id) === 'DEFERRED'
+        ) {
+          // A replayed window verdict on a message already waiting for the
+          // customer changes nothing (it must not turn it FAILED).
+          ignored += 1;
+        } else if (
           row.direction === 'OUT' &&
           canAdvanceDeliveryStatus(current.get(row.id) ?? null, status.status)
         ) {
@@ -394,6 +511,20 @@ export class PrismaConversationMirrorStore implements ConversationMirrorStore {
             ),
           )}) AS v("id", "status")
           WHERE m."id" = v."id" AND m."tenantId" = ${tenantId}`);
+        for (const { cursor, conversationId, at } of reopened) {
+          // The delivery is pending again (the bot resends it, in seq order,
+          // with a new attempt) and Meta's verdict corrects the chat's window:
+          // closed from `at` until the customer's next message.
+          await db.$executeRaw(Prisma.sql`
+            UPDATE "chatbot_feed_items"
+            SET "outcome" = 'DEFERRED_WINDOW_CLOSED', "ackedAt" = NULL
+            WHERE "tenantId" = ${tenantId} AND "cursor" = ${cursor}`);
+          await db.$executeRaw(Prisma.sql`
+            UPDATE "chatbot_conversations"
+            SET "windowClosedAt" = ${at}, "updatedAt" = now()
+            WHERE "tenantId" = ${tenantId} AND "id" = ${conversationId}
+              AND ("windowClosedAt" IS NULL OR "windowClosedAt" < ${at})`);
+        }
         const targets = await db.$queryRaw<
           Array<{ messageId: string; requestId: string }>
         >(Prisma.sql`

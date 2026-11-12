@@ -132,6 +132,11 @@ function fakeStore(
     },
     readZoneImpact: () =>
       Promise.resolve({ found: true, impact: zone?.impact ?? null }),
+    // Live sessions (unit 11) are covered against PostgreSQL.
+    startLiveSession: () => Promise.reject(new Error('not expected')),
+    reassignLiveSession: () => Promise.reject(new Error('not expected')),
+    beginLiveSessionEnding: () => Promise.reject(new Error('not expected')),
+    emitSessionEvent: () => Promise.reject(new Error('not expected')),
   };
   return { store, calls, applied, receipts };
 }

@@ -19,7 +19,10 @@ import {
 import { emitRealtimeEvents } from '../../shared/realtime/realtime-event-writes';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import { messageStatusForOutcome } from '../domain/live-session';
-import { applyStaffMessageOutcome } from './live-session-writes';
+import {
+  applyStaffMessageOutcome,
+  failDeferredAfterSession,
+} from './live-session-writes';
 import {
   classifyOutcome,
   DEFERRED_OUTCOMES,
@@ -30,18 +33,6 @@ import {
   isDeferredOutcome,
 } from '../domain/chatbot-feed';
 
-const ITEM_SELECT = {
-  cursor: true,
-  deliveryId: true,
-  type: true,
-  requestId: true,
-  conversationRef: true,
-  payload: true,
-} as const;
-
-/** The pending list also needs the outcome: it names the deferral. */
-const PENDING_SELECT = { ...ITEM_SELECT, outcome: true } as const;
-
 interface LockedDelivery {
   cursor: bigint;
   requestId: string;
@@ -51,6 +42,7 @@ interface LockedDelivery {
   outcome: FeedOutcome | null;
   ackedAt: Date | null;
   messageId: string | null;
+  handoffEpoch: number | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -127,17 +119,27 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
     filter: { conversationRef: string } | { requestId: string },
     limit: number,
   ): Promise<FeedItemRow[]> {
-    return this.db.chatbotFeedItem.findMany({
-      where: {
-        tenantId: this.tenantId,
-        ...filter,
-        outcome: { in: [...DEFERRED_OUTCOMES] },
-        ackedAt: null,
-      },
-      orderBy: { cursor: 'asc' },
-      take: limit,
-      select: PENDING_SELECT,
-    });
+    const tenantId = this.tenantId;
+    const scope =
+      'conversationRef' in filter
+        ? Prisma.sql`f."conversationRef" = ${filter.conversationRef}`
+        : Prisma.sql`f."requestId" = ${filter.requestId}`;
+    // S16 3: a staff message deferred by the window is served only while its
+    // own epoch is still an ACTIVE session (once it ends the message is FAILED
+    // and acknowledged; this guard also covers an ACK that raced the end).
+    return this.db.$queryRaw<FeedItemRow[]>(Prisma.sql`
+      SELECT f."cursor", f."deliveryId"::text AS "deliveryId", f."type",
+             f."requestId", f."conversationRef", f."payload", f."outcome"
+      FROM "chatbot_feed_items" f
+      WHERE f."tenantId" = ${tenantId} AND ${scope}
+        AND f."outcome" IN (${Prisma.join([...DEFERRED_OUTCOMES])})
+        AND f."ackedAt" IS NULL
+        AND (f."type" <> ${FEED_TYPE.staffMessage} OR EXISTS (
+          SELECT 1 FROM "chatbot_live_sessions" s
+          WHERE s."tenantId" = f."tenantId" AND s."requestId" = f."requestId"
+            AND s."epoch" = (f."payload"->>'handoffEpoch')::int
+            AND s."state" = 'ACTIVE'))
+      ORDER BY f."cursor" LIMIT ${limit}`);
   }
 
   recordOutcome(
@@ -150,7 +152,8 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       const { db, tenantId } = this;
       const [row] = await db.$queryRaw<LockedDelivery[]>(Prisma.sql`
         SELECT "cursor", "requestId", "type", "attemptId", "evidenceHash",
-               "outcome", "ackedAt", "payload"->>'messageId' AS "messageId"
+               "outcome", "ackedAt", "payload"->>'messageId' AS "messageId",
+               ("payload"->>'handoffEpoch')::int AS "handoffEpoch"
         FROM "chatbot_feed_items"
         WHERE "tenantId" = ${tenantId} AND "deliveryId" = ${deliveryId}::uuid
         FOR UPDATE`);
@@ -251,7 +254,22 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
           providerMessageId: input.providerMessageId ?? null,
           attemptedAt: input.attemptedAt ? new Date(input.attemptedAt) : null,
         });
+        // S16 3: a deferral of a message whose session already left ACTIVE
+        // is terminal at once (nobody will resend it).
+        const settled =
+          applied &&
+          row.type === FEED_TYPE.staffMessage &&
+          input.outcome === 'DEFERRED_WINDOW_CLOSED' &&
+          row.handoffEpoch !== null
+            ? await failDeferredAfterSession(db, tenantId, {
+                requestId: row.requestId,
+                cursor: row.cursor,
+                messageId: row.messageId,
+                epoch: row.handoffEpoch,
+              })
+            : null;
         if (applied) {
+          if (settled) applied.deliveryStatus = 'FAILED';
           await emitRealtimeEvents(db, [
             {
               tenantId,

@@ -294,18 +294,35 @@ describe('parseStatusBatch', () => {
         NOW,
       ),
     ).toEqual([
-      { providerMessageId: 'wamid.out-1', status: 'DELIVERED' },
-      { providerMessageId: 'wamid.out-1', status: 'READ' },
+      {
+        providerMessageId: 'wamid.out-1',
+        status: 'DELIVERED',
+        occurredAt: new Date('2026-11-12T11:59:30.000Z'),
+        errorCode: null,
+      },
+      {
+        providerMessageId: 'wamid.out-1',
+        status: 'READ',
+        occurredAt: new Date('2026-11-12T11:59:30.000Z'),
+        errorCode: null,
+      },
     ]);
   });
 
-  it('accepts an errorCode and drops it (nothing stores it)', () => {
+  it('keeps occurredAt and the errorCode (S16 4: 131047 means the window closed; no column stores the code)', () => {
     expect(
       parseStatusBatch(
         { statuses: [status({ status: 'FAILED', errorCode: '131047' })] },
         NOW,
       ),
-    ).toEqual([{ providerMessageId: 'wamid.out-1', status: 'FAILED' }]);
+    ).toEqual([
+      {
+        providerMessageId: 'wamid.out-1',
+        status: 'FAILED',
+        occurredAt: new Date('2026-11-12T11:59:30.000Z'),
+        errorCode: '131047',
+      },
+    ]);
   });
 
   it.each([

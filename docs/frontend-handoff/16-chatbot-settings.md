@@ -64,6 +64,8 @@ Initial grants (owner choice L2): Manager has the first two, **not** `ChatbotSet
   "templateCostText": "Enviar la plantilla tiene un costo para el negocio.",
   "enabledSubtypes": ["RESTOCK", "EXPIRATION", "DELIVERY_ZONE", "TRANSFER_RECEIPT", "TALK_TO_HUMAN", "COMPLAINT", "UNKNOWN_QUESTION", "DISCOUNT"],
   "receiptCloseMarginMinutes": 60,
+  "startTimeoutSeconds": 120,
+  "templateLanguageCode": "es_MX",
   "scheduling": { "enabled": false, "slotMinutes": 30, "slotsOffered": 3, "maxScheduledPerSlot": 3 },
   "branchOpeningHours": null,
   "updatedBy": { "id": "6f1c…", "displayName": "Ana López" },
@@ -101,11 +103,13 @@ Full replacement, plus the version you edited:
   "templateCostText": "Enviar la plantilla tiene un costo para el negocio.",
   "enabledSubtypes": ["RESTOCK", "COMPLAINT"],
   "receiptCloseMarginMinutes": 60,
+  "startTimeoutSeconds": 120,
+  "templateLanguageCode": "es_MX",
   "scheduling": { "enabled": false, "slotMinutes": 30, "slotsOffered": 3, "maxScheduledPerSlot": 3 }
 }
 ```
 
-You can send back exactly what `GET` returned (without `version`, `updatedBy` and `updatedAt`) plus `expectedVersion`. `closedDateReasons` is optional, but a `PUT` replaces the whole object: **leaving it out clears every reason**. `branchOpeningHours` may be present and is ignored. Any other unknown field is a `400`. `expectedVersion` is the `version` you loaded (`0` the first time).
+You can send back exactly what `GET` returned (without `version`, `updatedBy` and `updatedAt`) plus `expectedVersion`. **`startTimeoutSeconds` and `templateLanguageCode` (unit 11) are additive and optional in the `PUT`: leaving them out keeps the stored values** (unlike `closedDateReasons`), so a screen that does not edit them cannot reset them. A `null` also means "keep". `closedDateReasons` is optional, but a `PUT` replaces the whole object: **leaving it out clears every reason**. `branchOpeningHours` may be present and is ignored. Any other unknown field is a `400`. `expectedVersion` is the `version` you loaded (`0` the first time).
 
 Success: `200` with the new `GET` body plus one extra field, `recompute` (see below). The version goes up by one **only if something changed**; saving identical content answers `200` with the same version, `recompute: "NOT_NEEDED"`, and does nothing else. The `PUT` response also carries `updatedBy` / `updatedAt` of this save. **`recompute` exists only in the `PUT` response: do not send it back** (an unknown field is a `400`, same as `version`).
 
@@ -115,6 +119,8 @@ Limits, all checked on the server:
 | --- | --- |
 | `slas[].claimMinutes`, `resolveMinutes` | `null` or an integer 1 to 10080; `resolveMinutes` not below `claimMinutes`; `TRANSFER_RECEIPT.resolveMinutes` must be `null` |
 | `receiptCloseMarginMinutes` | integer 0 to 1440 |
+| `startTimeoutSeconds` | integer **30 to 600** (default 120): how long a claim of a live conversation (unit 11) waits for the bot to confirm it is silent before the claim reverts. A change applies to the **next** claim, never to a session that already started |
+| `templateLanguageCode` | `xx` or `xx_YY` (lowercase language, uppercase country), e.g. `es_MX` (default): the language of the paid WhatsApp template (unit 11) |
 | `windowWarningMinutes` | integer 0 to 1440 |
 | `openingHours` | at least one open range in the week; at most **6 ranges per day** (settings only) |
 | `closedDateReasons` | keys are dates of `closedDates`; each reason 1 to 80 characters, plain text |
@@ -177,6 +183,7 @@ Every `400 VALIDATION_ERROR` of `PUT /chatbot-settings` and of `POST /chatbot-se
 | `INVALID_LENGTH` | Text too short or too long (reason 1 to 80, cost text 1 to 200) | `closedDateReasons["2026-12-25"]`, `templateCostText` |
 | `INVALID_TEXT` | Control characters in a text | `templateCostText`, `closedDateReasons[...]` |
 | `INVALID_TEMPLATE_NAME` | Not lowercase letters, digits and `_` (1 to 512) | `templateName` |
+| `INVALID_LANGUAGE_CODE` | Not `xx` or `xx_YY` | `templateLanguageCode` |
 | `INVALID_TIME` | Not `HH:mm` between `00:00` and `23:59` | `openingHours.days[0].ranges[0].open` |
 | `CROSSES_MIDNIGHT` | Closes before it opens (for example `22:00` to `02:00`); split it across days | `openingHours.days[0].ranges[0]` |
 | `EMPTY_RANGE` | Opens and closes at the same time | `openingHours.days[0].ranges[0]` |
@@ -211,7 +218,7 @@ Request body (both optional):
 - `dryRun: true`: reports what would change and writes nothing. Call it first and show "N sucursales cambian" before the user confirms.
 - `expectedVersion`: the version of **this** sucursal's settings the user saw. A stale one answers `409 VERSION_CONFLICT`, so you never copy something other than what was on screen. The body carries `current` (same object as `GET`) **only if you also have `read:ChatbotSettings` in this sucursal**, because this route requires just `update:ChatbotSettingsAllBranches` and must not be a way around `GET`. Without that permission the `409` has no `current` key: `{ "statusCode": 409, "code": "VERSION_CONFLICT", "message": "The settings changed; reload them" }`. Handle both: if `current` is missing, tell the user the settings changed and ask them to reload (a `GET` will work if they can read; otherwise just retry the dry run). Save with `PUT` first, then apply.
 
-Copied: `openingHours`, `closedDates`, `closedDateReasons`, `slas`, `windowWarningMinutes`, `receiptCloseMarginMinutes`, `scheduling`. **Not copied** (they stay per sucursal): `templateName`, `templateCostText`, `enabledSubtypes`.
+Copied: `openingHours`, `closedDates`, `closedDateReasons`, `slas`, `windowWarningMinutes`, `receiptCloseMarginMinutes`, `scheduling`. **Not copied** (they stay per sucursal): `templateName`, `templateLanguageCode`, `templateCostText`, `enabledSubtypes`, `startTimeoutSeconds`.
 
 Response `200`:
 

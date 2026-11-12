@@ -79,9 +79,17 @@ describe('decideSessionAck', () => {
 });
 
 describe('dueSessionAction (the sweep)', () => {
-  it('reverts a STARTING session after 60 s, not before', () => {
-    expect(dueSessionAction(session(), at(59_999), null)).toBeNull();
-    expect(dueSessionAction(session(), at(60_000), null)).toBe('REVERT_START');
+  it('reverts a STARTING session with no snapshot after the 120 s default, not before', () => {
+    expect(dueSessionAction(session(), at(119_999), null)).toBeNull();
+    expect(dueSessionAction(session(), at(120_000), null)).toBe('REVERT_START');
+  });
+  it('reverts a STARTING session at its own startDeadlineAt (the tenant setting snapshotted at the claim)', () => {
+    const custom = session({ startDeadlineAt: at(45_000) });
+    expect(dueSessionAction(custom, at(44_999), null)).toBeNull();
+    expect(dueSessionAction(custom, at(45_000), null)).toBe('REVERT_START');
+    const long = session({ startDeadlineAt: at(600_000) });
+    expect(dueSessionAction(long, at(599_999), null)).toBeNull();
+    expect(dueSessionAction(long, at(600_000), null)).toBe('REVERT_START');
   });
   it('ends an ENDING session nobody acknowledged after 10 min', () => {
     const ending = session({ state: 'ENDING', endingAt: T0 });
@@ -140,6 +148,17 @@ describe('whatsappWindowClosesAt', () => {
     const later = new Date('2026-11-13T13:00:00.000Z');
     expect(whatsappWindowClosesAt(later, null, reported)?.toISOString()).toBe(
       '2026-11-14T13:00:00.000Z',
+    );
+  });
+  it('a verdict is not overridden by an older customer message of either source', () => {
+    const chat = new Date('2026-11-13T10:00:00.000Z');
+    const request = new Date('2026-11-13T11:00:00.000Z');
+    const reported = new Date('2026-11-13T12:00:00.000Z');
+    expect(whatsappWindowClosesAt(chat, request, reported)).toEqual(reported);
+    // the request's own (newer) value reopens it
+    const newer = new Date('2026-11-13T12:30:00.000Z');
+    expect(whatsappWindowClosesAt(chat, newer, reported)?.toISOString()).toBe(
+      '2026-11-14T12:30:00.000Z',
     );
   });
 });

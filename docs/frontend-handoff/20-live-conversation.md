@@ -2,20 +2,20 @@
 
 **Status:** implemented on `feat/human-intervention-u11` (human-intervention unit 11), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §4, §12.4, §12.8, §12.10, §12.15. Bot side: `docs/chatbot-handoff/chatbot-requests-bot-contract.md`, section "Live conversation (unit 11)".
 
-A `TALK_TO_HUMAN` or `COMPLAINT` request goes live when someone **claims** it ("Atender"). The bot goes silent, and from then on the attendee talks to the customer through `POST …/messages`; the bot relays. Nothing here works until the chatbot ships its handler: **until then a claim reverts by itself after 60 s** (request back to `NEW`).
+A `TALK_TO_HUMAN` or `COMPLAINT` request goes live when someone **claims** it ("Atender"). The bot goes silent, and from then on the attendee talks to the customer through `POST …/messages`; the bot relays. Nothing here works until the chatbot ships its handler: **until then a claim reverts by itself after the start timeout** (request back to `NEW`). The timeout is a per-sucursal setting, `startTimeoutSeconds`, default **120 s** (30 to 600; see handoff 16); it is fixed on the session at the claim.
 
 ## 1. State machine you will see
 
-`liveSession.state`: `null` (not a conversation, or it never had a session) → `STARTING` → `ACTIVE` → `ENDING` → `ENDED`. `WAITING` is what an **open** request shows after a session ended without finishing it (the 60 s revert).
+`liveSession.state`: `null` (not a conversation, or it never had a session) → `STARTING` → `ACTIVE` → `ENDING` → `ENDED`. `WAITING` is what an **open** request shows after a session ended without finishing it (the start-timeout revert).
 
-| Moment                                           | What happens                                                                           | Row change                                                                                         |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `claim` of a live request                        | `200 {request}` as always, plus a session `STARTING`. The composer shows "Conectando…" | `liveSession {state: STARTING, handoffEpoch: N}`; SSE `request.claimed` **and** `session.starting` |
-| The bot confirms it is silent                    | Composer opens                                                                         | `session.active` (`version` + 1)                                                                   |
-| No confirmation in **60 s**                      | The claim reverts: request back to `NEW`, no assignee                                  | `request.released` + `session.ended` (`liveSession.state: WAITING`)                                |
-| `finish`                                         | Request `RESOLVED`, session `ENDING`, the bot says goodbye                             | `session.ending`                                                                                   |
-| The bot confirms it is back (or **10 min** pass) | Session `ENDED`                                                                        | `session.ended`                                                                                    |
-| Customer silent **2 h**                          | The backend finishes by itself (automatic note)                                        | `session.ending`                                                                                   |
+| Moment                                                                                                                  | What happens                                                                           | Row change                                                                                         |
+| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `claim` of a live request                                                                                               | `200 {request}` as always, plus a session `STARTING`. The composer shows "Conectando…" | `liveSession {state: STARTING, handoffEpoch: N}`; SSE `request.claimed` **and** `session.starting` |
+| The bot confirms it is silent                                                                                           | Composer opens                                                                         | `session.active` (`version` + 1)                                                                   |
+| No confirmation in the **start timeout** (120 s by default)                                                             | The claim reverts: request back to `NEW`, no assignee                                  | `request.released` + `session.ended` (`liveSession.state: WAITING`)                                |
+| `finish`                                                                                                                | Request `RESOLVED`, session `ENDING`, the bot says goodbye                             | `session.ending`                                                                                   |
+| The bot confirms it is back (or **10 min** pass)                                                                        | Session `ENDED`                                                                        | `session.ended`                                                                                    |
+| Customer silent **2 h** (counted from the time the customer _wrote_ the last message, not from when the bot relayed it) | The backend finishes by itself (automatic note)                                        | `session.ending`                                                                                   |
 
 **Versions.** `session.active`, `session.ending` and `session.ended` raise `request.version` (§12.8: replace the row only if the version is higher). So after `claim` returns version `v`, the row will usually be `v+1` once `session.active` arrives: **send the latest version from the row/SSE in `finish`**, not the one from the claim response (a stale one is `409 VERSION_CONFLICT` with `current`). Messages do **not** change the version.
 
@@ -85,10 +85,16 @@ The message is stored in the same transaction as the item the bot reads, so it e
 
 `GET /chatbot-requests/:id/conversation` (unit 9) now also serves the attendee **without** `read:ChatbotConversation`: they see only the messages of **their session** (from the first `seq` after the claim). With the permission, the whole chat as before. Opening the chat as an attendee does not move the unread marker.
 
+## 5b. Messages that cannot be delivered (unit 11, slice 2)
+
+- **Window closed after sending.** If WhatsApp reports the 24 h window closed after the bot sent a message (error 131047), the message goes from "Enviado" to **`DEFERRED`** (`message.status`) and the bot resends it when the customer writes again. The chat's window is treated as closed from then on, so the composer answers `409 WINDOW_CLOSED` until the customer writes.
+- **Deferred messages never linger.** A message still `DEFERRED` when the session ends (finish, forced finish, 2 h idle) or the epoch changes becomes **`FAILED`** ("No enviado"; a `message.status` event announces it) and is not retried. A deferral the bot reports after the session ended is settled the same way.
+- **A bot message that was in flight** when you claimed may appear in the session as a bot message (`author: BOT`): it is not an error, just the bot's last turn finishing.
+
 ## 6. Decisions and what is not in this slice
 
 - **Release.** `release` of a live request is `422 ACTION_NOT_ALLOWED`: a live conversation never goes back to `NEW` while the bot is muted. The way out is `finish`; a reassigner can force it. (The proposal's §4.2 sentence "release ≡ return to bot" is implemented as that.)
-- **Reassign** keeps the epoch and the session; the customer is **not** told (open question Q2 of the bot contract).
+- **Reassign** (STARTING or ACTIVE) keeps the epoch and the session and moves it to the new attendee: the previous attendee can no longer write (`403 NOT_ASSIGNEE`), the new one can. The bot tells the customer "Ahora te atiende <nombre>" (owner decision Q2, first name only). You get the usual `request.reassigned` SSE event; the session state does not change, so there is **no** `session.*` event for it.
 - **Cancel** stays `WAITING`-only (`409 CANCEL_NOT_ALLOWED` while a session runs), as before.
-- **Not built yet:** the template command and `templateCostText` in the detail; staff photos and PDFs (`type` is `TEXT` only); the "5/15 minutes unanswered" and "customer wrote" notices; the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
-- **Revert notice.** When the start reverts you get `request.released` + `session.ended` (state `WAITING`); there is no persistent notification yet.
+- **Not built yet:** the template command and `templateCostText` in the detail (the `templateLanguageCode` setting already exists, handoff 16); staff photos and PDFs (owner said yes; `type` is `TEXT` only for now); the "5/15 minutes unanswered" and "customer wrote" notices; the 24 h window of the **list row** (`whatsappWindowClosesAt`, `windowClosingSoon`) still uses the value the bot sent when it created the request. Sending uses the chat's real window.
+- **Revert notice.** When the start reverts (start timeout) you get `request.released` + `session.ended` (state `WAITING`); there is no persistent notification yet.

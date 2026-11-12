@@ -32,6 +32,13 @@ export interface IngestResult {
   accepted: Array<{ waMessageId: string; messageId: string; seq: number }>;
   /** `waMessageId`s that were already mirrored (ignored, not an error). */
   duplicates: string[];
+  /**
+   * S16 7b: the chat's handoff state as of this call (additive), so the bot
+   * learns a missed `conversation.started`/`ended` from the answer it already
+   * gets: `mode` is `HUMAN` while a live session holds the chat.
+   */
+  mode: 'BOT' | 'HUMAN';
+  handoffEpoch: number;
 }
 
 export interface StatusResult {

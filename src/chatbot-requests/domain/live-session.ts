@@ -20,8 +20,12 @@ export const isLiveSubtype = (subtype: string): boolean =>
 
 /** §4.2, §4.6, §4.7. These clocks do not pause outside business hours. */
 export const SESSION_TIMING = {
-  /** No `session-ack STARTED`: the claim reverts (§12.15). */
-  startTimeoutMs: 60_000,
+  /**
+   * No `session-ack STARTED`: the claim reverts (§12.15). This is the DEFAULT
+   * (S16 1a: 120 s); the tenant's `startTimeoutSeconds` (30..600) is snapshotted
+   * on the session at the claim as `startDeadlineAt`.
+   */
+  startTimeoutMs: 120_000,
   /** No `session-ack ENDED`: the backend marks it ENDED itself (§4.2). */
   endingTimeoutMs: 10 * 60_000,
   /** The customer silent this long: the session ends by itself (§4.6). */
@@ -38,9 +42,18 @@ export interface SessionRecord {
   epoch: number;
   state: SessionState;
   startedAt: Date;
+  /** The claim's snapshot of `startedAt + startTimeoutSeconds`; `null`/absent: the default. */
+  startDeadlineAt?: Date | null;
   activeAt: Date | null;
   endingAt: Date | null;
 }
+
+/** When a STARTING session reverts: its snapshot, else the default timeout. */
+export const startDeadline = (
+  session: Pick<SessionRecord, 'startedAt' | 'startDeadlineAt'>,
+): Date =>
+  session.startDeadlineAt ??
+  new Date(session.startedAt.getTime() + SESSION_TIMING.startTimeoutMs);
 
 /**
  * The first word of the display name, or `null` when there is no usable name
@@ -92,14 +105,17 @@ export type DueAction = 'REVERT_START' | 'MARK_ENDED' | 'IDLE_END';
  * later of the session's activation and the customer's last message.
  */
 export function dueSessionAction(
-  session: Pick<SessionRecord, 'state' | 'startedAt' | 'activeAt' | 'endingAt'>,
+  session: Pick<
+    SessionRecord,
+    'state' | 'startedAt' | 'startDeadlineAt' | 'activeAt' | 'endingAt'
+  >,
   now: Date,
   lastCustomerMessageAt: Date | null,
 ): DueAction | null {
   const elapsed = (from: Date) => now.getTime() - from.getTime();
   switch (session.state) {
     case 'STARTING':
-      return elapsed(session.startedAt) >= SESSION_TIMING.startTimeoutMs
+      return now.getTime() >= startDeadline(session).getTime()
         ? 'REVERT_START'
         : null;
     case 'ENDING':

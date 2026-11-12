@@ -15,10 +15,12 @@ import { emitRealtimeEvents } from '../../shared/realtime/realtime-event-writes'
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import {
   buildConversationEndedPayload,
+  buildConversationReassignedPayload,
   buildConversationStartedPayload,
   FEED_TYPE,
 } from '../domain/chatbot-feed';
 import {
+  SESSION_TIMING,
   staffFirstName,
   whatsappWindowClosesAt,
   type SessionEndReason,
@@ -83,6 +85,7 @@ export interface ConversationRow {
   handoffEpoch: number;
   nextSeq: number;
   lastCustomerMessageAt: Date | null;
+  windowClosedAt: Date | null;
 }
 
 /** Upserts and locks the chat row (the mirror's own statement shape). */
@@ -97,7 +100,7 @@ export async function lockConversation(
     VALUES (${randomUUID()}, ${tenantId}, ${conversationRef}, now())
     ON CONFLICT ("tenantId", "conversationRef") DO UPDATE SET "updatedAt" = now()
     RETURNING "id", "mode"::text AS "mode", "handoffEpoch", "nextSeq",
-              "lastCustomerMessageAt"`);
+              "lastCustomerMessageAt", "windowClosedAt"`);
   return row;
 }
 
@@ -134,6 +137,15 @@ export async function startLiveSession(
       claimedBy: null,
     });
   }
+  // S16 1a: the tenant's start timeout (default 120 s) is snapshotted on the
+  // session, so a later settings change never moves this deadline.
+  const [settings] = await tx.$queryRaw<{ startTimeoutSeconds: number }[]>(
+    Prisma.sql`
+    SELECT "startTimeoutSeconds" FROM "chatbot_attention_settings"
+    WHERE "tenantId" = ${tenantId}`,
+  );
+  const startTimeoutSeconds =
+    settings?.startTimeoutSeconds ?? SESSION_TIMING.startTimeoutMs / 1000;
   const epoch = conversation.handoffEpoch + 1;
   await tx.$executeRaw(Prisma.sql`
     UPDATE "chatbot_conversations"
@@ -142,9 +154,10 @@ export async function startLiveSession(
   await tx.$executeRaw(Prisma.sql`
     INSERT INTO "chatbot_live_sessions"
       ("id", "tenantId", "requestId", "conversationId", "epoch", "state",
-       "staffUserId", "startSeq", "updatedAt")
+       "staffUserId", "startSeq", "startedAt", "startDeadlineAt", "updatedAt")
     VALUES (${randomUUID()}, ${tenantId}, ${request.id}, ${conversation.id},
-            ${epoch}, 'STARTING', ${staff.userId}, ${conversation.nextSeq}, now())`);
+            ${epoch}, 'STARTING', ${staff.userId}, ${conversation.nextSeq},
+            now(), now() + make_interval(secs => ${startTimeoutSeconds}), now())`);
   await insertFeedItems(tx, tenantId, [
     {
       requestId: request.id,
@@ -157,11 +170,99 @@ export async function startLiveSession(
         whatsappWindowClosesAt: whatsappWindowClosesAt(
           conversation.lastCustomerMessageAt,
           request.requestLastCustomerMessageAt,
+          conversation.windowClosedAt,
         ),
       }),
     },
   ]);
   return { epoch };
+}
+
+/**
+ * S15 Q2 / S16 10: a STARTING or ACTIVE session handed to another attendee
+ * keeps its epoch; the session's staff user moves and the bot hears
+ * `conversation.reassigned {handoffEpoch, staffFirstName}` so it can tell the
+ * customer "Ahora te atiende <nombre>". Any other state is a no-op. Realtime:
+ * the staff already get `request.reassigned` from the audit event and the
+ * session STATE does not change, so no `session.*` event goes out.
+ */
+export async function reassignLiveSession(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  conversationRef: string,
+  toUser: { userId: string; displayName: string },
+): Promise<void> {
+  const session = await lockLatestSession(tx, tenantId, requestId);
+  if (!session || (session.state !== 'STARTING' && session.state !== 'ACTIVE'))
+    return;
+  await tx.$executeRaw(Prisma.sql`
+    UPDATE "chatbot_live_sessions"
+    SET "staffUserId" = ${toUser.userId}, "lastStaffActivityAt" = now(),
+        "updatedAt" = now()
+    WHERE "id" = ${session.id}`);
+  await insertFeedItems(tx, tenantId, [
+    {
+      requestId,
+      type: FEED_TYPE.conversationReassigned,
+      conversationRef,
+      payload: buildConversationReassignedPayload({
+        requestId,
+        handoffEpoch: session.epoch,
+        staffFirstName: staffFirstName(toUser.displayName),
+      }),
+    },
+  ]);
+}
+
+/** A staff message that became terminal FAILED (for `message.status`). */
+export interface FailedMessage {
+  messageId: string;
+  seq: number;
+}
+
+/**
+ * S16 3: the staff messages of this request still DEFERRED by a closed window
+ * (feed outcome `DEFERRED_WINDOW_CLOSED`, not acknowledged) with
+ * `handoffEpoch <= upToEpoch` become terminal: the message is `FAILED` and the
+ * feed item is acknowledged (outcome `STALE`: the CHECK allows an ack only with a terminal outcome; it leaves `pending-deliveries`; a resend is a 409
+ * `OUTCOME_ALREADY_RECORDED`). The item rows are taken `SKIP LOCKED`: a bot
+ * ACK in flight holds its item and waits for the request row this transaction
+ * holds, so waiting for it would be a cycle; if that ACK is a resend it is
+ * still valid, and if it is another deferral `failDeferredAfterSession`
+ * settles it. The caller emits `message.status` (the realtime lock is last).
+ */
+export async function failDeferredStaffMessages(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  upToEpoch: number,
+): Promise<FailedMessage[]> {
+  const due = await tx.$queryRaw<{ cursor: bigint; messageId: string }[]>(
+    Prisma.sql`
+    SELECT f."cursor", f."payload"->>'messageId' AS "messageId"
+    FROM "chatbot_feed_items" f
+    WHERE f."tenantId" = ${tenantId} AND f."requestId" = ${requestId}
+      AND f."type" = ${FEED_TYPE.staffMessage}
+      AND f."outcome" = 'DEFERRED_WINDOW_CLOSED' AND f."ackedAt" IS NULL
+      AND (f."payload"->>'handoffEpoch')::int <= ${upToEpoch}
+    ORDER BY f."cursor"
+    FOR UPDATE SKIP LOCKED`,
+  );
+  const failed: FailedMessage[] = [];
+  for (const item of due) {
+    await tx.$executeRaw(Prisma.sql`
+      UPDATE "chatbot_feed_items" SET "outcome" = 'STALE', "ackedAt" = now()
+      WHERE "tenantId" = ${tenantId} AND "cursor" = ${item.cursor}`);
+    const applied = await applyStaffMessageOutcome(tx, tenantId, {
+      messageId: item.messageId,
+      status: 'FAILED',
+      providerMessageId: null,
+      attemptedAt: null,
+    });
+    if (applied) failed.push({ messageId: item.messageId, seq: applied.seq });
+  }
+  return failed;
 }
 
 /** ACTIVE -> ENDING (finish, forced finish or idle end) and `conversation.ended`. */
@@ -171,7 +272,7 @@ export async function beginSessionEnding(
   session: Pick<LiveSessionRow, 'id' | 'requestId' | 'epoch'>,
   conversationRef: string,
   reason: Extract<SessionEndReason, 'FINISHED' | 'FORCED' | 'IDLE_TIMEOUT'>,
-): Promise<void> {
+): Promise<FailedMessage[]> {
   await tx.$executeRaw(Prisma.sql`
     UPDATE "chatbot_live_sessions"
     SET "state" = 'ENDING', "endReason" = ${reason}, "endingAt" = now(),
@@ -189,6 +290,45 @@ export async function beginSessionEnding(
       }),
     },
   ]);
+  // The window-deferred staff messages of this epoch will never be resent.
+  return failDeferredStaffMessages(
+    tx,
+    tenantId,
+    session.requestId,
+    session.epoch,
+  );
+}
+
+/**
+ * The bot reported `DEFERRED_WINDOW_CLOSED` for a staff message whose epoch is
+ * no longer an ACTIVE session: nobody will resend it, so it is terminal at
+ * once (message `FAILED`, item acknowledged). `true` when it was settled.
+ */
+export async function failDeferredAfterSession(
+  tx: TenantClient,
+  tenantId: string,
+  input: {
+    requestId: string;
+    cursor: bigint;
+    messageId: string;
+    epoch: number;
+  },
+): Promise<FailedMessage | null> {
+  const [active] = await tx.$queryRaw<{ one: number }[]>(Prisma.sql`
+    SELECT 1 AS "one" FROM "chatbot_live_sessions"
+    WHERE "tenantId" = ${tenantId} AND "requestId" = ${input.requestId}
+      AND "epoch" = ${input.epoch} AND "state" = 'ACTIVE'`);
+  if (active) return null;
+  await tx.$executeRaw(Prisma.sql`
+    UPDATE "chatbot_feed_items" SET "outcome" = 'STALE', "ackedAt" = now()
+    WHERE "tenantId" = ${tenantId} AND "cursor" = ${input.cursor}`);
+  const applied = await applyStaffMessageOutcome(tx, tenantId, {
+    messageId: input.messageId,
+    status: 'FAILED',
+    providerMessageId: null,
+    attemptedAt: null,
+  });
+  return applied ? { messageId: input.messageId, seq: applied.seq } : null;
 }
 
 /**
@@ -254,9 +394,18 @@ export function emitSessionEvent(
   requestId: string,
   type: SessionEventType,
   version: number,
+  failedMessages: FailedMessage[] = [],
 ): Promise<void> {
   return emitRealtimeEvents(tx, [
     { tenantId, userId: null, type, requestId, payload: { version } },
+    // S16 3: the attendee sees the deferred messages turn "No enviado".
+    ...failedMessages.map(({ messageId, seq }) => ({
+      tenantId,
+      userId: null,
+      type: 'message.status',
+      requestId,
+      payload: { messageId, seq, deliveryStatus: 'FAILED' },
+    })),
   ]);
 }
 
@@ -297,7 +446,13 @@ export async function applyStaffMessageOutcome(
   let status = message.deliveryStatus ?? input.status;
   if (advance[0]?.ok) {
     let wamid: string | null = null;
-    if (input.providerMessageId && message.waMessageId === null) {
+    // The wamid is stored once; the one exception is the resend of a message
+    // Meta refused for a closed window (S16 4): DEFERRED keeps the dead wamid
+    // until the resend's own replaces it.
+    if (
+      input.providerMessageId &&
+      (message.waMessageId === null || message.deliveryStatus === 'DEFERRED')
+    ) {
       const [taken] = await tx.$queryRaw<{ one: number }[]>(Prisma.sql`
         SELECT 1 AS "one" FROM "conversation_messages"
         WHERE "tenantId" = ${tenantId} AND "waMessageId" = ${input.providerMessageId}
@@ -307,19 +462,18 @@ export async function applyStaffMessageOutcome(
     await tx.$executeRaw(Prisma.sql`
       UPDATE "conversation_messages"
       SET "deliveryStatus" = ${input.status}::"ConversationDeliveryStatus",
-          "waMessageId" = COALESCE("waMessageId", ${wamid})
+          "waMessageId" = COALESCE(${wamid}, "waMessageId")
       WHERE "tenantId" = ${tenantId} AND "id" = ${input.messageId}`);
     status = input.status;
   }
   if (input.status === 'DEFERRED' && input.attemptedAt) {
-    // The window closed no later than `attemptedAt`: the newest customer
-    // message is then at most 24 h before it.
-    const cap = new Date(input.attemptedAt.getTime() - 24 * 3_600_000);
+    // The window closed no later than `attemptedAt`. Only the chat row is
+    // written (lock order), and only forward.
     await tx.$executeRaw(Prisma.sql`
       UPDATE "chatbot_conversations"
-      SET "lastCustomerMessageAt" = ${cap}, "updatedAt" = now()
+      SET "windowClosedAt" = ${input.attemptedAt}, "updatedAt" = now()
       WHERE "tenantId" = ${tenantId} AND "id" = ${message.conversationId}
-        AND "lastCustomerMessageAt" > ${cap}`);
+        AND ("windowClosedAt" IS NULL OR "windowClosedAt" < ${input.attemptedAt})`);
   }
   return { seq: message.seq, deliveryStatus: status };
 }

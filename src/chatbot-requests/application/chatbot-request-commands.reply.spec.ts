@@ -102,6 +102,10 @@ function fakeStore(initial: ChatbotRequestRow | null) {
     lockZoneOf: unused,
     lockZoneSet: unused,
     readZoneImpact: unused,
+    startLiveSession: unused,
+    reassignLiveSession: unused,
+    beginLiveSessionEnding: unused,
+    emitSessionEvent: unused,
   };
   return { store, calls, applied, answers };
 }

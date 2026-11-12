@@ -70,6 +70,8 @@ export class LiveSessionSweepStore {
       skipped: 0,
       failed: 0,
     };
+    // Sessions with a snapshot (every claim since slice 2) are due at their own
+    // `startDeadlineAt`; older rows (no snapshot) at `startedAt` + the default.
     const startCut = new Date(now.getTime() - SESSION_TIMING.startTimeoutMs);
     const endCut = new Date(now.getTime() - SESSION_TIMING.endingTimeoutMs);
     // ACTIVE sessions are idle-checked against the chat's last customer
@@ -77,7 +79,9 @@ export class LiveSessionSweepStore {
     const idleCut = new Date(now.getTime() - SESSION_TIMING.idleEndMs);
     const candidates = await this.prisma.$queryRaw<Candidate[]>(Prisma.sql`
       SELECT s."id", s."tenantId", s."requestId" FROM "chatbot_live_sessions" s
-      WHERE (s."state" = 'STARTING' AND s."startedAt" <= ${startCut})
+      WHERE (s."state" = 'STARTING' AND s."startDeadlineAt" <= ${now})
+         OR (s."state" = 'STARTING' AND s."startDeadlineAt" IS NULL
+             AND s."startedAt" <= ${startCut})
          OR (s."state" = 'ENDING' AND s."endingAt" <= ${endCut})
          OR (s."state" = 'ACTIVE' AND s."activeAt" <= ${idleCut})
       ORDER BY s."tenantId", s."id" LIMIT ${this.batchSize}`);
@@ -130,13 +134,15 @@ export class LiveSessionSweepStore {
         epoch: number;
         state: SessionState;
         startedAt: Date;
+        startDeadlineAt: Date | null;
         activeAt: Date | null;
         endingAt: Date | null;
         lastCustomerMessageAt: Date | null;
       }[]
     >(Prisma.sql`
       SELECT s."id", s."requestId", s."conversationId", s."epoch", s."state",
-             s."startedAt", s."activeAt", s."endingAt", c."lastCustomerMessageAt"
+             s."startedAt", s."startDeadlineAt", s."activeAt", s."endingAt",
+             c."lastCustomerMessageAt"
       FROM "chatbot_live_sessions" s
       JOIN "chatbot_conversations" c
         ON c."tenantId" = s."tenantId" AND c."id" = s."conversationId"
@@ -233,7 +239,7 @@ export class LiveSessionSweepStore {
         data: { note, auto: true, forced: false },
       },
     });
-    await beginSessionEnding(
+    const failed = await beginSessionEnding(
       tx,
       tenantId,
       session,
@@ -241,7 +247,14 @@ export class LiveSessionSweepStore {
       'IDLE_TIMEOUT',
     );
     await refreshCustomerGroup(tx, tenantId, request.customerKey);
-    await emitSessionEvent(tx, tenantId, requestId, 'session.ending', version);
+    await emitSessionEvent(
+      tx,
+      tenantId,
+      requestId,
+      'session.ending',
+      version,
+      failed,
+    );
     return action;
   }
 }
