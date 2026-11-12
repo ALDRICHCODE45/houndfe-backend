@@ -29,7 +29,10 @@
  *      due row go only for this marker.
  *   3. FILE ROWS of the messages just deleted whose file was already purged.
  *   4. CHATS of the messages just deleted that are now empty, idle for a day and
- *      in bot mode (a live session is never deleted from under unit 11).
+ *      in bot mode (a live session is never deleted from under unit 11). Never
+ *      the only chance: `sweepEmptyChats` (once per scheduler run) revisits every
+ *      message-less chat, so a failure after the commit, a `SKIP LOCKED` skip or
+ *      a chat not yet idle a day is cleaned up on a later run.
  *
  * The database clock is the only clock: the trigger enforces `purgeAfter <
  * now()` itself, so an application clock that ran ahead could not make a batch
@@ -55,6 +58,8 @@ export const CONVERSATION_RETENTION_LIMITS = {
   leaseMinutes: 5,
   /** An emptied chat must be idle this long before it is deleted. */
   chatIdleDays: 1,
+  /** Message-less chats deleted per sweep call (the periodic fix-forward). */
+  emptyChatBatch: 500,
   /** Media intents (S2) reconciled per batch: each may cost a network delete. */
   intentBatch: 100,
   /** Orphan sweep (S2): keys read per `ListObjects` page and pages per run. */
@@ -497,21 +502,61 @@ export class ConversationRetentionService {
     await this.deleteUnreferencedMedia([
       ...new Set(deleted.flatMap((r) => (r.mediaId ? [r.mediaId] : []))),
     ]);
-    const conversationsDeleted = await this.deleteEmptyChats([
-      ...new Set(deleted.map((r) => r.conversationId)),
-    ]);
+    const conversationsDeleted = await this.deleteEmptyChats(
+      [...new Set(deleted.map((r) => r.conversationId))],
+      deleted.length,
+    );
     this.logger.log(
       `Conversation retention: messages=${deleted.length} chats=${conversationsDeleted}`,
     );
     return { deleted: deleted.length, conversationsDeleted };
   }
 
-  private async deleteEmptyChats(ids: string[]): Promise<number> {
+  /**
+   * Fix-forward for emptied chats. Step 4 of `purgeBatch` only considers the
+   * chats of the messages THAT batch just deleted; once those rows are gone
+   * nothing returns the chat again, so a failure after the commit, a chat
+   * `SKIP LOCKED` skipped or one not yet a day idle would keep its
+   * `conversationRef` / `customerKey` (PII) past the 12-month bound forever.
+   * This sweep looks at the chats themselves: BOT-mode, idle for a day, no
+   * message, and (N3) not referenced by any request, in bounded batches of
+   * `emptyChatBatch` with `FOR UPDATE SKIP LOCKED` (replicas take disjoint
+   * rows; a locked chat is simply found on the next run). Deleting is
+   * idempotent. The scan is an anti-join over `chatbot_conversations` (one row
+   * per customer chat, no `updatedAt` index) probing `conversation_messages`
+   * (`(conversationId, seq)`) and the partial request index per candidate; the
+   * `LIMIT` stops it early when there is much to delete and the scheduler runs
+   * it once per run, not once per batch.
+   */
+  async sweepEmptyChats(
+    input: { batchSize?: number } = {},
+  ): Promise<{ deleted: number; hasMore: boolean }> {
+    const batchSize =
+      input.batchSize ?? CONVERSATION_RETENTION_LIMITS.emptyChatBatch;
+    const deleted = await this.deleteEmptyChats(null, batchSize);
+    if (deleted > 0) {
+      this.logger.log(`Conversation retention: emptied chats swept=${deleted}`);
+    }
+    return { deleted, hasMore: deleted >= batchSize };
+  }
+
+  /**
+   * `ids` limits the candidates to the chats of the messages just deleted;
+   * `null` considers every chat (the periodic sweep), `limit` bounds the batch.
+   */
+  private async deleteEmptyChats(
+    ids: string[] | null,
+    limit: number = CONVERSATION_RETENTION_LIMITS.emptyChatBatch,
+  ): Promise<number> {
+    const scope =
+      ids === null
+        ? Prisma.empty
+        : Prisma.sql`AND k."id" = ANY(${ids}::text[])`;
     return this.prisma.$executeRaw(Prisma.sql`
       DELETE FROM "chatbot_conversations" c
       WHERE c."id" IN (
         SELECT "id" FROM "chatbot_conversations" k
-        WHERE k."id" = ANY(${ids}::text[]) AND k."mode" = 'BOT'
+        WHERE k."mode" = 'BOT' ${scope}
           AND k."updatedAt" < now() - (${CONVERSATION_RETENTION_LIMITS.chatIdleDays} * interval '1 day')
           AND NOT EXISTS (
             SELECT 1 FROM "conversation_messages" m WHERE m."conversationId" = k."id")
@@ -522,6 +567,8 @@ export class ConversationRetentionService {
           AND NOT EXISTS (
             SELECT 1 FROM "chatbot_requests" r
             WHERE r."tenantId" = k."tenantId" AND r."conversationRef" = k."conversationRef")
+        ORDER BY k."updatedAt", k."id"
+        LIMIT ${limit}
         FOR UPDATE SKIP LOCKED)`);
   }
 }

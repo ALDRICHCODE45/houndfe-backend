@@ -10,12 +10,14 @@
  * by `X-Idempotency-Key` + sha256: the same key and bytes answer the same
  * media; the same key with other bytes is a 409. Two simultaneous uploads of
  * one key race on a unique index; the loser deletes its object and answers the
- * winner's row.
+ * winner's row. An insert that REJECTS (rather than answering "key taken") is
+ * ambiguous: the row may have committed, so the object is NOT deleted inline.
  *
  * Retention of the OBJECT (S2): an intent row is committed before the object is
  * written and dropped once a media row owns it or the object is deleted; the
- * retention sweep reconciles the intents a crash or a failed delete left, and
- * `media_tombstone` covers rows deleted with their object (tenant deletion).
+ * retention sweep reconciles the intents a crash, an ambiguous insert failure or
+ * a failed delete left, and `media_tombstone` covers rows deleted with their
+ * object (tenant deletion).
  *
  * Staff read (`GET /chatbot-media/:id`): an authenticated proxy, never a signed
  * or public URL (§12.5): the permission is checked on EVERY request by the
@@ -127,10 +129,10 @@ export class ConversationMediaService {
     const id = randomUUID();
     const storageKey = `conversation-media/${this.store.tenantId()}/${id}.${detected.extension}`;
     // S2 (PII retention): the intent is durable BEFORE the object exists. Every
-    // path below ends with the object owned by a media row, or deleted, and the
-    // intent dropped; a crash anywhere in between leaves the intent, which the
-    // retention sweep reconciles (row exists -> drop it; no row -> delete the
-    // object, then the intent).
+    // CERTAIN path below ends with the object owned by a media row, or deleted,
+    // and the intent dropped; a crash or an ambiguous insert failure leaves the
+    // intent, which the retention sweep reconciles (row exists -> drop it; no
+    // row -> delete the object, then the intent).
     await this.store.recordIntent({ id, storageKey });
     try {
       await this.storage.putPrivate({
@@ -166,7 +168,16 @@ export class ConversationMediaService {
         idempotencyKey: key,
       });
     } catch (error) {
-      await this.discard(id, storageKey);
+      // AMBIGUOUS: a connection reset after the autocommitted INSERT leaves the
+      // row committed while the call rejects. Deleting the object here could
+      // destroy a row's only copy (the bot's retry would replay it into a
+      // permanent 404). Nothing proves the row will not exist, so the object and
+      // its intent are left to the retention sweep, which deletes the object
+      // only when no row exists for the id (`mediaRowExists`) once the intent is
+      // due.
+      this.logger.warn(
+        `Conversation media ${id} insert failed, object left for the retention sweep (${errorClass(error)})`,
+      );
       throw error;
     }
     if (inserted) {

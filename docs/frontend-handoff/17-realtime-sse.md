@@ -107,7 +107,7 @@ data: {"ids":["…"],"all":false,"unreadCount":2}
 
 ### 3.3 Conversation events (unit 9)
 
-Only to users with `read:ChatbotConversation`; everyone else on the stream does not receive them. Full semantics (replace by `seq`, one event per open request of the chat, the message is the state at delivery) in `18-conversation.md` section 4.
+Only to users with `read:ChatbotConversation` **and** `read:ChatbotRequest` (the same pair the REST page and the media proxy need); everyone else on the stream does not receive them. Full semantics (replace by `seq`, one event per open request of the chat, the message is the state at delivery) in `18-conversation.md` section 4.
 
 ```text
 event: conversation.message

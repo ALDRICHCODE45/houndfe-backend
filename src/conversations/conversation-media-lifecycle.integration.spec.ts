@@ -287,18 +287,19 @@ describeIfDb('conversation media lifecycle (PostgreSQL, fake storage)', () => {
   // ------------------------------------------- S2 (b) swallowed deletes
 
   describe('S2 (b): a failed delete after an insert failure or a lost race', () => {
-    it('keeps the intent when the cleanup delete fails, and a later sweep purges the object', async () => {
+    it('an insert that rejects deletes nothing inline: the object and intent wait for the sweep, which purges the object (no row) and retries a failed delete', async () => {
       const b = await bot();
       jest
         .spyOn(PrismaConversationMediaStore.prototype, 'insert')
         .mockRejectedValueOnce(new Error('db down'));
-      storage.failRemoveAll = true;
       await upload(b).expect(500);
-      // Before: the delete error was swallowed and nothing remembered the object.
+      // Ambiguous failure: no inline delete, whatever the storage state.
+      expect(storage.removed).toEqual([]);
       const [left] = await intents(b.tenantId);
       expect(storage.objects.has(left.storageKey)).toBe(true);
       expect(await mediaRows(b.tenantId)).toEqual([]);
 
+      storage.failRemoveAll = true;
       await makeDue(b.tenantId);
       const stillDown = await sweep();
       expect(stillDown.intentsFailed).toBeGreaterThanOrEqual(1);
@@ -315,14 +316,37 @@ describeIfDb('conversation media lifecycle (PostgreSQL, fake storage)', () => {
       expect(await intents(b.tenantId)).toEqual([]);
     });
 
-    it('drops the intent at once when the cleanup delete works (nothing left to sweep)', async () => {
+    it('an insert that COMMITS and then rejects keeps its object: the retry replays a readable row and the sweep only drops the intent', async () => {
       const b = await bot();
+      const key = randomUUID();
+      // Called back with the right `this` below, through `.call`.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const real = PrismaConversationMediaStore.prototype.insert;
       jest
         .spyOn(PrismaConversationMediaStore.prototype, 'insert')
-        .mockRejectedValueOnce(new Error('db down'));
-      await upload(b).expect(500);
+        .mockImplementationOnce(async function (
+          this: PrismaConversationMediaStore,
+          row,
+        ) {
+          await real.call(this, row); // autocommitted
+          throw new Error('connection reset');
+        });
+      await upload(b, key).expect(500);
+      const [row] = await mediaRows(b.tenantId);
+      expect(row).toBeDefined();
+      expect(storage.objects.has(row.storageKey as string)).toBe(true);
+      expect(storage.removed).toEqual([]);
+
+      // The bot retries with the same key: it gets the row, whose file exists.
+      const replay = await upload(b, key).expect(200);
+      expect((replay.body as { mediaId: string }).mediaId).toBe(row.id);
+      expect(storage.objects.has(row.storageKey as string)).toBe(true);
+
+      // The sweep sees a row for the id: the object stays, the intent goes.
+      await makeDue(b.tenantId);
+      await sweep();
+      expect(storage.objects.has(row.storageKey as string)).toBe(true);
       expect(await intents(b.tenantId)).toEqual([]);
-      expect(storage.objects.size).toBe(0);
     });
 
     it('a lost race whose delete fails leaves an intent for the loser only', async () => {

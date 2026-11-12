@@ -401,6 +401,163 @@ describeIfDb('conversation retention (PostgreSQL)', () => {
     ).map((c) => c.id);
     expect(ids.sort()).toEqual([stays.id, human.id, recent.id].sort());
   });
+
+  // ------------------------------- fix-forward sweep of message-less chats
+
+  describe('sweepEmptyChats: an emptied chat is never stranded', () => {
+    const idle = (ids: string[], days = 3) =>
+      prisma.$executeRaw`UPDATE "chatbot_conversations"
+        SET "updatedAt" = now() - (${days} * interval '1 day')
+        WHERE "id" = ANY(${ids}::text[])`;
+    const exists = async (id: string) =>
+      (await prisma.chatbotConversation.count({ where: { id } })) === 1;
+
+    async function requestFor(tenantId: string, ref: string) {
+      await prisma.chatbotRequest.create({
+        data: {
+          tenantId,
+          folio: Math.floor(Math.random() * 1e6),
+          kind: 'CLARIFICATION',
+          subtype: 'UNKNOWN_QUESTION',
+          customerKey: ref.slice(3),
+          conversationRef: ref,
+          summary: 'Pregunta',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+          status: 'CANCELLED',
+          cancelReason: 'CUSTOMER_WITHDREW',
+          cancelledAt: new Date(),
+          closedAt: new Date(),
+        } as never,
+      });
+    }
+
+    it('revisits a chat whose inline cleanup threw AFTER the message delete committed', async () => {
+      const t = await tenant();
+      const stranded = await chat(t);
+      await messages(t, stranded.id, 2);
+      await idle([stranded.id]);
+      jest
+        .spyOn(
+          service as unknown as { deleteEmptyChats: () => Promise<number> },
+          'deleteEmptyChats',
+        )
+        .mockRejectedValueOnce(new Error('db blip after commit'));
+      await expect(service.purgeBatch({ batchSize: 1000 })).rejects.toThrow(
+        'db blip',
+      );
+      jest.restoreAllMocks();
+      // Committed: the messages are gone and the chat survived the failure.
+      expect(await count(t)).toBe(0);
+      expect(await exists(stranded.id)).toBe(true);
+      // The next purge batch (no message left to return the chat) cannot see
+      // it; the sweep does.
+      await service.purgeBatch({ batchSize: 1000 });
+      expect(await exists(stranded.id)).toBe(true);
+      const swept = await service.sweepEmptyChats();
+      expect(swept.deleted).toBeGreaterThanOrEqual(1);
+      expect(await exists(stranded.id)).toBe(false);
+    });
+
+    it('revisits a chat that SKIP LOCKED skipped, once the lock is gone', async () => {
+      const t = await tenant();
+      const locked = await chat(t);
+      await idle([locked.id]);
+      let release!: () => void;
+      let ready!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const taken = new Promise<void>((r) => (ready = r));
+      const holder = prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "chatbot_conversations" WHERE "id" = ${locked.id} FOR UPDATE`;
+        ready();
+        await held;
+      });
+      await taken;
+      await service.sweepEmptyChats();
+      expect(await exists(locked.id)).toBe(true);
+      release();
+      await holder;
+      await service.sweepEmptyChats();
+      expect(await exists(locked.id)).toBe(false);
+    });
+
+    it('revisits a chat that was not yet a day idle when its messages went', async () => {
+      const t = await tenant();
+      const young = await chat(t);
+      await messages(t, young.id, 1);
+      await idle([young.id], 0); // updatedAt = now(): idle for no time
+      await service.purgeBatch({ batchSize: 1000 });
+      expect(await count(t)).toBe(0);
+      expect(await exists(young.id)).toBe(true);
+      await service.sweepEmptyChats();
+      expect(await exists(young.id)).toBe(true); // still not idle a day
+      await idle([young.id], 2);
+      await service.sweepEmptyChats();
+      expect(await exists(young.id)).toBe(false);
+    });
+
+    it('keeps what must stay: messages, human mode, a request pointing at it (N3)', async () => {
+      const t = await tenant();
+      const withMessage = await chat(t);
+      const human = await chat(t, { mode: 'HUMAN' });
+      const referenced = await chat(t);
+      await freshMessages(t, withMessage.id, 1, 1);
+      await requestFor(t, referenced.conversationRef);
+      await idle([withMessage.id, human.id, referenced.id]);
+      await service.sweepEmptyChats();
+      expect(await exists(withMessage.id)).toBe(true);
+      expect(await exists(human.id)).toBe(true);
+      expect(await exists(referenced.id)).toBe(true);
+      // The reference is per tenant: the same ref in another tenant does not
+      // protect this tenant's chat.
+      const other = await tenant();
+      const twin = await chat(other, {
+        conversationRef: referenced.conversationRef,
+      });
+      await idle([twin.id]);
+      await service.sweepEmptyChats();
+      expect(await exists(twin.id)).toBe(false);
+      expect(await exists(referenced.id)).toBe(true);
+    });
+
+    it('is bounded: one call deletes at most one batch and says there is more', async () => {
+      const t = await tenant();
+      const chats = [await chat(t), await chat(t), await chat(t)];
+      await idle(chats.map((c) => c.id));
+      // Other specs may leave their own idle chats: look at ours only.
+      let calls = 0;
+      let first: { deleted: number; hasMore: boolean } | null = null;
+      while (
+        (await prisma.chatbotConversation.count({ where: { tenantId: t } })) > 0
+      ) {
+        const r = await service.sweepEmptyChats({ batchSize: 1 });
+        first ??= r;
+        expect(r.deleted).toBeLessThanOrEqual(1);
+        calls += 1;
+        if (calls > 5000) throw new Error('sweep does not drain');
+      }
+      expect(first).toEqual({ deleted: 1, hasMore: true });
+    }, 60_000);
+
+    it('two sweeps at once delete each chat once, with no error', async () => {
+      const t = await tenant();
+      const chats = [
+        await chat(t),
+        await chat(t),
+        await chat(t),
+        await chat(t),
+      ];
+      await idle(chats.map((c) => c.id));
+      const results = await Promise.all([
+        service.sweepEmptyChats(),
+        service.sweepEmptyChats(),
+      ]);
+      expect(results.every((r) => r.deleted >= 0)).toBe(true);
+      expect(
+        await prisma.chatbotConversation.count({ where: { tenantId: t } }),
+      ).toBe(0);
+    });
+  });
 });
 
 // The shared client keeps a pool open for the whole run unless it is closed:

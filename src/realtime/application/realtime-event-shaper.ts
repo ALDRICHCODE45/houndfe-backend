@@ -13,9 +13,10 @@
  *   conversation.message  {requestId, message}                (unit 9)
  *   message.status        {requestId, messageId, seq, deliveryStatus}
  *
- * Conversation events go only to readers with `read:ChatbotConversation` (the
- * attendee-without-it exception of §2.5 is the live session of unit 11, which
- * does not exist yet). The log holds ids; the message is read at delivery.
+ * Conversation events go only to readers with `read:ChatbotConversation` AND
+ * `read:ChatbotRequest` (the same pair the REST read and the media proxy need;
+ * the attendee-without-it exception of §2.5 is the live session of unit 11,
+ * which does not exist yet). The log holds ids; the message is read at delivery.
  *
  * The rows are the CURRENT state at delivery time (not a snapshot taken when
  * the event was logged), so a request that changed twice sends its latest
@@ -175,7 +176,14 @@ export class RealtimeEventShaper implements HubShaper {
     event: RealtimeEventRow,
     ability: PermissionCheck,
   ): SseFrame | null {
-    if (!ability.can('read', 'ChatbotConversation')) return null;
+    // The same two permissions the REST routes need (route guard and media
+    // proxy): a role with the conversation but not the request sees neither.
+    if (
+      !ability.can('read', 'ChatbotConversation') ||
+      !ability.can('read', 'ChatbotRequest')
+    ) {
+      return null;
+    }
     const id = event.payload.messageId;
     if (!event.requestId || typeof id !== 'string') return null;
     const message = batch.messages.get(id);

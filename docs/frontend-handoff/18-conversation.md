@@ -93,7 +93,7 @@ Errors use the usual `{statusCode, code, message}` envelope.
 
 ## 4. Realtime: `conversation.message` and `message.status`
 
-On the stream of handoff 17 (`GET /realtime/stream`, same connection, same `Last-Event-ID` replay). Both carry an `id:` (they move the cursor) and go **only to users with `read:ChatbotConversation`** (everyone else on the stream simply does not receive them).
+On the stream of handoff 17 (`GET /realtime/stream`, same connection, same `Last-Event-ID` replay). Both carry an `id:` (they move the cursor) and go **only to users with `read:ChatbotConversation` and `read:ChatbotRequest`** (the same pair as the REST page and the media proxy; everyone else on the stream simply does not receive them).
 
 ```text
 event: conversation.message

@@ -401,6 +401,24 @@ describe('RealtimeEventShaper', () => {
       }
     });
 
+    it('a role with read:ChatbotConversation but WITHOUT read:ChatbotRequest gets neither event (REST needs both)', async () => {
+      const { shaper } = setup();
+      const events = [message(), status()];
+      const prepared = await shaper.prepare('t1', events, EVERYONE);
+      const conversationOnly = {
+        userId: 'rosa',
+        ability: {
+          can: (action: string, subject: string) =>
+            subject !== 'ChatbotRequest',
+        },
+      };
+      for (const e of events) {
+        expect(shaper.shape(prepared, e, conversationOnly)).toBeNull();
+        // Control: with both subjects the same events are delivered.
+        expect(shaper.shape(prepared, e, withConversation)).not.toBeNull();
+      }
+    });
+
     it('a purged message or an event with no request produces no frame', async () => {
       const { shaper } = setup();
       const gone = message({ payload: { messageId: 'purged', seq: 1 } });

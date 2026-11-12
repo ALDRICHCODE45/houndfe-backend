@@ -118,6 +118,60 @@ describe('ConversationRetentionScheduler.purge', () => {
     });
   });
 
+  it('sweeps message-less chats once per run (not once per batch) and counts them', async () => {
+    const sweepEmptyChats = jest.fn(() =>
+      Promise.resolve({ deleted: 4, hasMore: false }),
+    );
+    const port: ConversationRetentionPort = {
+      purgeBatch: () => Promise.resolve(result(true)),
+      sweepEmptyChats,
+    };
+    const scheduler = new ConversationRetentionScheduler(port, {
+      maxBatchesPerTick: 3,
+    });
+    const run = await scheduler.purge();
+    expect(run.batches).toBe(3);
+    expect(sweepEmptyChats).toHaveBeenCalledTimes(1);
+    expect(run.conversationsDeleted).toBe(4);
+  });
+
+  it('the empty-chat sweep is bounded per run and says there is more when it hits the cap', async () => {
+    const sweepEmptyChats = jest.fn(() =>
+      Promise.resolve({ deleted: 500, hasMore: true }),
+    );
+    const port: ConversationRetentionPort = {
+      purgeBatch: () => Promise.resolve(result(false)),
+      sweepEmptyChats,
+    };
+    const run = await new ConversationRetentionScheduler(port).purge();
+    expect(sweepEmptyChats.mock.calls.length).toBeGreaterThan(1);
+    expect(sweepEmptyChats.mock.calls.length).toBeLessThanOrEqual(10);
+    expect(run.hasMore).toBe(true);
+    expect(run.conversationsDeleted).toBe(
+      500 * sweepEmptyChats.mock.calls.length,
+    );
+  });
+
+  it('a failing empty-chat sweep never fails the run and the bucket sweep still runs', async () => {
+    const sweepOrphans = jest.fn(() =>
+      Promise.resolve({
+        scanned: 0,
+        deleted: 1,
+        failed: 0,
+        skipped: 0,
+        passCompleted: true,
+      }),
+    );
+    const port: ConversationRetentionPort = {
+      purgeBatch: () => Promise.resolve(result(false)),
+      sweepEmptyChats: () => Promise.reject(new Error('db blip')),
+      sweepOrphans,
+    };
+    await expect(
+      new ConversationRetentionScheduler(port).purge(),
+    ).resolves.toMatchObject({ batches: 1, orphansDeleted: 1 });
+  });
+
   it('rejects a batch cap or interval that is not valid', () => {
     const port: ConversationRetentionPort = {
       purgeBatch: () => Promise.resolve(result(false)),

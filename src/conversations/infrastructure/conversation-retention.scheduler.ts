@@ -42,6 +42,10 @@ export interface ConversationRetentionPort {
   }): Promise<ConversationRetentionResult>;
   /** S2: the bucket sweep, once per run (optional: specs may not need it). */
   sweepOrphans?(): Promise<OrphanSweepResult>;
+  /** Fix-forward: message-less chats the per-batch cleanup never revisits. */
+  sweepEmptyChats?(input?: {
+    batchSize?: number;
+  }): Promise<{ deleted: number; hasMore: boolean }>;
 }
 
 /** Engineering-only overrides (no product semantics); all optional. */
@@ -73,6 +77,8 @@ export interface ConversationRetentionRun {
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_MAX_BATCHES = 20;
+/** Empty-chat sweep batches per run (500 chats each). */
+const MAX_EMPTY_CHAT_BATCHES = 4;
 /** The tick only checks the clock; the real cadence is `intervalMs`. */
 const DECORATOR_TICK_MS = 60 * 1000;
 
@@ -123,6 +129,7 @@ export class ConversationRetentionScheduler {
       this.catchingUp = run.hasMore;
       if (
         run.messagesDeleted > 0 ||
+        run.conversationsDeleted > 0 ||
         run.mediaPurged > 0 ||
         run.mediaFailed > 0
       ) {
@@ -175,8 +182,31 @@ export class ConversationRetentionScheduler {
       }
     }
     run.hasMore = !drained;
+    await this.sweepEmptyChats(run);
     await this.sweepOrphans(run);
     return run;
+  }
+
+  /**
+   * Message-less chats the batch cleanup missed (failure after the commit, a
+   * skipped lock, not yet idle): at most `maxEmptyChatBatches` batches per run,
+   * and a failure never fails the run (class only logged, retried next run).
+   */
+  private async sweepEmptyChats(run: ConversationRetentionRun): Promise<void> {
+    if (!this.retention.sweepEmptyChats) return;
+    try {
+      for (let i = 0; i < MAX_EMPTY_CHAT_BATCHES; i += 1) {
+        const swept = await this.retention.sweepEmptyChats();
+        run.conversationsDeleted += swept.deleted;
+        if (!swept.hasMore) return;
+      }
+      // Cap reached with chats left: drain them on the next tick.
+      run.hasMore = true;
+    } catch (error) {
+      this.logger.error('conversation empty-chat sweep failed', {
+        error: error instanceof Error ? error.name : 'unknown',
+      });
+    }
   }
 
   /**
