@@ -64,9 +64,11 @@ A grant counts when a role has the action or `manage`, on the subject or `all` (
 
 Every outbox type of this module starts with `chatbot_request.` (`RESERVED_OUTBOX_PREFIX` in `src/shared/outbox/outbox.types.ts`). The generic `OutboxPollerService` excludes it with `AND NOT starts_with("eventType", 'chatbot_request.')`, in the same change that registers `ChatbotRequestNoticeOutboxModule`. A new dedicated type under the prefix needs no edit to the generic poller. Tests: the claim SQL, every type in `NOTICE_OUTBOX_EVENT_TYPES` starts with the prefix, and a PostgreSQL spec shows the generic poller leaves both types `PENDING` and unlocked while a normal type is claimed.
 
-### Realtime hook
+### Realtime hook (unit 8)
 
-`NOTIFICATION_EVENTS` (`notification-events.port.ts`) is a no-op until unit 8. `publishCreated(tx, event)` receives the consumer's transaction on purpose: unit 8 can insert its durable `RealtimeEvent` row and `NOTIFY` in the same commit, so a crash cannot lose the event. `notification.read` events are also unit 8.
+`NOTIFICATION_EVENTS` (`notification-events.port.ts`) is implemented by `RealtimeNotificationEvents` (`infrastructure/realtime-notification-events.ts`), bound in `ChatbotRequestNoticeOutboxModule`. `publishCreated(tx, event)` receives the consumer's transaction and writes the durable `realtime_events` row (`notification.created`, `userId` = the recipient, payload `{notificationId}`) plus the `NOTIFY`, in the same commit as the notification: a crash cannot lose the event, a rolled-back row sends none, and a duplicate notice (the `dedupKey` skip) creates no row and so no event. The noop adapter remains for specs.
+
+`notification.read` is written by `NotificationsService.markRead` / `markAllRead` through `NOTIFICATION_READ_EVENTS` (`NotificationsModule`): the update and the event are one transaction (the service opens it only when the writer is wired), only when something changed (a repeat read, a foreign id or an empty read-all writes nothing), always addressed to the caller. The stream builds the payloads at delivery time for that person only: `notification.created {notification, unreadCount}` (the `NotificationsService.eventView` shape, same as the list) and `notification.read {ids, all, unreadCount}`. Spec: `src/notifications/notification-realtime.integration.spec.ts`. FE: `docs/frontend-handoff/17-realtime-sse.md`.
 
 ## Migration and locks
 
@@ -118,6 +120,7 @@ The claim-cycle start is derived twice, on purpose: the sweep in JS (`computeClo
 
 ## Known limits
 
+- Notifications reach the open tabs through the realtime stream (unit 8); `unreadCount` in the events is read at delivery, and the 90-day retention announces nothing (clients refetch `unread-count` on connect and `resync`).
 - Retention (90 days, §5.2) is scheduled (unit 7b): hourly, batch 1000, at most 20 batches per tick, `FOR UPDATE SKIP LOCKED`, served by the `notifications_createdAt_idx` index. The chatbot feed keeps 30 days; notifications keep 90.
 - `FAILED` rows are only visible in `outbox_events`; the "failed notices" screen is later.
 - The email shows no age or time remaining (the deadlines now exist, but the template does not render them yet).

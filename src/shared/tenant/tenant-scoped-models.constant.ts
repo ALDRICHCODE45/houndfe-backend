@@ -162,4 +162,6 @@ export const TENANT_SCOPED_MODELS = new Set([
   // through TenantPrismaService.
   'ChatbotAttentionSettings',
   'ChatbotAttentionSettingsEvent',
+  'RealtimeEvent',
+  'RealtimeEventRetention',
 ]);

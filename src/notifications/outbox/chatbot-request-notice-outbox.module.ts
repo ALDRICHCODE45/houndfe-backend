@@ -10,10 +10,8 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { InngestModule } from '../../inngest/inngest.module';
 import { DatabaseModule } from '../../shared/prisma/prisma.module';
-import {
-  NOTIFICATION_EVENTS,
-  noopNotificationEvents,
-} from '../domain/notification-events.port';
+import { NOTIFICATION_EVENTS } from '../domain/notification-events.port';
+import { RealtimeNotificationEvents } from '../infrastructure/realtime-notification-events';
 import { NOTICE_EMAIL_LOADER } from '../inngest/chatbot-request-email.functions';
 import { PrismaNoticeEmailLoader } from '../infrastructure/prisma-notice-email.loader';
 import {
@@ -41,8 +39,10 @@ import {
     ChatbotRequestEmailDispatcher,
     PrismaNoticeEmailLoader,
     { provide: NOTICE_EMAIL_LOADER, useExisting: PrismaNoticeEmailLoader },
-    // Unit 8 replaces this with the publisher that writes the RealtimeEvent.
-    { provide: NOTIFICATION_EVENTS, useValue: noopNotificationEvents },
+    // Unit 8: `notification.created` is written to the realtime log in the
+    // consumer's own transaction.
+    RealtimeNotificationEvents,
+    { provide: NOTIFICATION_EVENTS, useExisting: RealtimeNotificationEvents },
     { provide: NOTICE_CLOCK, useValue: () => new Date() },
     {
       provide: NOTICE_NOTIFY_BATCH_SIZE,

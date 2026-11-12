@@ -275,6 +275,12 @@ export interface ChatbotRequestReadStore {
     limit: number,
   ): Promise<AuditRecord[] | null>;
   customers(ids: string[]): Promise<CustomerRecord[]>;
+  /**
+   * Unit 8 (realtime): the rows of several requests of the tenant by id, in
+   * one query, with the same columns as every list row. Optional so a store
+   * (or a test fake) that never serves the stream keeps compiling.
+   */
+  byIds?(ids: string[]): Promise<RequestRecord[]>;
   /** Active members holding read + update:ChatbotRequest, by name. */
   assignableUsers(): Promise<
     Array<{ id: string; name: string; email: string }>
@@ -290,6 +296,22 @@ export interface StaffReader {
 export const DEFAULT_PAGE = 25;
 export const MAX_PAGE = 50;
 export const AUDIT_IN_DETAIL = 20;
+
+/**
+ * Unit 8: what one batch of realtime request events needs, loaded once for
+ * every recipient of the batch (rows, customers and the tenant's SLA policy).
+ */
+export interface EventRowsBatch {
+  /**
+   * The tenant the batch was loaded for. Shaping runs OUTSIDE the tenant's CLS
+   * scope (once per recipient, after the load), so the key sealer must not ask
+   * the ambient scope which tenant it is.
+   */
+  tenantId: string;
+  rows: Map<string, RequestRecord>;
+  customers: Map<string, CustomerRecord>;
+  view: SlaView;
+}
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
 const customerName = (c: Pick<CustomerRecord, 'firstName' | 'lastName'>) =>
@@ -687,6 +709,79 @@ export class ChatbotRequestReadsService {
     return { items: records.map((r) => this.toRow(r, view, reader)) };
   }
 
+  // ------------------------------------------------------- realtime (unit 8)
+
+  /**
+   * Loads, ONCE for every recipient, what the rows of a batch of request
+   * events need: the requests, their customers and the SLA policy. Runs in the
+   * CLS scope of the tenant (the hub opens it), like every other read.
+   */
+  async loadEventRows(requestIds: string[]): Promise<EventRowsBatch> {
+    const ids = [...new Set(requestIds)];
+    const tenantId = this.store.tenantId();
+    if (ids.length === 0) {
+      return { tenantId, rows: new Map(), customers: new Map(), view: NO_VIEW };
+    }
+    if (!this.store.byIds) {
+      throw new Error('the read store cannot serve realtime rows');
+    }
+    const records = await this.store.byIds(ids);
+    const [customers, view] = await Promise.all([
+      this.customerIndex(records),
+      this.slaView(this.clock(), records.length === 0),
+    ]);
+    // The level of a row does not depend on who reads it: compute it once per
+    // batch instead of once per recipient (it walks the business calendar).
+    const levels = new Map<string, SlaLevel | null>();
+    const shared: SlaView = {
+      pause: view.pause,
+      levelOf: (row) => {
+        if (!levels.has(row.id)) levels.set(row.id, view.levelOf(row));
+        return levels.get(row.id) ?? null;
+      },
+    };
+    return {
+      tenantId,
+      rows: new Map(records.map((r) => [r.id, r])),
+      customers,
+      view: shared,
+    };
+  }
+
+  /**
+   * One recipient's copy of a request event (§12.8): the same row as the
+   * inbox (built with the recipient's ability, so `allowedActions` and
+   * `deniedActions` are theirs), the customer with the phone through
+   * `toStaffPhone`, and `previousCustomerKey` sealed like `customerKey`. A
+   * recipient who cannot read requests, or a request that no longer exists,
+   * gets `null`: a row is never sent to someone who could not fetch it.
+   */
+  shapeEventRow(
+    batch: EventRowsBatch,
+    requestId: string,
+    reader: StaffReader,
+    previousCustomerKey: string | null = null,
+  ) {
+    if (!reader.ability.can('read', 'ChatbotRequest')) return null;
+    const record = batch.rows.get(requestId);
+    if (!record) return null;
+    const customer = record.customerId
+      ? (batch.customers.get(record.customerId) ?? null)
+      : null;
+    return {
+      request: this.toRow(record, batch.view, reader, batch.tenantId),
+      customer: {
+        id: customer ? customer.id : null,
+        displayName: customer ? customerName(customer) : null,
+        phone: toStaffPhone(this.phoneOf(record, customer), reader.ability),
+        isTrusted: customer?.isTrusted ?? false,
+      },
+      previousCustomerKey: previousCustomerKey
+        ? this.sealKey(previousCustomerKey, batch.tenantId)
+        : null,
+    };
+  }
+
   // ------------------------------------------------------------- shaping
 
   /**
@@ -696,7 +791,12 @@ export class ChatbotRequestReadsService {
    * LINK_CUSTOMER (they need facts only the detail loads) and an action can
    * still fail at command time if the request changed meanwhile.
    */
-  private toRow(r: RequestRecord, view: SlaView, reader?: StaffReader) {
+  private toRow(
+    r: RequestRecord,
+    view: SlaView,
+    reader?: StaffReader,
+    tenantId?: string,
+  ) {
     const { pause } = view;
     const state = toState(r);
     const open = r.status === 'NEW' || r.status === 'IN_PROGRESS';
@@ -718,7 +818,7 @@ export class ChatbotRequestReadsService {
     return {
       id: r.id,
       folio: formatFolio(r.folio),
-      customerKey: this.sealKey(r.customerKey),
+      customerKey: this.sealKey(r.customerKey, tenantId),
       kind: r.kind,
       subtype: r.subtype,
       status: r.status,
@@ -803,8 +903,8 @@ export class ChatbotRequestReadsService {
     return new Map(found.map((c) => [c.id, c]));
   }
 
-  private sealKey(key: string) {
-    return this.sealer.seal(this.store.tenantId(), key);
+  private sealKey(key: string, tenantId?: string) {
+    return this.sealer.seal(tenantId ?? this.store.tenantId(), key);
   }
 
   /** A sealed `customerKey` from the client; anything else is a 400. */

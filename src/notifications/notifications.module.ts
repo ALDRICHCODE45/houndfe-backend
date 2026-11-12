@@ -9,6 +9,8 @@ import { AuthModule } from '../auth/auth.module';
 import { ActiveUserGuard } from '../auth/guards/active-user.guard';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { NotificationsService } from './application/notifications.service';
+import { NOTIFICATION_READ_EVENTS } from './domain/notification-events.port';
+import { RealtimeNotificationEvents } from './infrastructure/realtime-notification-events';
 import { NotificationRetentionScheduler } from './infrastructure/notification-retention.scheduler';
 import { PrismaNotificationRetentionStore } from './infrastructure/prisma-notification-retention.store';
 import { NotificationPreferencesController } from './presentation/notification-preferences.controller';
@@ -20,10 +22,18 @@ import { NotificationsController } from './presentation/notifications.controller
   providers: [
     ActiveUserGuard,
     NotificationsService,
+    // Unit 8: read / read-all announce `notification.read` in their transaction.
+    RealtimeNotificationEvents,
+    {
+      provide: NOTIFICATION_READ_EVENTS,
+      useExisting: RealtimeNotificationEvents,
+    },
     // §5.2: 90-day retention, bounded batches, SKIP LOCKED (unit 7b). The
     // `@Interval` is discovered through AppModule's ScheduleModule.forRoot().
     PrismaNotificationRetentionStore,
     NotificationRetentionScheduler,
   ],
+  // The realtime stream (unit 8) builds `notification.created` payloads.
+  exports: [NotificationsService],
 })
 export class NotificationsModule {}

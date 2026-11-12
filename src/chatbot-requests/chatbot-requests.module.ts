@@ -143,5 +143,8 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
       useClass: PrismaChatbotRequestCommandStore,
     },
   ],
+  // The realtime stream (unit 8) builds each recipient's row with the same
+  // service that builds the inbox rows.
+  exports: [ChatbotRequestReadsService],
 })
 export class ChatbotRequestsModule {}

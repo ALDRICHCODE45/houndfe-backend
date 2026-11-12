@@ -540,6 +540,14 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
     );
   }
 
+  /** Unit 8: the rows of the realtime events, one query, tenant-bound. */
+  byIds(ids: string[]): Promise<RequestRecord[]> {
+    if (ids.length === 0) return Promise.resolve([]);
+    return this.db.$queryRaw<RequestRecord[]>(Prisma.sql`
+      SELECT ${COLUMNS} FROM "chatbot_requests" r
+      WHERE r."tenantId" = ${this.tenantId()} AND r."id" IN (${Prisma.join(ids)})`);
+  }
+
   async mergeCandidates(id: string): Promise<RequestRecord[] | null> {
     const tenantId = this.tenantId();
     const [source] = await this.db.$queryRaw<

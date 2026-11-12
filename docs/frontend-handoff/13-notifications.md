@@ -5,7 +5,7 @@
 Shapes in this document come from the controller, DTOs, service and their specs (`src/notifications/**`). Nothing was sent to the dev API.
 
 **Not in this slice:**
-- Real time. `notification.created` and `notification.read` over SSE arrive with unit 8; until then **poll** `GET /notifications/unread-count` (for example every 30 s and on tab focus).
+- Real time: **built in unit 8** (`notification.created` and `notification.read` over `GET /realtime/stream`, payloads and reconnect rules in `17-realtime-sse.md`). Behind Traefik/Swarm it is **not proven yet** (owner test pending), so keep **polling** `GET /notifications/unread-count` (for example every 30 s and on tab focus) until the owner confirms, and refetch it on connect and on `resync`.
 - Notices for claim reminders, escalation and overdue requests (unit 7). The types and the list already handle them; they just do not appear yet.
 - Notices for the live conversation (units 8 and 11).
 - Retention of old notices (90 days) and a "failed notices" admin screen.
@@ -71,7 +71,7 @@ Newest first. `limit` is 1 to 50 (default 20); `unread=true` returns only unread
 
 ### `POST /notifications/:id/read`
 
-No body. Idempotent: reading again returns the first `readAt`.
+No body. Idempotent: reading again returns the first `readAt`. The first read also sends `notification.read` to the person's other tabs and devices over the stream (a repeat sends nothing).
 
 ```json
 { "id": "6f1d3a2e-…", "readAt": "2026-11-11T10:05:00.000Z" }
@@ -81,7 +81,7 @@ No body. Idempotent: reading again returns the first `readAt`.
 
 ### `POST /notifications/read-all`
 
-No body. Marks only the caller's unread notices in the current sucursal.
+No body. Marks only the caller's unread notices in the current sucursal. When it changed something it sends one `notification.read {ids: null, all: true}` to the person's other tabs and devices over the stream.
 
 ```json
 { "updated": 4 }

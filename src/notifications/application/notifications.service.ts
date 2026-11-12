@@ -4,7 +4,12 @@
  * way to name another user, so one person can never read or mark another's
  * notices (a foreign id answers 404 like a missing one).
  */
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { PrismaService } from '../../shared/prisma/prisma.service';
@@ -13,6 +18,10 @@ import {
   noticeText,
   type NoticePayload,
 } from '../domain/chatbot-request-notice';
+import {
+  NOTIFICATION_READ_EVENTS,
+  type NotificationReadEventsPort,
+} from '../domain/notification-events.port';
 
 export const DEFAULT_PAGE_SIZE = 20;
 export const MAX_PAGE_SIZE = 50;
@@ -56,11 +65,34 @@ export function decodeCursor(cursor: string): { createdAt: Date; id: string } {
   return { createdAt, id };
 }
 
+function toView(row: {
+  id: string;
+  type: string;
+  payload: unknown;
+  requestId: string | null;
+  createdAt: Date;
+  readAt: Date | null;
+}): NotificationView {
+  return {
+    id: row.id,
+    type: row.type,
+    ...noticeText(row.type, row.payload as Partial<NoticePayload> | null),
+    requestId: row.requestId,
+    createdAt: row.createdAt.toISOString(),
+    readAt: row.readAt?.toISOString() ?? null,
+  };
+}
+
 @Injectable()
 export class NotificationsService {
   constructor(
     private readonly tenantPrisma: TenantPrismaService,
     private readonly prisma: PrismaService,
+    // Unit 8: announces reads to the person's other tabs. Optional so the
+    // service (and its specs) work unchanged where the stream is not served.
+    @Optional()
+    @Inject(NOTIFICATION_READ_EVENTS)
+    private readonly readEvents?: NotificationReadEventsPort,
   ) {}
 
   private get db() {
@@ -95,19 +127,29 @@ export class NotificationsService {
     const page = rows.slice(0, limit);
     const last = page.at(-1);
     return {
-      items: page.map((row) => ({
-        id: row.id,
-        type: row.type,
-        ...noticeText(row.type, row.payload as Partial<NoticePayload> | null),
-        requestId: row.requestId,
-        createdAt: row.createdAt.toISOString(),
-        readAt: row.readAt?.toISOString() ?? null,
-      })),
+      items: page.map((row) => toView(row)),
       nextCursor:
         rows.length > limit && last
           ? encodeCursor(last.createdAt, last.id)
           : null,
     };
+  }
+
+  /**
+   * Unit 8: the payload of a `notification.created` event, for ONE person: the
+   * notice (same shape as the list) and their unread count at this moment.
+   * `null` when the notice is gone (purged) or is not theirs.
+   */
+  async eventView(
+    userId: string,
+    id: string,
+  ): Promise<{ notification: NotificationView; unreadCount: number } | null> {
+    const row = await this.db.notification.findFirst({
+      where: { ...this.own(userId), id },
+    });
+    if (!row) return null;
+    const { count } = await this.unreadCount(userId);
+    return { notification: toView(row), unreadCount: count };
   }
 
   async unreadCount(userId: string): Promise<{ count: number }> {
@@ -118,29 +160,57 @@ export class NotificationsService {
   }
 
   /** Idempotent: reading an already read notice keeps its first `readAt`. */
-  async markRead(
+  markRead(
     userId: string,
     id: string,
   ): Promise<{ id: string; readAt: string }> {
-    const where = { ...this.own(userId), id };
-    await this.db.notification.updateMany({
-      where: { ...where, readAt: null },
-      data: { readAt: new Date() },
+    return this.announcing(async () => {
+      const where = { ...this.own(userId), id };
+      const { count } = await this.db.notification.updateMany({
+        where: { ...where, readAt: null },
+        data: { readAt: new Date() },
+      });
+      const row = await this.db.notification.findFirst({
+        where,
+        select: { readAt: true },
+      });
+      if (!row?.readAt) throw new NotFoundException('Notification not found');
+      // Only a change is announced: a repeat read tells nobody anything.
+      if (count > 0) await this.publishRead(userId, [id], false);
+      return { id, readAt: row.readAt.toISOString() };
     });
-    const row = await this.db.notification.findFirst({
-      where,
-      select: { readAt: true },
-    });
-    if (!row?.readAt) throw new NotFoundException('Notification not found');
-    return { id, readAt: row.readAt.toISOString() };
   }
 
-  async markAllRead(userId: string): Promise<{ updated: number }> {
-    const { count } = await this.db.notification.updateMany({
-      where: { ...this.own(userId), readAt: null },
-      data: { readAt: new Date() },
+  markAllRead(userId: string): Promise<{ updated: number }> {
+    return this.announcing(async () => {
+      const { count } = await this.db.notification.updateMany({
+        where: { ...this.own(userId), readAt: null },
+        data: { readAt: new Date() },
+      });
+      if (count > 0) await this.publishRead(userId, null, true);
+      return { updated: count };
     });
-    return { updated: count };
+  }
+
+  /**
+   * Runs the update and its realtime event in ONE transaction when the stream
+   * is wired; without a writer it is exactly the statements as before.
+   */
+  private announcing<T>(work: () => Promise<T>): Promise<T> {
+    return this.readEvents ? this.tenantPrisma.runInTransaction(work) : work();
+  }
+
+  private async publishRead(
+    userId: string,
+    ids: string[] | null,
+    all: boolean,
+  ): Promise<void> {
+    if (!this.readEvents) return;
+    // SAFETY: inside `announcing` the client is the ambient transaction client.
+    await this.readEvents.publishRead(
+      this.db as unknown as Prisma.TransactionClient,
+      { tenantId: this.tenantPrisma.getTenantId(), userId, ids, all },
+    );
   }
 
   async getPreferences(userId: string): Promise<NotificationPreferences> {

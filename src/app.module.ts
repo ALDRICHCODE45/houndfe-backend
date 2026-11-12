@@ -101,6 +101,7 @@ import { ReceiptReviewInngestRegistrar } from './receipts/inngest/receipt-review
 // pipeline (the generic poller excludes its `chatbot_request.` prefix in the
 // same change) and the notice email registrar.
 import { NotificationsModule } from './notifications/notifications.module';
+import { RealtimeStreamModule } from './realtime/realtime-stream.module';
 import { ChatbotRequestNoticeOutboxModule } from './notifications/outbox/chatbot-request-notice-outbox.module';
 import { ChatbotRequestInngestRegistrar } from './notifications/inngest/chatbot-request-inngest-registrar';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
@@ -236,6 +237,7 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // dedicated `chatbot_request.*` poller/consumer. The generic poller
     // excludes that prefix by pattern in the same change.
     NotificationsModule,
+    RealtimeStreamModule,
     ChatbotRequestNoticeOutboxModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
