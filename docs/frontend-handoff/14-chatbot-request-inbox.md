@@ -9,12 +9,12 @@ Shapes in this document come from the controller, the DTOs, the service and the 
 | Contract item | Today |
 | --- | --- |
 | `liveSession` | always `null` (live conversations are unit 11) |
-| `unreadCustomerMessages` | always `0` (conversation mirror is unit 9) |
+| `unreadCustomerMessages` | always `0`. The conversation mirror exists (unit 9, handoff 18) but "unread" has no definition yet (read by whom, since when): it needs a product decision |
 | `slaPaused`, `slaResumesAt` | derived on every read (unit 7c): `slaPaused` is `true` when the tenant's calendar is closed **now** (outside the opening hours or a closed date) **and** the request is open; `slaResumesAt` is then the next opening (ISO), else `null`. Closed requests are never paused. It is computed per response, so it changes without the row changing: do not use it to order or to detect updates |
 | `claimDeadlineAt`, `resolveDeadlineAt`, `overdueAt` | `claimDeadlineAt`/`resolveDeadlineAt` filled when the subtype has a deadline; `overdueAt` is set by the SLA sweep (every 30 s) at the **deadline instant** of the first overdue and never cleared (`displayStatus` `EXPIRED`). The sweep does not change `version` (it is not a command), so a row can gain `overdueAt` without a new `version`: the stream (unit 8) sends it as `request.overdue` with the **same** `version`, so a client applies an incoming row when its `version` is greater **or equal** (`17-realtime-sse.md` section 3.1) |
 | `scheduledFor`, `requiresTemplateAtStart`, `needsReschedule` | `null`/`false` (scheduling is unit 14) |
 | `templateCostText` in the detail | not sent (it only comes with `SEND_TEMPLATE`, unit 11) |
-| `GET /chatbot-requests/:id/conversation`, media | unit 9 |
+| `GET /chatbot-requests/:id/conversation`, `GET /chatbot-media/:id` | **built (unit 9): `18-conversation.md`**. Not part of the detail: ask for it separately |
 | `reply`, `messages`, `template`, `finish`, `reschedule` | not built yet (`merge` and `link-customer` are in handoff 11, `assignable-users` in section 13 below) |
 | `q` (free-text search) on `history` | not supported: it answers `400` like any unknown parameter (`groups` supports it, section 4) |
 | The `200 {request}` of the commands (handoffs 11 and 12) | still the small shape (no phone, no `customerKey`). The full row, with the caller's `allowedActions`, arrives on the stream (`request.*` events, `17-realtime-sse.md`), and from the list/detail routes. Do not wait for it: update from the small response and let the event or a refetch complete the row |

@@ -12,6 +12,7 @@ import { AppModule } from './app.module';
 import { installSupplierBodyParser } from './procurement/suppliers/supplier-http.filter';
 import { installPurchaseOrderBodyParser } from './procurement/purchase-orders/po-body-parser';
 import { installInventoryBodyParser } from './inventory/http/inventory-body-parser';
+import { installConversationBatchBodyParser } from './conversations/presentation/conversation-body-parser';
 import { editorialCors } from './catalog-editorial/http/editorial-cors';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
@@ -79,6 +80,9 @@ async function bootstrap() {
   installSupplierBodyParser(app);
   installPurchaseOrderBodyParser(app);
   installInventoryBodyParser(app);
+  // Bot conversation mirror batches (up to 50 messages, ~200 KB) exceed the
+  // default 100 KB JSON limit; this route-scoped parser raises it for them only.
+  installConversationBatchBodyParser(app);
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);

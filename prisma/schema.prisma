@@ -533,6 +533,9 @@ model Tenant {
   chatbotFeedRetention        ChatbotFeedRetention?
   realtimeEvents              RealtimeEvent[]
   realtimeEventRetention      RealtimeEventRetention?
+  // human-intervention / unit 9 — conversation mirror and its media.
+  chatbotConversations        ChatbotConversation[]
+  conversationMedia           ConversationMedia[]
   // human-intervention / unit 6 — in-app notices.
   notifications               Notification[]
   // human-intervention / unit 7a — chatbot attention settings and their audit.
@@ -4131,4 +4134,144 @@ model RealtimeEventRetention {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@map("realtime_event_retention")
+}
+
+// ============================================================================
+// CONVERSATION MIRROR (human-intervention / unit 9 — contract §3.6, §6.2, §12.5)
+// ============================================================================
+// A 12-month copy of what the customer and the bot said, so staff read the
+// context of a request. Linked to requests by `conversationRef`
+// (`ChatbotRequest.conversationRef`, the bot's own `wa:<wa_id>`), never by a
+// foreign key: a conversation can exist without a request and outlive any of
+// them. `nextSeq` is the per-conversation counter (`UPDATE … RETURNING` inside
+// the insert transaction, so `seq` is monotonic however many replicas write and
+// the bot's clock is display-only). `mode` and `handoffEpoch` are the live-
+// session state that unit 11 drives; nothing in unit 9 changes them. The
+// conversation row is deleted by the retention purge once it has no messages.
+// `customerKey` derives from the `wa:` id (R1) and never leaves the module.
+model ChatbotConversation {
+  id                    String           @id @default(uuid())
+  tenantId              String
+  conversationRef       String           @db.VarChar(200)
+  customerKey           String?
+  lastCustomerMessageAt DateTime?
+  mode                  ConversationMode @default(BOT)
+  handoffEpoch          Int              @default(0)
+  nextSeq               Int              @default(1)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  tenant   Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  messages ConversationMessage[]
+
+  @@unique([tenantId, conversationRef])
+  @@unique([tenantId, id])
+  @@map("chatbot_conversations")
+}
+
+enum ConversationMode {
+  BOT
+  HUMAN
+}
+
+enum ConversationMessageDirection {
+  IN
+  OUT
+}
+
+enum ConversationMessageAuthor {
+  CUSTOMER
+  BOT
+  STAFF
+  SYSTEM
+}
+
+enum ConversationMessageType {
+  TEXT
+  IMAGE
+  STICKER
+  DOCUMENT
+  AUDIO
+  TEMPLATE
+  SYSTEM
+  UNSUPPORTED
+}
+
+enum ConversationDeliveryStatus {
+  QUEUED
+  DEFERRED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  UNKNOWN
+}
+
+// Immutable (§6.2): the migration trigger `conversation_messages_immutable`
+// rejects every UPDATE except a forward `deliveryStatus` move, and every DELETE
+// except the retention purge (`houndfe.conversation_retention = 'on'` and
+// `purgeAfter < now()`) and the tenant cascade. A correction is a new message.
+// `waMessageId` and `clientMessageId` are unique per tenant (NULLs are
+// distinct). `staffUserId` is a plain column (no FK): the author survives the
+// user. `providerTimestamp` is Meta's clock, `observedAt` the bot's, `receivedAt`
+// ours; the order is always `seq`. `purgeAfter` = `receivedAt` + 12 months.
+// Migration-only: the partial index `conversation_messages_media_idx`
+// (tenantId, mediaId) WHERE mediaId IS NOT NULL, and the CHECKs.
+model ConversationMessage {
+  id                String                       @id @default(uuid())
+  tenantId          String
+  conversationId    String
+  seq               Int
+  direction         ConversationMessageDirection
+  author            ConversationMessageAuthor
+  staffUserId       String?
+  waMessageId       String?                      @db.VarChar(255)
+  clientMessageId   String?
+  type              ConversationMessageType
+  text              String?                      @db.VarChar(4096)
+  mediaId           String?
+  providerTimestamp DateTime?
+  observedAt        DateTime?
+  receivedAt        DateTime                     @default(now())
+  deliveryStatus    ConversationDeliveryStatus?
+  purgeAfter        DateTime
+
+  conversation ChatbotConversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([conversationId, seq])
+  @@unique([tenantId, waMessageId])
+  @@unique([tenantId, clientMessageId])
+  @@index([purgeAfter])
+  @@map("conversation_messages")
+}
+
+// A private object in Spaces (`conversation-media/<tenantId>/<id>.<ext>`). The
+// key is persisted and never returned: staff read it through the authenticated
+// proxy. `idempotencyKey` makes the bot's upload retry-safe (same key + same
+// `sha256` = same media). Retention: `purgeAfter` = `createdAt` + 12 months; the
+// purge deletes the object, sets `purgedAt` and clears `storageKey`; a failed
+// delete bumps `purgeAttempts` and is retried. `purgeLeaseUntil` is the claim of
+// the replica that is purging the row. The row itself goes once purged and no
+// message points at it. Migration-only: the partial index
+// `conversation_media_due_idx` (purgeAfter) WHERE purgedAt IS NULL.
+model ConversationMedia {
+  id               String    @id @default(uuid())
+  tenantId         String
+  storageKey       String?
+  mimeType         String
+  sizeBytes        Int
+  sha256           String    @db.VarChar(64)
+  idempotencyKey   String
+  createdAt        DateTime  @default(now())
+  purgeAfter       DateTime
+  purgedAt         DateTime?
+  purgeAttempts    Int       @default(0)
+  lastPurgeErrorAt DateTime?
+  purgeLeaseUntil  DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, idempotencyKey])
+  @@map("conversation_media")
 }

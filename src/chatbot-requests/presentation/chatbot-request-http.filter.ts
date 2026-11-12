@@ -49,6 +49,16 @@ const MESSAGES: Record<string, string> = {
     'A different terminal outcome was already recorded for this delivery',
   OUTCOME_NOT_ALLOWED: 'This outcome is not allowed for this delivery',
   RANGE_TOO_LARGE: 'The date range is longer than 92 days',
+  BATCH_TOO_LARGE: 'Too many items in one call',
+  MESSAGE_ID_CONFLICT:
+    'A message id of this batch already belongs to another conversation',
+  MEDIA_NOT_FOUND: 'A referenced media file does not exist',
+  MEDIA_TYPE_MISMATCH: 'The media file does not match the message type',
+  MEDIA_TOO_LARGE: 'The file is larger than 10 MB',
+  MEDIA_TYPE_NOT_ALLOWED: 'This file type is not allowed',
+  MEDIA_PURGED: 'The file was deleted by the retention policy',
+  THUMB_UNAVAILABLE: 'This file has no thumbnail',
+  MEDIA_STORAGE_FAILED: 'The file could not be stored or read, retry later',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',
 };

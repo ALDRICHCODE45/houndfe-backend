@@ -1,0 +1,131 @@
+/**
+ * APPLICATION: the staff read of a request's conversation (human-intervention
+ * unit 9; contract §3.6, §3.8, §12.5, §2.5, R12).
+ *
+ *   - tenant isolation: the request is read through the tenant-scoped client,
+ *     so another tenant's id is a 404 exactly like an unknown one;
+ *   - permission: `read:ChatbotConversation` sees the whole chat. Someone who
+ *     attends the request without it sees only the messages of THEIR session
+ *     (§2.5); live sessions are unit 11, so until then that set is empty and
+ *     the answer is an empty page. Anyone else is a 403;
+ *   - R12: the answer carries no `conversationRef` (it embeds the customer's
+ *     phone), no customer key and no storage key: the customer card comes from
+ *     the request detail, through `toStaffPhone`.
+ */
+import { Inject, Injectable } from '@nestjs/common';
+import { ChatbotRequestCommandError } from '../../chatbot-requests/application/chatbot-request-commands.service';
+import type { PermissionCheck } from '../../chatbot-requests/domain/resolve-permissions';
+import { InsufficientPermissionsError } from '../../shared/domain/domain-error';
+import { actorDisplayName } from '../../chatbot-requests/domain/actor-display-name';
+import {
+  parseConversationPageQuery,
+  type ConversationPageQuery,
+} from '../domain/conversation-page';
+import {
+  toMessageView,
+  type MediaRecord,
+  type MessageRecord,
+  type MessageView,
+} from '../domain/message-view';
+
+export const CONVERSATION_READ_STORE = Symbol('CONVERSATION_READ_STORE');
+
+export interface ConversationRequestRef {
+  id: string;
+  status: string;
+  conversationRef: string | null;
+  assigneeUserId: string | null;
+}
+
+export interface ConversationPageRows {
+  rows: MessageRecord[];
+  hasMoreBefore: boolean;
+}
+
+export interface ConversationReadStore {
+  /** Tenant-scoped: another tenant's request is `null`. */
+  findRequest(requestId: string): Promise<ConversationRequestRef | null>;
+  /** `rows` ascending by `seq`. `[]` when the chat was never mirrored. */
+  page(
+    conversationRef: string,
+    query: ConversationPageQuery,
+  ): Promise<ConversationPageRows>;
+  media(ids: string[]): Promise<MediaRecord[]>;
+  users(
+    ids: string[],
+  ): Promise<Array<{ id: string; name: string; email: string }>>;
+}
+
+export interface ConversationReader {
+  userId: string;
+  ability: PermissionCheck;
+}
+
+export interface ConversationPageView {
+  items: MessageView[];
+  hasMoreBefore: boolean;
+}
+
+const EMPTY: ConversationPageView = { items: [], hasMoreBefore: false };
+
+/** Message rows and the people and files they point at, as views. */
+export async function toMessageViews(
+  store: Pick<ConversationReadStore, 'media' | 'users'>,
+  rows: MessageRecord[],
+): Promise<MessageView[]> {
+  const mediaIds = [
+    ...new Set(rows.flatMap((r) => (r.mediaId ? [r.mediaId] : []))),
+  ];
+  const staffIds = [
+    ...new Set(rows.flatMap((r) => (r.staffUserId ? [r.staffUserId] : []))),
+  ];
+  const [media, users] = await Promise.all([
+    mediaIds.length > 0 ? store.media(mediaIds) : Promise.resolve([]),
+    staffIds.length > 0 ? store.users(staffIds) : Promise.resolve([]),
+  ]);
+  const mediaById = new Map(media.map((m) => [m.id, m]));
+  const staffById = new Map(
+    users.map((u) => [u.id, { id: u.id, displayName: actorDisplayName(u) }]),
+  );
+  return rows.map((row) =>
+    toMessageView(row, {
+      media: row.mediaId ? (mediaById.get(row.mediaId) ?? null) : null,
+      staff: row.staffUserId ? (staffById.get(row.staffUserId) ?? null) : null,
+    }),
+  );
+}
+
+@Injectable()
+export class ConversationReadsService {
+  constructor(
+    @Inject(CONVERSATION_READ_STORE)
+    private readonly store: ConversationReadStore,
+  ) {}
+
+  async page(
+    reader: ConversationReader,
+    requestId: string,
+    rawQuery: Record<string, unknown>,
+  ): Promise<ConversationPageView> {
+    const query = parseConversationPageQuery(rawQuery);
+    const request = await this.store.findRequest(requestId);
+    if (!request) throw new ChatbotRequestCommandError('NOT_FOUND', 404);
+
+    if (!reader.ability.can('read', 'ChatbotConversation')) {
+      const attends =
+        request.status === 'IN_PROGRESS' &&
+        request.assigneeUserId === reader.userId;
+      if (!attends) throw new InsufficientPermissionsError();
+      // Their session has no messages yet: sessions start with unit 11.
+      return EMPTY;
+    }
+    if (!request.conversationRef) return EMPTY;
+
+    const { rows, hasMoreBefore } = await this.store.page(
+      request.conversationRef,
+      query,
+    );
+    if (rows.length === 0) return EMPTY;
+    return { items: await toMessageViews(this.store, rows), hasMoreBefore };
+  }
+}

@@ -46,3 +46,12 @@ describe('TENANT_SCOPED_MODELS — chatbot attention settings registration (huma
     expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
   });
 });
+
+describe('TENANT_SCOPED_MODELS — conversation mirror registration (human-intervention unit 9)', () => {
+  it.each(['ChatbotConversation', 'ConversationMessage', 'ConversationMedia'])(
+    'scopes %s by tenant',
+    (model) => {
+      expect(TENANT_SCOPED_MODELS.has(model)).toBe(true);
+    },
+  );
+});

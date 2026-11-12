@@ -164,4 +164,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   'ChatbotAttentionSettingsEvent',
   'RealtimeEvent',
   'RealtimeEventRetention',
+  // Conversation mirror (human-intervention / unit 9). Same fail-open allowlist
+  // semantics: without these entries a read through TenantPrismaService would
+  // not inject `tenantId` and could return another sucursal's messages or files.
+  'ChatbotConversation',
+  'ConversationMessage',
+  'ConversationMedia',
 ]);

@@ -10,6 +10,12 @@
  *   request.*             {request, customer, previousCustomerKey}
  *   notification.created  {notification, unreadCount}
  *   notification.read     {ids, all, unreadCount}
+ *   conversation.message  {requestId, message}                (unit 9)
+ *   message.status        {requestId, messageId, seq, deliveryStatus}
+ *
+ * Conversation events go only to readers with `read:ChatbotConversation` (the
+ * attendee-without-it exception of §2.5 is the live session of unit 11, which
+ * does not exist yet). The log holds ids; the message is read at delivery.
  *
  * The rows are the CURRENT state at delivery time (not a snapshot taken when
  * the event was logged), so a request that changed twice sends its latest
@@ -23,12 +29,18 @@ import {
 import type { PermissionCheck } from '../../chatbot-requests/domain/resolve-permissions';
 import type { NotificationView } from '../../notifications/application/notifications.service';
 import { TenantRunnerService } from '../../shared/tenant/tenant-runner.service';
+import type { MessageView } from '../../conversations/domain/message-view';
 import {
+  isConversationStreamType,
   isNotificationStreamType,
   isRequestStreamType,
   type SseFrame,
 } from '../domain/realtime-events';
 import type { RealtimeEventRow } from '../infrastructure/prisma-realtime-event.store';
+import {
+  REALTIME_CONVERSATION_READER,
+  type ConversationEventReader,
+} from './conversation-event-reader';
 import {
   REALTIME_NOTIFICATION_READER,
   type NotificationEventReader,
@@ -42,6 +54,8 @@ export interface PreparedBatch {
   created: Map<bigint, { notification: NotificationView; unreadCount: number }>;
   /** user id -> unread count, for `notification.read`. */
   unread: Map<string, number>;
+  /** message id -> its current view, for the conversation events of the batch. */
+  messages: Map<string, MessageView>;
 }
 
 @Injectable()
@@ -51,6 +65,8 @@ export class RealtimeEventShaper implements HubShaper {
     private readonly reads: ChatbotRequestReadsService,
     @Inject(REALTIME_NOTIFICATION_READER)
     private readonly notifications: NotificationEventReader,
+    @Inject(REALTIME_CONVERSATION_READER)
+    private readonly conversations: ConversationEventReader,
   ) {}
 
   prepare(
@@ -77,8 +93,18 @@ export class RealtimeEventShaper implements HubShaper {
         countUsers.add(event.userId);
       }
     }
+    const messageIds = [
+      ...new Set(
+        events.flatMap((e) =>
+          isConversationStreamType(e.type) &&
+          typeof e.payload.messageId === 'string'
+            ? [e.payload.messageId]
+            : [],
+        ),
+      ),
+    ];
     return this.tenants.runWithTenant(tenantId, async () => {
-      const [rows, views, counts] = await Promise.all([
+      const [rows, views, counts, messages] = await Promise.all([
         this.reads.loadEventRows(requestIds),
         wanted.length > 0
           ? this.notifications.views(wanted)
@@ -86,6 +112,9 @@ export class RealtimeEventShaper implements HubShaper {
         countUsers.size > 0
           ? this.notifications.unreadCounts([...countUsers])
           : Promise.resolve(new Map<string, number>()),
+        messageIds.length > 0
+          ? this.conversations.messages(messageIds)
+          : Promise.resolve(new Map<string, MessageView>()),
       ]);
       const created: PreparedBatch['created'] = new Map();
       for (const event of events) {
@@ -98,7 +127,7 @@ export class RealtimeEventShaper implements HubShaper {
           unreadCount: counts.get(event.userId) ?? 0,
         });
       }
-      return { tenantId, rows, created, unread: counts };
+      return { tenantId, rows, created, unread: counts, messages };
     });
   }
 
@@ -119,6 +148,9 @@ export class RealtimeEventShaper implements HubShaper {
       );
       return shaped ? { id: event.id, event: event.type, data: shaped } : null;
     }
+    if (isConversationStreamType(event.type)) {
+      return this.shapeConversation(batch, event, reader.ability);
+    }
     if (!isNotificationStreamType(event.type)) return null;
     // Notification events are addressed to one person, never to anyone else.
     if (event.userId !== reader.userId) return null;
@@ -134,6 +166,36 @@ export class RealtimeEventShaper implements HubShaper {
         ids: Array.isArray(ids) ? ids : null,
         all: event.payload.all === true,
         unreadCount: batch.unread.get(reader.userId) ?? 0,
+      },
+    };
+  }
+
+  private shapeConversation(
+    batch: PreparedBatch,
+    event: RealtimeEventRow,
+    ability: PermissionCheck,
+  ): SseFrame | null {
+    if (!ability.can('read', 'ChatbotConversation')) return null;
+    const id = event.payload.messageId;
+    if (!event.requestId || typeof id !== 'string') return null;
+    const message = batch.messages.get(id);
+    if (!message) return null;
+    if (event.type === 'conversation.message') {
+      return {
+        id: event.id,
+        event: event.type,
+        data: { requestId: event.requestId, message },
+      };
+    }
+    // The current status, so a late event never shows an older one.
+    return {
+      id: event.id,
+      event: event.type,
+      data: {
+        requestId: event.requestId,
+        messageId: message.id,
+        seq: message.seq,
+        deliveryStatus: message.deliveryStatus,
       },
     };
   }

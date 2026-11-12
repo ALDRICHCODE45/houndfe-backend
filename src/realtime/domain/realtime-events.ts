@@ -42,6 +42,18 @@ export const NOTIFICATION_STREAM_TYPES = [
 ] as const;
 export type NotificationStreamType = (typeof NOTIFICATION_STREAM_TYPES)[number];
 
+/** Conversation mirror events (unit 9): the message row is built at delivery. */
+export const CONVERSATION_STREAM_TYPES = [
+  'conversation.message',
+  'message.status',
+] as const;
+export type ConversationStreamType = (typeof CONVERSATION_STREAM_TYPES)[number];
+
+export const isConversationStreamType = (
+  type: string,
+): type is ConversationStreamType =>
+  (CONVERSATION_STREAM_TYPES as readonly string[]).includes(type);
+
 export const isRequestStreamType = (type: string): type is RequestStreamType =>
   (REQUEST_STREAM_TYPES as readonly string[]).includes(type);
 export const isNotificationStreamType = (

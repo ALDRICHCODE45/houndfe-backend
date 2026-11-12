@@ -271,7 +271,17 @@ export type ChatbotRequestCommandErrorCode =
   | 'OUTCOME_ALREADY_RECORDED'
   | 'OUTCOME_NOT_ALLOWED'
   // Staff reads (unit 4).
-  | 'RANGE_TOO_LARGE';
+  | 'RANGE_TOO_LARGE'
+  // Conversation mirror and media (unit 9).
+  | 'BATCH_TOO_LARGE'
+  | 'MESSAGE_ID_CONFLICT'
+  | 'MEDIA_NOT_FOUND'
+  | 'MEDIA_TYPE_MISMATCH'
+  | 'MEDIA_TOO_LARGE'
+  | 'MEDIA_TYPE_NOT_ALLOWED'
+  | 'MEDIA_PURGED'
+  | 'THUMB_UNAVAILABLE'
+  | 'MEDIA_STORAGE_FAILED';
 
 /** §3.8: `ZONE_SET_CHANGED` also carries the new `zoneImpact`. */
 export type ChatbotRequestCommandCurrent = ChatbotRequestError['current'] & {
@@ -286,7 +296,18 @@ export class ChatbotRequestCommandError extends Error {
    */
   constructor(
     readonly code: ChatbotRequestCommandErrorCode,
-    readonly httpStatus: 400 | 401 | 403 | 404 | 409 | 410 | 422 | 429,
+    readonly httpStatus:
+      | 400
+      | 401
+      | 403
+      | 404
+      | 409
+      | 410
+      | 413
+      | 415
+      | 422
+      | 429
+      | 503,
     readonly current?: ChatbotRequestCommandCurrent,
     readonly extra?: Record<string, unknown>,
   ) {

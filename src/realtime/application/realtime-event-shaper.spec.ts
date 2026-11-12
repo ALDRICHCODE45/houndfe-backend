@@ -4,6 +4,8 @@
  * `chatbot-request-reads.realtime.spec.ts`; here the services are doubles.
  */
 import type { ChatbotRequestReadsService } from '../../chatbot-requests/application/chatbot-request-reads.service';
+import type { MessageView } from '../../conversations/domain/message-view';
+import type { ConversationEventReader } from './conversation-event-reader';
 import type { NotificationEventReader } from './notification-event-reader';
 import type { TenantRunnerService } from '../../shared/tenant/tenant-runner.service';
 import type { RealtimeEventRow } from '../infrastructure/prisma-realtime-event.store';
@@ -58,12 +60,35 @@ function setup() {
         Promise.resolve(new Map(users.map((u) => [u, u === 'ana' ? 3 : 5]))),
       ),
   };
+  const conversations = {
+    /** The CURRENT view of each message that still exists. */
+    messages: jest
+      .fn<Promise<Map<string, MessageView>>, [string[]]>()
+      .mockImplementation((ids) =>
+        Promise.resolve(
+          new Map(
+            ids
+              .filter((id) => id !== 'purged')
+              .map((id, i) => [
+                id,
+                {
+                  id,
+                  seq: 7 + i,
+                  deliveryStatus: 'DELIVERED',
+                  text: `words of ${id}`,
+                } as unknown as MessageView,
+              ]),
+          ),
+        ),
+      ),
+  };
   const shaper = new RealtimeEventShaper(
     tenants,
     reads as unknown as ChatbotRequestReadsService,
     notifications as unknown as NotificationEventReader,
+    conversations as unknown as ConversationEventReader,
   );
-  return { shaper, reads, notifications, scopes, batch };
+  return { shaper, reads, notifications, conversations, scopes, batch };
 }
 
 const EVERYONE = new Set(['ana', 'luis']);
@@ -277,5 +302,112 @@ describe('RealtimeEventShaper', () => {
         ability: ABILITY,
       }),
     ).toBeNull();
+  });
+
+  describe('conversation events (unit 9; §12.8, §5.3)', () => {
+    const message = (over: Partial<RealtimeEventRow> = {}) =>
+      event({
+        id: 20n,
+        type: 'conversation.message',
+        requestId: 'r-1',
+        payload: { messageId: 'm-1', seq: 7 },
+        ...over,
+      });
+    const status = (over: Partial<RealtimeEventRow> = {}) =>
+      event({
+        id: 21n,
+        type: 'message.status',
+        requestId: 'r-1',
+        payload: { messageId: 'm-1', seq: 7, deliveryStatus: 'SENT' },
+        ...over,
+      });
+    const withConversation = { userId: 'ana', ability: { can: () => true } };
+    const withoutConversation = {
+      userId: 'luis',
+      ability: {
+        can: (action: string, subject: string) =>
+          subject !== 'ChatbotConversation',
+      },
+    };
+
+    it('loads the messages of a batch once, by id, inside the tenant scope', async () => {
+      const { shaper, conversations, reads, scopes } = setup();
+      await shaper.prepare(
+        't1',
+        [
+          message(),
+          message({ id: 22n, payload: { messageId: 'm-2', seq: 8 } }),
+          status(),
+          event({}),
+        ],
+        EVERYONE,
+      );
+      expect(scopes).toEqual(['t1']);
+      expect(conversations.messages).toHaveBeenCalledTimes(1);
+      expect([...conversations.messages.mock.calls[0][0]].sort()).toEqual([
+        'm-1',
+        'm-2',
+      ]);
+      // A conversation event is not a request row event.
+      expect(reads.loadEventRows).toHaveBeenCalledWith(['r-1']);
+    });
+
+    it('a batch with no conversation event costs no message query', async () => {
+      const { shaper, conversations } = setup();
+      await shaper.prepare('t1', [event({})], EVERYONE);
+      expect(conversations.messages).not.toHaveBeenCalled();
+    });
+
+    it('conversation.message carries {requestId, message} for a reader with read:ChatbotConversation', async () => {
+      const { shaper } = setup();
+      const e = message();
+      const prepared = await shaper.prepare('t1', [e], EVERYONE);
+      const frame = shaper.shape(prepared, e, withConversation);
+      expect(frame).toEqual({
+        id: 20n,
+        event: 'conversation.message',
+        data: {
+          requestId: 'r-1',
+          message: expect.objectContaining({
+            id: 'm-1',
+            text: 'words of m-1',
+          }) as unknown,
+        },
+      });
+    });
+
+    it('message.status carries the CURRENT status, not the one logged', async () => {
+      const { shaper } = setup();
+      const e = status();
+      const prepared = await shaper.prepare('t1', [e], EVERYONE);
+      expect(shaper.shape(prepared, e, withConversation)).toEqual({
+        id: 21n,
+        event: 'message.status',
+        data: {
+          requestId: 'r-1',
+          messageId: 'm-1',
+          seq: 7,
+          deliveryStatus: 'DELIVERED',
+        },
+      });
+    });
+
+    it('nobody without read:ChatbotConversation gets either event (per-recipient shaping)', async () => {
+      const { shaper } = setup();
+      const events = [message(), status()];
+      const prepared = await shaper.prepare('t1', events, EVERYONE);
+      for (const e of events) {
+        expect(shaper.shape(prepared, e, withoutConversation)).toBeNull();
+      }
+    });
+
+    it('a purged message or an event with no request produces no frame', async () => {
+      const { shaper } = setup();
+      const gone = message({ payload: { messageId: 'purged', seq: 1 } });
+      const orphan = message({ id: 23n, requestId: null });
+      const prepared = await shaper.prepare('t1', [gone, orphan], EVERYONE);
+      expect(shaper.shape(prepared, gone, withConversation)).toBeNull();
+      expect(shaper.shape(prepared, orphan, withConversation)).toBeNull();
+    });
   });
 });

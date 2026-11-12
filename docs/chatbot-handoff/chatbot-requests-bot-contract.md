@@ -1,6 +1,6 @@
-# Chatbot ↔ backend: human requests (slices 5a, 5b and 5c)
+# Chatbot ↔ backend: human requests (slices 5a, 5b, 5c; conversation mirror and media: unit 9)
 
-What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). Not yet: `cancel-batch`, `reschedule`, scheduling slots, the conversation mirror, media, `GET /conversations/:ref/state`, and the feed types of later units (`request.cancel_ack`, `conversation.*`, `template.requested`).
+What the chatbot session consumes. Contract source: `docs/proposals/human-intervention-backend-proposal.md` §3.1–§3.5, §3.9, §4.5, §6.4, §10.1 R2/R7, §12.14. Implemented: **create**, **merge**, **customer cancel**, the **route budgets** (5a) and the **feed**, the **delivery outcome** and **pending deliveries** (5b, below), and the **recovery route** with the new outcome `DEFERRED_HUMAN_SESSION` (5c, below). The **conversation mirror** (`messages:batch`, `statuses:batch`) and **media** (`POST /chatbot-api/media`) are implemented (unit 9, section "Conversation mirror and media" below; this is what the outbox's `MESSAGE_MIRROR` rows send). Not yet: `cancel-batch`, `reschedule`, scheduling slots, `GET /conversations/:ref/state`, `session-ack`, and the feed types of later units (`request.cancel_ack`, `conversation.*`, `template.requested`).
 
 ## Common rules
 
@@ -117,7 +117,7 @@ Counters live in PostgreSQL (`service_rate_buckets`), so every replica shares th
 | --- | --- | --- | --- |
 | `default` | the other chatbot-api routes that existed before this contract (catalog, customers, checkout, shipping quotes, receipts…) | the credential's `rateLimit` (60) | `rateLimits.default`, else `rateLimit` |
 | `humanDecisions` | the stock, expiration and delivery-zone routes: `POST /chatbot-api/human-decisions`, `GET /chatbot-api/human-decisions/:id`, `POST …/:id/application-outcome` | the credential's `rateLimit` (60) | `rateLimits.humanDecisions`, else `rateLimit` |
-| `write` | `POST /chatbot-api/requests`, `…/:id/cancel`, `POST /chatbot-api/deliveries/:id/outcome` | 300 | `rateLimits.write` |
+| `write` | `POST /chatbot-api/requests`, `…/:id/cancel`, `POST /chatbot-api/deliveries/:id/outcome`, `POST /chatbot-api/conversations/:ref/messages:batch`, `POST /chatbot-api/messages/statuses:batch`, `POST /chatbot-api/media` (unit 9) | 300 | `rateLimits.write` |
 | `read` | `GET /chatbot-api/requests/pending-deliveries`, `GET /chatbot-api/requests` (recovery) | 300 | `rateLimits.read` |
 | `feed` | `GET /chatbot-api/feed` (the long-poll); never spends `write` or `read` | 120 | `rateLimits.feed` |
 
@@ -377,3 +377,139 @@ The item's own `conversationRef` is the request's (`null` when it has none: then
 
 - The credential needs `requests:read` for the recovery route (and keeps `feed:read` / `feed:ack`).
 - Migration `20261110060000_chatbot_feed_recovery` (no table or column change: it widens the outcome CHECKs for `DEFERRED_HUMAN_SESSION`, replaces the pending-deliveries partial index and adds two partial indexes on `chatbot_requests`; see `docs/chatbot-requests-model.md`, "Deploy safety"). Deploy the backend before the bot reports `DEFERRED_HUMAN_SESSION`: an older backend answers `400` for the unknown outcome.
+
+## Conversation mirror and media (unit 9)
+
+Contract: proposal §3.6, §3.9, §4.1, §6.1, §6.2, §11.2 and the v1.6 note in §17. The mirror is the 12-month copy of what the customer and the bot said, so staff see the context of a request. **Your outbox's `MESSAGE_MIRROR` rows (and the status rows) call these routes**, in this order of work: upload the file (if any) → mirror the message → report statuses later. The mirror starts with new messages from activation (no backfill, §3.7) and covers **every** message in both directions, bot-mode turns included (§11.2).
+
+Common rules: `Authorization: Bearer svc_…`, scopes `conversation:write` (batch and statuses) and `media:write` (upload), budget class `write` (section "Route budgets"), every answer `Cache-Control: no-store`, errors `{statusCode, code, message}`. The tenant comes from the credential: a tenant, `seq`, author or status in a body is `400`. **`conversationRef` contains the customer's phone (`wa:<wa_id>`): keep it out of logs and analytics.** None of these routes needs `X-Idempotency-Key` (sending one is ignored): idempotency is by `waMessageId` and by `(providerMessageId, status)`, so retrying the very same call is always safe. The only exception is the upload (below).
+
+### `POST /chatbot-api/conversations/:conversationRef/messages:batch`
+
+Scope `conversation:write`. `:conversationRef` is the chat's reference (`wa:5215512345678`, URL-encode the colon if your client does not; 1 to 200 characters of `A-Z a-z 0-9 : _ . @ + -`; anything else `400`). The literal `:batch` is part of the path. Body:
+
+```json
+{
+  "messages": [
+    { "waMessageId": "wamid.HBgM…==", "direction": "IN", "type": "TEXT",
+      "text": "Hola, ¿tienen croquetas?",
+      "providerTimestamp": "2026-11-12T16:02:11.000Z", "observedAt": "2026-11-12T16:02:12.103Z" },
+    { "waMessageId": "wamid.HBgN…==", "direction": "OUT", "type": "TEXT",
+      "text": "Claro que sí, ¿de qué marca?",
+      "providerTimestamp": "2026-11-12T16:02:15.000Z", "observedAt": "2026-11-12T16:02:15.440Z" },
+    { "waMessageId": "wamid.HBgO…==", "direction": "IN", "type": "IMAGE",
+      "mediaId": "0b3f1c1e-…", "text": "mi foto",
+      "providerTimestamp": "2026-11-12T16:03:00.000Z", "observedAt": "2026-11-12T16:03:01.020Z" }
+  ]
+}
+```
+
+Rules (any violation is one `400 VALIDATION_ERROR`, nothing is stored, the input is never echoed):
+
+| Field | Rule |
+| --- | --- |
+| `messages` | 1 to **50** items (`413 BATCH_TOO_LARGE`, `{limit: 50}`, over 50). The array order is the order the backend stores them in (it assigns `seq` in arrival order; **your clocks are only for display**), so send a chat's rows in your outbox `seq` order. |
+| `waMessageId` | The WhatsApp message id: `A-Z a-z 0-9 . _ = + / : -`, 1 to 255 characters, unique inside the batch. **Inbound:** the wamid Meta sent. **Outbound:** the wamid Meta returned when you sent it (mirror the message once you have it; a message that was never accepted by Meta has no wamid and is not mirrored). |
+| `direction` | `IN` (the customer wrote) or `OUT` (you wrote). |
+| `author` | Optional. If sent it must match: `IN` → `CUSTOMER`, `OUT` → `BOT`. **`STAFF` and `SYSTEM` are refused (`400`)**: staff messages are written by the backend (unit 11), never relayed by the bot (§4.1). |
+| `type` | `TEXT`, `IMAGE`, `STICKER`, `DOCUMENT` (a PDF), `AUDIO`, `TEMPLATE` (only `OUT`), `UNSUPPORTED`. `SYSTEM` is refused. |
+| `text` | A string of at most **4 096 characters** (counted as characters, emoji included). Control characters and bidi overrides are removed; markup is kept as text. `TEXT` needs a non-blank text. Media types may carry a caption or none. **`UNSUPPORTED` must NOT carry `text`** (`400` if it does). |
+| `mediaId` | Required (a uuid from the upload) for `IMAGE`, `STICKER`, `DOCUMENT`, `AUDIO`; forbidden for the rest. |
+| `kind` | Only for `UNSUPPORTED`: `VIDEO`, `LOCATION` or (default) `OTHER`. The backend stores the fixed text "Video recibido", "Ubicación recibida" or "Mensaje no compatible recibido" and **never the customer's words or any file**. This is the way to mirror a video or a location (v1 stores neither, §3.6). |
+| `providerTimestamp` | Meta's timestamp, ISO-8601 with `Z` or an offset, **required**. Not before 2020, at most 5 minutes in the future. For `OUT`, use the time Meta accepted the send. |
+| `observedAt` | Your clock when you saw the message, same format and bounds, **required**. |
+| anything else | `400` (`tenantId`, `seq`, `staffUserId`, `deliveryStatus`, `purgeAfter`… are not yours to set). |
+
+Answer `200`:
+
+```json
+{ "accepted": [ { "waMessageId": "wamid.HBgM…==", "messageId": "…", "seq": 1 } ],
+  "duplicates": [ "wamid.HBgN…==" ] }
+```
+
+- `accepted`: stored by this call, with the `seq` the backend gave them (consecutive within the batch). `duplicates`: ids that were **already mirrored** (a retry, or an overlap): ignored, not an error, and the stored message is **never changed** by a replay (messages are immutable). **Both mean "the row is done": ACK the outbox row.** A replay of a whole batch answers `accepted: []`.
+- A bot message (`OUT`) is stored as `SENT`; statuses move it forward (below). A customer message has no delivery status.
+- All-or-nothing: if the call fails, none of the batch is stored and no `seq` is burned.
+
+| Status / code | Meaning | What the outbox does |
+| --- | --- | --- |
+| `200` | Done (see above). | ACK the row(s). |
+| `400 VALIDATION_ERROR` | The body is wrong. It will not get better by retrying. | Park the row as failed and alert; do not retry in a loop. |
+| `401`, `403 INSUFFICIENT_SCOPE`, `403 FORBIDDEN` | Credential, scope (`conversation:write`) or `X-Branch-Id`. | Stop and alert; retrying is pointless until the credential is fixed. |
+| `409 MESSAGE_ID_CONFLICT` | A `waMessageId` of this batch is already stored in **another** chat (a reused wamid: a bug). Nothing was stored. | Park and alert. |
+| `413 BATCH_TOO_LARGE` | Over 50 messages. | Split and resend. |
+| `422 MEDIA_NOT_FOUND` | A `mediaId` does not exist for this branch, or its file was already purged. | Upload the file again (new key if the old media is gone) and resend. |
+| `422 MEDIA_TYPE_MISMATCH` | The file kind does not match the type (`IMAGE`/`STICKER` need an image, `DOCUMENT` a PDF, `AUDIO` audio). | Park and alert (a bug in the mapping). |
+| `429 RATE_LIMITED` | The `write` budget; `Retry-After` in seconds. | Wait `Retry-After`, then retry. |
+| `5xx`, timeout, network | Transient. | Retry with backoff, **same body**: it is idempotent. |
+
+**Body size.** A full batch (50 × 4 096 characters) is about 200 KB of JSON; the server's default JSON limit is **100 KB** until the route-scoped 1 MB parser (`installConversationBatchBodyParser`) is mounted in `main.ts` (a one-line deploy item, below). Until the backend confirms it, keep each call under **90 KB serialized** (split by size as well as by count); a larger one is rejected by the framework with a `413` that does **not** use the envelope above.
+
+### `POST /chatbot-api/messages/statuses:batch`
+
+Scope `conversation:write`. Meta's delivery statuses for messages **you sent and mirrored**. Body:
+
+```json
+{ "statuses": [ { "providerMessageId": "wamid.HBgN…==", "status": "DELIVERED",
+                  "occurredAt": "2026-11-12T16:02:19.000Z", "errorCode": "131047" } ] }
+```
+
+- 1 to **100** items (`413 BATCH_TOO_LARGE` over 100). `providerMessageId` is the `waMessageId` you mirrored. `status`: `SENT`, `DELIVERED`, `READ` or `FAILED` (Meta's `sent`/`delivered`/`read`/`failed`). `QUEUED`, `DEFERRED` and `UNKNOWN` belong to the backend (`400`). `occurredAt` required (same bounds as `providerTimestamp`). `errorCode` optional, at most 64 characters; it is accepted and **not stored**.
+- A status only moves a message **forward**: `SENT → DELIVERED → READ`, and `FAILED` only before delivery. Out of order or repeated statuses are fine (a late `DELIVERED` after `READ` is ignored); several statuses for one message in one call are applied in the order you send them. A customer's message never gets a status.
+
+Answer `200`: `{ "applied": 1, "ignored": 1, "unknown": ["wamid…"] }`. `applied`: statuses that moved a message. `ignored`: known messages whose status was already equal or ahead (or not yours to move). **`unknown`**: ids that match no mirrored message **yet** (the status raced ahead of the mirror row). ACK the status row; if you want them to land, retry the unknown ones after the message's mirror row is acknowledged, and **give up after 24 hours** (do not retry forever). Errors as for `messages:batch` (`400`, `401/403`, `413`, `429`, `5xx`).
+
+### `POST /chatbot-api/media`: upload BEFORE mirroring the message
+
+Scope `media:write`, budget class `write`. `multipart/form-data` with:
+
+| Part | Rule |
+| --- | --- |
+| `file` | **Required**, one part, 1 byte to **10 MiB** (10 485 760 bytes). |
+| `sha256` | Optional lowercase hex of the file's bytes; if sent it must match (`400` otherwise). |
+| Header `X-Idempotency-Key` | **Required**: a lowercase UUID. Derive it from the WhatsApp media id (for example UUIDv5 of it) so a retry after a crash reuses it. |
+
+The type is decided **by the file's bytes**, not by what you declare. Accepted: `image/jpeg`, `image/png`, `image/webp` (stickers are webp), `application/pdf`, and audio `audio/ogg` (voice notes), `audio/mpeg`, `audio/mp4` (`.m4a` only), `audio/aac`, `audio/amr`. **Not accepted (`415 MEDIA_TYPE_NOT_ALLOWED`):** video (including `.mp4` video), location, GIF, SVG, HTML, archives, executables. For a video or a location do **not** upload: mirror an `UNSUPPORTED` message instead.
+
+Answer `201` (stored) or `200` (the same key and the same bytes again):
+
+```json
+{ "mediaId": "0b3f1c1e-…", "mimeType": "image/jpeg", "sizeBytes": 182344, "sha256": "…" }
+```
+
+The file is stored privately (never public, never a URL back to you); staff read it through the authenticated proxy. Use `mediaId` in the message you mirror next. A media nobody mirrors is deleted with everything else 12 months after the upload.
+
+| Status / code | Meaning | What the outbox does |
+| --- | --- | --- |
+| `201` / `200` | Stored / replay. | Continue to the message. |
+| `400 VALIDATION_ERROR` | No key, key not a lowercase UUID, empty or missing `file`, `sha256` mismatch or malformed, an unknown field. | Park and alert (a bug) except a `sha256` mismatch, which means the bytes changed: re-download. |
+| `409 IDEMPOTENCY_CONFLICT` | The key was already used with other bytes. | Use a new key only if the bytes really are different. |
+| `413 MEDIA_TOO_LARGE` | Over 10 MiB. | Do not retry. Mirror an `UNSUPPORTED` message (`OTHER`) and, for audio, ask the customer to write. |
+| `415 MEDIA_TYPE_NOT_ALLOWED` | See above. | Do not retry; mirror `UNSUPPORTED`. |
+| `401`, `403`, `429` | As above (`media:write`; `Retry-After`). | As above. |
+| `503 MEDIA_STORAGE_FAILED` | The storage was down; nothing was recorded. `Retry-After: 5`. | Retry with the **same key**. |
+
+**Audio** (decision D13): upload and mirror every voice note (with or without a person attending); when nobody attends, you also ask the customer to write it. Staff play it from the inbox.
+
+### What the outbox must do (summary)
+
+For each inbound or outbound WhatsApp message of a chat, in the chat's outbox order:
+
+1. If it has a file you can store (image, sticker, PDF, audio ≤ 10 MiB): download it from Meta, `POST /chatbot-api/media` with a stable `X-Idempotency-Key`, keep `mediaId`. Video / location / other: no upload, `type: UNSUPPORTED` with `kind`.
+2. Build the message (table above) and `POST …/messages:batch` (up to 50 rows of one chat, under 90 KB). ACK the rows on `200`.
+3. When Meta reports a status for a message you sent, `POST …/statuses:batch` (up to 100). ACK on `200`; retry `unknown` ids for at most 24 h.
+4. Never mirror staff messages (the backend owns them), never send tenant, `seq`, author `STAFF`/`SYSTEM` or a status the backend owns.
+
+### Not covered by unit 9
+
+- `GET /chatbot-api/conversations/:ref/state` and `POST …/session-ack` (live sessions, unit 11). `messages:batch` takes **no `epoch`** (§11.2).
+- A customer message does not yet update the 24 h window of an open request: the request keeps the `lastCustomerMessageAt` you sent when you created it (or merged into it). Updating the window from the mirror needs the request's version and audit semantics and arrives with unit 11.
+- Echoing a staff message back to the mirror: unit 11 stores the wamid from the delivery outcome you already report.
+
+### Deploy checklist for unit 9
+
+1. Migration `20261112020000_conversation_mirror` (three new tables, triggers, one partial index on `chatbot_requests`; brief locks, deploy at low traffic; recovery note in the file).
+2. The credential has `conversation:write` and `media:write`; the `write` budget (`rateLimits.write`, default 300 a minute) covers messages, statuses and uploads together.
+3. Spaces: the same `SPACES_*` configuration as receipts (`RECEIPTS_SPACES_BUCKET` or `SPACES_BUCKET`); objects live under `conversation-media/<tenantId>/`.
+4. `main.ts` mounts `installConversationBatchBodyParser(app)` (from `src/conversations/presentation/conversation-body-parser.ts`) next to the other `install*BodyParser` calls, before `app.listen`. Until it is mounted, keep batches under 90 KB.
+5. The retention purge runs hourly on every replica (no setup).

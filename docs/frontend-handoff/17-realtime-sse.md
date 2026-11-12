@@ -1,6 +1,6 @@
 # Realtime stream (SSE): request changes and notifications
 
-**Status:** implemented on `feat/human-intervention` (human-intervention unit 8), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §5.3, §6.4, §10.1 (R5, R6, R7, R12), §12.1, §12.2, §12.4, §12.8, and the v1.4 note in §15. Model and performance: `docs/chatbot-requests-model.md` ("Realtime stream"), `docs/perf/realtime-sse-load-results.md`.
+**Status:** implemented on `feat/human-intervention` (human-intervention unit 8; conversation events: unit 9), **not merged, not pushed, not deployed**. Contract: `docs/proposals/human-intervention-backend-proposal.md` §5.3, §6.4, §10.1 (R5, R6, R7, R12), §12.1, §12.2, §12.4, §12.8, and the v1.4 note in §15. Model and performance: `docs/chatbot-requests-model.md` ("Realtime stream"), `docs/perf/realtime-sse-load-results.md`.
 
 Shapes in this document come from the controller, the hub, the shaper and the PostgreSQL integration spec `src/realtime/realtime-stream.integration.spec.ts` (a real HTTP client against a real socket). Nothing was sent to the dev API.
 
@@ -8,7 +8,7 @@ Shapes in this document come from the controller, the hub, the shaper and the Po
 
 **Not in this unit** (the events below simply do not exist yet; keep the REST reads for them):
 - `counts.changed`. Refetch `GET /chatbot-requests/counts` (debounced, for example 1 s) when a `request.*` event arrives.
-- `session.*`, `conversation.message`, `message.status` (live conversations and the mirror are units 9 and 11).
+- `session.*` (live conversations are unit 11). `conversation.message` and `message.status` **now exist** (unit 9): section 3.3.
 - `permissions.changed` (the stream re-checks permissions itself, section 6).
 
 ## 1. Connecting
@@ -87,7 +87,7 @@ What each type means:
 | `request.overdue` | The SLA sweep marked it overdue (`overdueAt` set). |
 | `request.updated` | A row change that is not a transition: an SLA milestone that moved `slaLevel` (50 % / 80 %), `link-customer`. |
 
-Events that are **not** announced: replies, templates, finish and reschedule (units 9 to 11), delivery outcomes of the bot feed, and the **target** of a merge (its row did not change).
+Events that are **not** announced: replies, templates, finish and reschedule (units 10 and 11), delivery outcomes of the bot feed, and the **target** of a merge (its row did not change). New customer or bot messages are **not** a request event: they arrive as `conversation.message` (section 3.3) and do not change `version`.
 
 ### 3.2 Notifications
 
@@ -105,7 +105,23 @@ data: {"ids":["…"],"all":false,"unreadCount":2}
 - `notification.read` is sent to the **same person's other tabs and devices** when they mark one notice (`ids: [id]`, `all: false`) or all of them (`ids: null`, `all: true`) as read. Repeating a read does not send a second event.
 - **`unreadCount` is the person's count at the moment of delivery**: set your badge to it. It changes only with these two events. The 90-day retention does not announce anything: refetch `GET /notifications/unread-count` on connect and on `resync`.
 
-### 3.3 Control events
+### 3.3 Conversation events (unit 9)
+
+Only to users with `read:ChatbotConversation`; everyone else on the stream does not receive them. Full semantics (replace by `seq`, one event per open request of the chat, the message is the state at delivery) in `18-conversation.md` section 4.
+
+```text
+event: conversation.message
+data: {"requestId":"…","message":{ /* the message of 18-conversation.md section 2 */ }}
+
+event: message.status
+data: {"requestId":"…","messageId":"…","seq":18,"deliveryStatus":"DELIVERED"}
+```
+
+- Both carry an `id:` and move `Last-Event-ID`; both replay after a reconnect.
+- The payload never has the chat reference, the customer key or a phone (R12). They do not change `request.version` and do not touch the inbox row.
+- `session.*` and the "attend without `read:ChatbotConversation`" case arrive with unit 11.
+
+### 3.4 Control events
 
 | Event | `id:` | `data` | What to do |
 | --- | --- | --- | --- |
@@ -138,7 +154,7 @@ If the ticket expires mid-stream you get `auth-expired` exactly at the token's e
 
 ## 5. Limits
 
-- **5 streams per user and sucursal.** Opening a 6th ends the oldest with `connection-replaced` (section 3.3).
+- **5 streams per user and sucursal.** Opening a 6th ends the oldest with `connection-replaced` (section 3.4).
 - **1 000 streams per server instance** (`503 STREAM_CAPACITY`). The expected load is one stream per open browser.
 - **Slow readers are dropped**: a connection that stays blocked for more than 10 s, or has more than 512 KiB waiting, is ended with `slow-consumer`. Process messages promptly (do not do heavy work inside the message handler).
 

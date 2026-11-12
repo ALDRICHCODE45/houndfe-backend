@@ -39,6 +39,7 @@ import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 import { HumanDecisionsModule } from './human-decisions/human-decisions.module';
 // human-intervention / unit 2 — chatbot request inbox staff commands.
 import { ChatbotRequestsModule } from './chatbot-requests/chatbot-requests.module';
+import { ConversationsModule } from './conversations/conversations.module';
 import { ChatbotSettingsModule } from './chatbot-settings/chatbot-settings.module';
 import { DeliveryZonesModule } from './delivery-zones/delivery-zones.module';
 import { DeliveryZoneOutboxModule } from './delivery-zones/outbox/delivery-zone-outbox.module';
@@ -152,6 +153,7 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     ChatbotApiModule,
     HumanDecisionsModule,
     ChatbotRequestsModule,
+    ConversationsModule,
     ChatbotSettingsModule,
     // shipping-zones / T1 — delivery zones per postal code (store routes).
     DeliveryZonesModule,

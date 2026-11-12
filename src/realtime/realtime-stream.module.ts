@@ -16,6 +16,8 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { PgNotificationListener } from '../shared/realtime/pg-notification-listener';
 import { RealtimeModule } from '../shared/realtime/realtime.module';
 import { TenantModule } from '../shared/tenant/tenant.module';
+import { PrismaConversationReadStore } from '../conversations/infrastructure/prisma-conversation-read.store';
+import { REALTIME_CONVERSATION_READER } from './application/conversation-event-reader';
 import { REALTIME_NOTIFICATION_READER } from './application/notification-event-reader';
 import { AccessGate, REALTIME_ACCESS } from './application/realtime-access';
 import { RealtimeEventShaper } from './application/realtime-event-shaper';
@@ -25,6 +27,7 @@ import {
   REALTIME_STORE,
   RealtimeHub,
 } from './application/realtime-hub.service';
+import { PrismaConversationEventReader } from './infrastructure/prisma-conversation-event.reader';
 import { PrismaNotificationEventReader } from './infrastructure/prisma-notification-event.reader';
 import { PrismaRealtimeAccess } from './infrastructure/prisma-realtime-access';
 import { PrismaRealtimeEventStore } from './infrastructure/prisma-realtime-event.store';
@@ -46,6 +49,9 @@ import { RealtimeController } from './presentation/realtime.controller';
     PrismaRealtimeEventStore,
     PrismaRealtimeAccess,
     PrismaNotificationEventReader,
+    // Unit 9: the shaper builds conversation messages with the REST read's code.
+    PrismaConversationReadStore,
+    PrismaConversationEventReader,
     RealtimeEventShaper,
     RealtimeHub,
     // 24 h retention, bounded, SKIP LOCKED (found by AppModule's ScheduleModule).
@@ -53,6 +59,10 @@ import { RealtimeController } from './presentation/realtime.controller';
     {
       provide: REALTIME_NOTIFICATION_READER,
       useExisting: PrismaNotificationEventReader,
+    },
+    {
+      provide: REALTIME_CONVERSATION_READER,
+      useExisting: PrismaConversationEventReader,
     },
     { provide: REALTIME_LISTENER, useExisting: PgNotificationListener },
     { provide: REALTIME_STORE, useExisting: PrismaRealtimeEventStore },

@@ -351,10 +351,66 @@ Both reads are written as row comparisons with a closed upper bound (`("tenantId
 
 **Known limits and deviations.**
 - `RealtimeEvent` is accessed only with raw SQL naming `tenantId` and the root client. `RealtimeEvent` and `RealtimeEventRetention` **are** registered in `TENANT_SCOPED_MODELS` (`src/shared/tenant/tenant-scoped-models.constant.ts`, pinned by `tenant-scoped-models.constant.spec.ts`) as defense in depth: a read through `TenantPrismaService` is tenant-filtered instead of failing open. The store does not depend on it: every statement still names `tenantId`.
-- `counts.changed`, `session.*`, `conversation.message`, `message.status` and `permissions.changed` are not built (counts: refetch; the conversation events belong to units 9 and 11). `userId` has no FK (the log keeps 24 h; a deleted user's events are simply never read).
+- `counts.changed`, `session.*` and `permissions.changed` are not built (counts: refetch; `session.*` is unit 11). `conversation.message` and `message.status` were added by unit 9 (see "Conversation mirror and media"). `userId` has no FK (the log keeps 24 h; a deleted user's events are simply never read).
 - **Not proven behind Traefik/Swarm** (R6): see the FE handoff. The code sets the headers and heartbeat the contract asks for; the owner's 30-minute test is pending.
 - The row of an event is the state at delivery time, not a snapshot; SLA milestones and `link-customer` change a row without changing `version`, so clients apply `version >=` (v1.4 note in the proposal).
 - The scheduler gate spec (`src/shared/scheduling/scheduler-gate.integration.spec.ts`) pins the number of `@Interval` providers; this unit adds one (`RealtimeRetentionScheduler`), so that count is 15 (see the report: that file is outside this unit's edit surface).
+
+## Conversation mirror and media (unit 9)
+
+Contract §3.6, §3.9, §6.1 to §6.3, §10.1 (rows "Conversación paginada" and "Purga de 12 meses"), §12.5. Migration `20261112020000_conversation_mirror`. Code: `src/conversations/**`. Bot handoff (what `MESSAGE_MIRROR` sends): `docs/chatbot-handoff/chatbot-requests-bot-contract.md`, FE handoff `docs/frontend-handoff/18-conversation.md`, load test and `EXPLAIN`: `docs/perf/conversation-load-results.md`.
+
+**Tables.**
+
+| Table | What it holds |
+| --- | --- |
+| `chatbot_conversations` | One row per `(tenantId, conversationRef)`: `customerKey` (derived from the `wa:` id, R1; never leaves the module), `lastCustomerMessageAt`, `nextSeq` (the per-chat counter), and `mode` / `handoffEpoch` (live-session state that **unit 11** drives; nothing here changes them). |
+| `conversation_messages` | Immutable copy of a message: `seq` (unique per conversation), `direction` IN/OUT, `author` CUSTOMER/BOT/STAFF/SYSTEM, `type`, `text` (<= 4096), `mediaId`, `waMessageId` / `clientMessageId` (unique per tenant), `providerTimestamp` (Meta), `observedAt` (the bot), `receivedAt` (ours), `deliveryStatus` (OUT only), `purgeAfter` = `receivedAt` + 12 months. |
+| `conversation_media` | The private object's registry: `storageKey` (never returned), `mimeType`, `sizeBytes`, `sha256`, `idempotencyKey` (unique per tenant), `purgeAfter` = `createdAt` + 12 months, `purgedAt`, retry columns (`purgeAttempts`, `lastPurgeErrorAt`) and the claim lease (`purgeLeaseUntil`). |
+
+**Link to requests.** By `conversationRef` only, no FK: `chatbot_requests.conversationRef` = `chatbot_conversations.conversationRef` (same tenant). A chat can exist with no request and outlives any of them; a request with no reference, or whose chat was never mirrored, reads an empty conversation. The reverse lookup (a message -> the open requests of its chat, for the realtime event) uses the partial index `chatbot_requests (tenantId, conversationRef) WHERE conversationRef IS NOT NULL`.
+
+**Ingest (`PrismaConversationMirrorStore.ingest`), one transaction.** (1) `INSERT … ON CONFLICT (tenantId, conversationRef) DO UPDATE` on the chat: its row lock serializes two batches of one chat, so `seq = nextSeq + i` in array order is monotonic and gapless with no other lock, and a rolled-back batch burns no `seq`. (2) Drop the `waMessageId`s already stored (`duplicates[]`); one stored in ANOTHER chat is `409 MESSAGE_ID_CONFLICT`. (3) Check each `mediaId` (same tenant, not purged, kind matches the type). (4) Insert (one multi-row statement) and advance `nextSeq`, `lastCustomerMessageAt` (customer messages only, never backwards). (5) Write `conversation.message` events (last, so the realtime tenant lock is the final lock of the transaction, unit 8 rule). A replay never changes a stored message. Statuses (`applyStatuses`): the target rows are locked in `id` order, the incoming statuses are folded in order with the forward rule, then one `UPDATE … FROM (VALUES …)` and `message.status` events for what moved.
+
+**Lock order.** Ingest: chat row, then (at the end) the realtime tenant advisory lock. Request commands: request row, then the realtime lock at commit. Neither takes the other's first lock, so there is no cycle. Unit 11 will take request row then chat row (§6.5), and ingest never locks a request row.
+
+**Immutability (§6.2), in the database.** Trigger `conversation_messages_immutable` (`BEFORE UPDATE OR DELETE`): UPDATE is rejected unless only `deliveryStatus` changed (compared as `to_jsonb(NEW) - 'deliveryStatus'`, so a column added later is immutable by default) and `conversation_delivery_can_advance(old, new)` allows it (`QUEUED -> [DEFERRED ->] SENT -> DELIVERED -> READ`; `FAILED`/`UNKNOWN` only from `QUEUED`/`DEFERRED`/`SENT`; nothing leaves `FAILED`, `UNKNOWN`, `READ`). DELETE is rejected unless (a) it runs inside the tenant cascade (`pg_trigger_depth() > 1`, the same device as `chatbot_request_events`) or (b) the transaction set `houndfe.conversation_retention = 'on'` **and** `purgeAfter < now()`. A second trigger on `chatbot_conversations` rejects a direct DELETE of a chat that still has messages (the FK cascade would otherwise skip rule (b)). `domain/delivery-status.ts` and the SQL function are compared pair by pair in `conversation-mirror.integration.spec.ts`.
+
+**Deviation: "the retention role".** §6.2 says only "el rol de retención" may delete. The application has a single database login, and creating a role needs privileges a migration cannot assume, so the role is a transaction-local marker (`set_config('houndfe.conversation_retention', 'on', true)`, set only by `ConversationRetentionService`) plus the mandatory `purgeAfter < now()`. It stops a code bug or a stray statement; it is not a security boundary against someone who can run arbitrary SQL as the application login (neither would be a role the same login can `SET ROLE` to). If the owner wants a real role, it is a deploy task (create the role, give the purge its own connection string), not a schema change.
+
+**Untrusted text (§6.1).** `parseMessageBatch` is an exact parser: unknown keys, an author the bot may not claim (`STAFF`, `SYSTEM`), `SYSTEM` as a type, a repeated id, a bad timestamp (no zone, before 2020, more than 5 minutes ahead) or a text over 4 096 **characters** are `400`; control characters (C0 except tab/LF/CR, DEL, C1) and bidi overrides/isolates are removed; markup is stored as text. `UNSUPPORTED` never stores words or a file: the backend writes a fixed text from `kind`. Nothing from the input is echoed in an error; logs carry counts, ids and error classes, never a phone, a text or a storage key.
+
+**Media.** `POST /chatbot-api/media`: bytes decide the type (`detectConversationMedia`: JPEG, PNG, WebP, PDF, Ogg, MPEG audio, ADTS AAC, M4A/M4B, AMR; video, GIF, SVG, HTML, archives, executables refused), 10 MiB cap (multer limit set to 10 MiB + 1 because busboy flags a file that *reaches* the limit as truncated), object under `conversation-media/<tenantId>/<mediaId>.<ext>` via `ReceiptStoragePort` (the receipts adapter, same `SPACES_*` client and bucket setting), idempotent by `X-Idempotency-Key` (+ `sha256`). Replay checks the registry before touching storage; a unique-index race (`ON CONFLICT DO NOTHING`) makes the loser delete its object and answer the winner's row. A failed put records nothing (`503`, retry with the same key); a failed insert deletes the object. Staff read: `GET /chatbot-media/:id`, an authenticated proxy (no signed URL: §12.5), permission checked on every request, `410` once purged.
+
+**Staff read.** `GET /chatbot-requests/:id/conversation?before|after&limit`: tenant-scoped request lookup (another tenant = 404), page by the unique `(conversationId, seq)` index in both directions, the response has no `conversationRef`, `customerKey` or storage key (R12: no route of this unit returns a phone). Without `read:ChatbotConversation` the assignee of an `IN_PROGRESS` request gets an empty page (their session; none exist before unit 11) and everyone else `403`.
+
+**Realtime.** `conversation.message` and `message.status` are logged by the mirror store in the same transaction, one per open request of the chat (`NEW`/`IN_PROGRESS`, at most 20), `userId` NULL, `payload` = ids and numbers only. `RealtimeEventShaper` loads the messages of a batch once (`PrismaConversationEventReader`, the same views as REST), and only readers with `read:ChatbotConversation` get a frame (`message.status` carries the status at delivery time).
+
+**Retention.** `ConversationRetentionService.purgeBatch` (global client, across tenants): (1) files: claim due rows with `FOR UPDATE SKIP LOCKED` stamping `purgeLeaseUntil` (no transaction open during network deletes; a crashed replica's lease expires), delete the object FIRST (only inside `conversation-media/<row tenant>/`), then mark purged and drop the row if no message points at it; a failed delete keeps the key, bumps `purgeAttempts`, stamps `lastPurgeErrorAt` = the run's stamp (the same run skips it, later runs retry it after the never-tried rows, like receipts retention); (2) messages: `DELETE … USING (SELECT … WHERE purgeAfter < now() ORDER BY purgeAfter LIMIT 1000 FOR UPDATE SKIP LOCKED)` with the retention marker; (3) purged file rows and (4) emptied, idle (1 day), `BOT`-mode chats of the deleted messages are removed. Requests, their `resolution` and their audit are never touched. `ConversationRetentionScheduler` (`@Interval` tick 60 s, hourly cadence, 20 calls per tick, catch-up while a batch is full and made progress; the sixteenth `@Interval`, `scheduler-gate.integration.spec.ts`).
+
+**Indexes and the query each one serves.**
+
+| Index | Query |
+| --- | --- |
+| unique `conversation_messages (conversationId, seq)` | Page read in both directions, and the unit 11 `seq` order |
+| unique `conversation_messages (tenantId, waMessageId)` | Ingest duplicate check, status lookup |
+| unique `conversation_messages (tenantId, clientMessageId)` | Staff idempotency (unit 11) |
+| `conversation_messages (purgeAfter)` | Retention due scan (`ORDER BY purgeAfter`, `SKIP LOCKED`) |
+| `conversation_messages (tenantId, mediaId) WHERE mediaId IS NOT NULL` | "Is this file still referenced?" |
+| unique `chatbot_conversations (tenantId, conversationRef)` | Ingest upsert, staff read |
+| `conversation_media (purgeAfter) WHERE purgedAt IS NULL` | File retention claim |
+| unique `conversation_media (tenantId, idempotencyKey)` | Upload idempotency |
+| `chatbot_requests (tenantId, conversationRef) WHERE conversationRef IS NOT NULL` | Open requests of a chat (realtime fan-out) |
+
+**Known limits and deviations.**
+- **Columns and fields.** `providerTimestamp` / `observedAt` replace the model's single `sentAt` (§3.9 and §11 name both clocks). `customerId` and `activeRequestId` of the contract's `ChatbotConversation` are **not** created: nothing in unit 9 uses them and a nullable FK to `chatbot_requests` needs the SET NULL column list of PostgreSQL 15; unit 11 adds them with its own migration. `author` is derived from `direction` (the bot cannot claim `STAFF`/`SYSTEM`, §4.1). `kind` on `UNSUPPORTED` is an addition to the §3.9 payload (it is how "video recibido" vs "ubicación recibida" is told, §12.5).
+- **`statuses:batch`** is built in this unit (the immutability rule has a `deliveryStatus` to protect and `message.status` needs a producer): 100 per call (the contract gives no cap), the bot's `FAILED`/`SENT`/`DELIVERED`/`READ` only, `errorCode` accepted and dropped (no column; a mutable column would break the trigger rule), statuses for an unknown message are reported, not stored.
+- **Thumbnails and audio duration** need image / audio parsing the backend does not have and this unit does not add a dependency: `hasThumb` is `false` (`?variant=thumb` -> `404 THUMB_UNAVAILABLE`), `durationSec` is `null`.
+- **The request's 24 h window** (`lastCustomerMessageAt`, `whatsappWindowClosesAt` on `chatbot_requests`) is NOT moved by the mirror: §4.4 step 3 belongs to the live session (unit 11), and writing a request column from the ingest needs `version` and audit semantics. The chat's own `lastCustomerMessageAt` is kept.
+- **`unreadCustomerMessages`** stays `0`: there is no read marker and no definition of "unread" (by whom, since when) in the contract. Open question.
+- **The 20 media per conversation per hour limit** (§6.4) is for the staff upload (unit 11); the bot upload spends from the credential's `write` budget.
+- **Batch body size.** Express's default JSON limit is 100 KB; a full batch is ~200 KB. `installConversationBatchBodyParser` gives that one route 1 MB, but `src/main.ts` is outside this unit's edit surface: it must be mounted there (documented in the bot contract's deploy checklist).
+- **The storage key never leaves the backend**, and no log line prints one (specs capture every logger call on the failure paths).
 
 ## Invariants (CHECK constraints)
 
@@ -449,7 +505,7 @@ The migration is additive: it creates four tables, their indexes and their CHECK
 
 ## Known deviations from the contract
 
-- **`conversationRef`** is plain TEXT. The contract's `conversationId` FK to `ChatbotConversation` (§3.6) will be added when the conversation mirror table exists (unit 9).
+- **`conversationRef`** is plain TEXT. Unit 9 created `chatbot_conversations`, but the link stays by reference with no FK (a chat exists without a request and outlives it); see "Conversation mirror and media".
 - **Wrapped zone requests** have no cancelled state, so a customer cancel leaves `delivery_zone_requests` `PENDING`; see "Customer cancel of a wrapped decision".
 - **Route budget window.** The shared limiter is a fixed window anchored at the first request; the old per-process limiter was a sliding window. Count and per-minute limit are unchanged; a burst across a window edge can reach up to twice the budget.
 - **`businessHours`** in the create answer is `null` still (the calendar exists since unit 7a; wiring it into the create answer is not part of 7a). **`scheduledFor`** answers `422 SCHEDULING_DISABLED` until unit 14. **`GET /chatbot-api/conversations/:ref/state`** needs the conversation mirror (unit 9/11) and is not implemented.
