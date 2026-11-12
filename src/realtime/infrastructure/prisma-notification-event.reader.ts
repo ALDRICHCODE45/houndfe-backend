@@ -1,15 +1,15 @@
 /**
- * Batched notification reads for the realtime shaper (unit 8). Same row-to-view
- * mapping as `NotificationsService` (the list route), so the stream shows what
- * REST shows; `prisma-notification-event.reader.integration.spec.ts` pins the
+ * Batched notification reads for the realtime shaper (unit 8). Same statement
+ * and row-to-view mapping as `NotificationsService` (the list route), so the
+ * stream shows what REST shows; `prisma-notification-event.reader.integration.spec.ts` pins the
  * two together. Tenant-scoped client (CLS) plus an explicit `tenantId`.
  */
 import { Injectable } from '@nestjs/common';
 import {
-  noticeText,
-  type NoticePayload,
-} from '../../notifications/domain/chatbot-request-notice';
-import type { NotificationView } from '../../notifications/application/notifications.service';
+  toNotificationView,
+  type NotificationView,
+} from '../../notifications/domain/notification-view';
+import { findNotificationRows } from '../../notifications/infrastructure/notification-rows';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { NotificationEventReader } from '../application/notification-event-reader';
 
@@ -23,24 +23,16 @@ export class PrismaNotificationEventReader implements NotificationEventReader {
     const out = new Map<string, NotificationView>();
     if (wanted.length === 0) return out;
     const owner = new Map(wanted.map((w) => [w.id, w.userId]));
-    const rows = await this.tenantPrisma.getClient().notification.findMany({
-      where: {
-        tenantId: this.tenantPrisma.getTenantId(),
-        userId: { in: [...new Set(wanted.map((w) => w.userId))] },
-        id: { in: [...owner.keys()] },
-      },
+    // One statement; `requestOpen` is read at the moment the event is built.
+    const rows = await findNotificationRows(this.tenantPrisma.getClient(), {
+      tenantId: this.tenantPrisma.getTenantId(),
+      userIds: [...new Set(wanted.map((w) => w.userId))],
+      ids: [...owner.keys()],
     });
     for (const row of rows) {
       // One id, one owner: a notice that is someone else's is not returned.
       if (owner.get(row.id) !== row.userId) continue;
-      out.set(row.id, {
-        id: row.id,
-        type: row.type,
-        ...noticeText(row.type, row.payload as Partial<NoticePayload> | null),
-        requestId: row.requestId,
-        createdAt: row.createdAt.toISOString(),
-        readAt: row.readAt?.toISOString() ?? null,
-      });
+      out.set(row.id, toNotificationView(row));
     }
     return out;
   }

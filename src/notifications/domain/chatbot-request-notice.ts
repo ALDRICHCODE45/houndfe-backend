@@ -105,11 +105,26 @@ export interface ChatbotRequestNotice {
   claimCycle?: number;
 }
 
+/**
+ * Why an escalation notice reached a person (S10): they were the request's
+ * assignee, or they hold `read:ChatbotEscalation`. Someone who is both is
+ * `ASSIGNEE` (the closer relationship wins). Decided when the notification row
+ * is created and stored in its payload; it is never recomputed.
+ */
+export const NOTICE_REASONS = ['ASSIGNEE', 'ESCALATION'] as const;
+export type NoticeReason = (typeof NOTICE_REASONS)[number];
+
+/** Only the types sent to `ESCALATION_VIEWERS` (80 % and overdue) have one. */
+export const carriesReason = (type: string): boolean =>
+  AUDIENCE[type as NoticeType] === 'ESCALATION_VIEWERS';
+
 /** `payload` of an in-app notification: just enough to render and link. */
 export interface NoticePayload {
   folio: number;
   subtype: string;
   cause?: ClosedCause;
+  /** `REQUEST_ESCALATION` / `REQUEST_OVERDUE` only; absent on older rows. */
+  reason?: NoticeReason;
 }
 
 // ------------------------------------------------------------------- email
@@ -196,6 +211,12 @@ const CLOSED_TITLE: Record<ClosedCause, string> = {
   MERGED: 'Otra persona la unió con otra solicitud del cliente',
 };
 
+/** The stored cause when it is one of the closed set; anything else is none. */
+export const closedCauseOf = (value: unknown): ClosedCause | null =>
+  (CLOSED_CAUSES as readonly unknown[]).includes(value)
+    ? (value as ClosedCause)
+    : null;
+
 /** §5.2 `title` (<=120) and `body` (<=200), built from type and payload. */
 export function noticeText(
   type: string,
@@ -203,7 +224,7 @@ export function noticeText(
 ): { title: string; body: string } {
   const title =
     type === 'REQUEST_CANCELLED'
-      ? CLOSED_TITLE[payload?.cause ?? 'CUSTOMER']
+      ? CLOSED_TITLE[closedCauseOf(payload?.cause) ?? 'CUSTOMER']
       : (TITLE[type as NoticeType] ?? 'Aviso');
   const parts = [
     payload?.subtype ? subtypeLabel(payload.subtype) : null,

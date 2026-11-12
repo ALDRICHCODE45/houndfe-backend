@@ -15,26 +15,23 @@ import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
-  noticeText,
-  type NoticePayload,
-} from '../domain/chatbot-request-notice';
-import {
   NOTIFICATION_READ_EVENTS,
   type NotificationReadEventsPort,
 } from '../domain/notification-events.port';
+import {
+  toNotificationView,
+  type NotificationView,
+} from '../domain/notification-view';
+import {
+  findNotificationRows,
+  listNotificationRows,
+} from '../infrastructure/notification-rows';
+
+// The view type lives with its mapping; this module keeps exporting it.
+export type { NotificationView };
 
 export const DEFAULT_PAGE_SIZE = 20;
 export const MAX_PAGE_SIZE = 50;
-
-export interface NotificationView {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  requestId: string | null;
-  createdAt: string;
-  readAt: string | null;
-}
 
 export interface NotificationPage {
   items: NotificationView[];
@@ -65,24 +62,6 @@ export function decodeCursor(cursor: string): { createdAt: Date; id: string } {
   return { createdAt, id };
 }
 
-function toView(row: {
-  id: string;
-  type: string;
-  payload: unknown;
-  requestId: string | null;
-  createdAt: Date;
-  readAt: Date | null;
-}): NotificationView {
-  return {
-    id: row.id,
-    type: row.type,
-    ...noticeText(row.type, row.payload as Partial<NoticePayload> | null),
-    requestId: row.requestId,
-    createdAt: row.createdAt.toISOString(),
-    readAt: row.readAt?.toISOString() ?? null,
-  };
-}
-
 @Injectable()
 export class NotificationsService {
   constructor(
@@ -108,26 +87,18 @@ export class NotificationsService {
     query: { cursor?: string; limit?: number; unread?: boolean },
   ): Promise<NotificationPage> {
     const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
-    const where: Prisma.NotificationWhereInput = {
-      ...this.own(userId),
-      ...(query.unread ? { readAt: null } : {}),
-    };
-    if (query.cursor) {
-      const { createdAt, id } = decodeCursor(query.cursor);
-      where.OR = [
-        { createdAt: { lt: createdAt } },
-        { createdAt, id: { lt: id } },
-      ];
-    }
-    const rows = await this.db.notification.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    // One statement: the notices LEFT JOINed with their request (`requestOpen`).
+    const rows = await listNotificationRows(this.db, {
+      tenantId: this.tenantPrisma.getTenantId(),
+      userId,
+      unreadOnly: query.unread === true,
+      after: query.cursor ? decodeCursor(query.cursor) : undefined,
       take: limit + 1,
     });
     const page = rows.slice(0, limit);
     const last = page.at(-1);
     return {
-      items: page.map((row) => toView(row)),
+      items: page.map((row) => toNotificationView(row)),
       nextCursor:
         rows.length > limit && last
           ? encodeCursor(last.createdAt, last.id)
@@ -144,12 +115,14 @@ export class NotificationsService {
     userId: string,
     id: string,
   ): Promise<{ notification: NotificationView; unreadCount: number } | null> {
-    const row = await this.db.notification.findFirst({
-      where: { ...this.own(userId), id },
+    const [row] = await findNotificationRows(this.db, {
+      tenantId: this.tenantPrisma.getTenantId(),
+      userIds: [userId],
+      ids: [id],
     });
     if (!row) return null;
     const { count } = await this.unreadCount(userId);
-    return { notification: toView(row), unreadCount: count };
+    return { notification: toNotificationView(row), unreadCount: count };
   }
 
   async unreadCount(userId: string): Promise<{ count: number }> {

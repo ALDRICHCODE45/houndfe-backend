@@ -348,6 +348,54 @@ describeIfDb('notifications (PostgreSQL)', () => {
       );
       // boss holds manage:all (so it reads escalations too); ana does not.
       expect(ids(rows)).toEqual([f.escal, f.boss].sort());
+      // S10: nobody holds the request, so it reached everyone through the grant
+      expect(rows.map((r) => r.payload)).toEqual([
+        expect.objectContaining({ reason: 'ESCALATION' }),
+        expect.objectContaining({ reason: 'ESCALATION' }),
+      ]);
+    });
+
+    it('S10: an escalation names the assignee ASSIGNEE (also a holder: once), the rest ESCALATION; other types store no reason', async () => {
+      const f = await fixture();
+      const made = await create(f.tenantId, direct());
+      await drain();
+      // `boss` (manage:all) is both the assignee and a holder; `ana` is a
+      // plain assignee without the grant.
+      for (const assignee of [f.boss, f.ana]) {
+        await root.$transaction(async (tx) => {
+          await enqueueNotice(tx as never, f.tenantId, {
+            type: 'REQUEST_OVERDUE',
+            requestId: reqId(made),
+            folio: 1,
+            subtype: 'UNKNOWN_QUESTION',
+            dedupKey: `overdue:${assignee}`,
+            recipientUserId: assignee,
+          });
+        });
+      }
+      await drain();
+      const reasons = async (key: string) =>
+        Object.fromEntries(
+          (await notificationsOf(f.tenantId))
+            .filter((r) => r.dedupKey === key)
+            .map((r) => [r.userId, (r.payload as { reason?: string }).reason]),
+        );
+      expect(await reasons(`overdue:${f.boss}`)).toEqual({
+        [f.boss]: 'ASSIGNEE',
+        [f.escal]: 'ESCALATION',
+      });
+      expect(await reasons(`overdue:${f.ana}`)).toEqual({
+        [f.ana]: 'ASSIGNEE',
+        [f.escal]: 'ESCALATION',
+        [f.boss]: 'ESCALATION',
+      });
+      const created = (await notificationsOf(f.tenantId)).filter(
+        (r) => r.type === 'REQUEST_CREATED',
+      );
+      expect(created.length).toBeGreaterThan(0);
+      for (const row of created) {
+        expect(row.payload).not.toHaveProperty('reason');
+      }
     });
 
     it('reassign notifies the new assignee only; the customer cancel notifies the assignee', async () => {
@@ -939,7 +987,13 @@ describeIfDb('notifications (PostgreSQL)', () => {
         type: 'REQUEST_CREATED',
         title: 'Nueva solicitud',
         readAt: null,
+        // S10: structured fields next to the text
+        subtype: 'UNKNOWN_QUESTION',
+        cause: null,
+        reason: null,
+        requestOpen: true,
       });
+      expect(mine.items[0].folio).toMatch(/^S-\d{6}$/);
       expect(mine.items[0].body).toMatch(/^Pregunta sin respuesta · S-\d{6}$/);
       expect(await asUser(f, f.ana, () => api.unreadCount(f.ana))).toEqual({
         count: 3,

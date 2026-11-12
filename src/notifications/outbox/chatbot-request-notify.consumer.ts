@@ -27,6 +27,7 @@ import {
   slaNoticeDropReason,
   type ChatbotRequestNotice,
   type NoticePayload,
+  type NoticeReason,
   type SlaDropReason,
   type SlaNoticeRequestFacts,
 } from '../domain/chatbot-request-notice';
@@ -36,7 +37,7 @@ import {
 } from '../domain/notification-events.port';
 import {
   emailDisabledAmong,
-  resolveRecipientIds,
+  resolveRecipients,
 } from '../infrastructure/notice-recipients';
 
 export const NOTICE_NOTIFY_BATCH_SIZE = Symbol.for('NoticeNotifyBatchSize');
@@ -142,23 +143,26 @@ export class ChatbotRequestNotifyConsumer {
       );
       return;
     }
-    const recipients = await resolveRecipientIds(tx, row.tenantId, notice);
+    const recipients = await resolveRecipients(tx, row.tenantId, notice);
     if (recipients.length > 0) {
-      const payload: NoticePayload = {
+      // Per person: `reason` (S10) is why the escalation reached THEM, so it is
+      // decided here, when the row is created, and never recomputed.
+      const payloadOf = (reason: NoticeReason | null): NoticePayload => ({
         folio: notice.folio,
         subtype: notice.subtype,
         ...(notice.cause ? { cause: notice.cause } : {}),
-      };
+        ...(reason ? { reason } : {}),
+      });
       // `skipDuplicates` is ON CONFLICT DO NOTHING on (tenant, user, dedupKey):
       // only rows inserted now are returned, so a re-run never mails twice.
       const created = await tx.notification.createManyAndReturn({
-        data: recipients.map((userId) => ({
+        data: recipients.map(({ userId, reason }) => ({
           tenantId: row.tenantId,
           userId,
           type: notice.type,
           requestId: notice.requestId,
           // SAFETY: NoticePayload holds only numbers and strings.
-          payload: payload as unknown as Prisma.InputJsonObject,
+          payload: payloadOf(reason) as unknown as Prisma.InputJsonObject,
           dedupKey: notice.dedupKey,
         })),
         skipDuplicates: true,

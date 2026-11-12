@@ -469,6 +469,12 @@ describeIfDb('realtime stream (PostgreSQL, real HTTP)', () => {
           type: 'REQUEST_CREATED',
           requestId: w.request.id,
           readAt: null,
+          // S10: the same structured fields as the list item
+          folio: 'S-000007',
+          subtype: 'UNKNOWN_QUESTION',
+          cause: null,
+          reason: null,
+          requestOpen: true,
         },
         unreadCount: 1,
       });

@@ -10,6 +10,7 @@ import {
   AUDIENCE_GRANTS,
   audienceOf,
   type ChatbotRequestNotice,
+  type NoticeReason,
 } from '../domain/chatbot-request-notice';
 
 type RecipientClient = Pick<
@@ -30,8 +31,22 @@ const roleGrants = (action: string, subject: string) => ({
   },
 });
 
+/** A person to notify, and (escalation types only) why it reaches them. */
+export interface NoticeRecipient {
+  userId: string;
+  reason: NoticeReason | null;
+}
+
+const plain = (userId: string): NoticeRecipient => ({ userId, reason: null });
+
 /**
- * Distinct user ids to notify, excluding the actor of the event.
+ * Distinct people to notify, excluding the actor of the event.
+ *
+ * `reason` (S10) is set only for the escalation audience (80 % and overdue):
+ * `ASSIGNEE` for the request's assignee (the sweep names them in
+ * `recipientUserId`), `ESCALATION` for everyone who gets it through
+ * `read:ChatbotEscalation`. A person who is both is `ASSIGNEE`, once. Every
+ * other type has `reason: null`.
  *
  * Grants are merged across ALL of a person's memberships in the tenant, as
  * `CaslAbilityFactory` does (it flattens every membership's role): someone
@@ -39,11 +54,11 @@ const roleGrants = (action: string, subject: string) => ({
  * grant is its own condition over the user's memberships, not one condition
  * that a single role must satisfy.
  */
-export async function resolveRecipientIds(
+export async function resolveRecipients(
   tx: RecipientClient,
   tenantId: string,
   notice: ChatbotRequestNotice,
-): Promise<string[]> {
+): Promise<NoticeRecipient[]> {
   const audience = audienceOf(notice.type);
   if (audience === 'USER') {
     const membership = await tx.tenantMembership.findFirst({
@@ -55,7 +70,7 @@ export async function resolveRecipientIds(
       select: { userId: true },
     });
     return membership && membership.userId !== notice.actorUserId
-      ? [membership.userId]
+      ? [plain(membership.userId)]
       : [];
   }
   const users = await tx.user.findMany({
@@ -72,6 +87,13 @@ export async function resolveRecipientIds(
   const ids = users
     .map((user) => user.id)
     .filter((userId) => userId !== notice.actorUserId);
+  if (audience !== 'ESCALATION_VIEWERS') return ids.map(plain);
+  // The assignee, held or not as a viewer, is named by the sweep; ASSIGNEE
+  // wins over ESCALATION when both apply.
+  const recipients: NoticeRecipient[] = ids.map((userId) => ({
+    userId,
+    reason: userId === notice.recipientUserId ? 'ASSIGNEE' : 'ESCALATION',
+  }));
   // §5.1: 80 % and overdue of a CLAIMED request also go to its assignee (the
   // sweep names them in `recipientUserId`), when they are still an active
   // member of the tenant.
@@ -85,10 +107,10 @@ export async function resolveRecipientIds(
       select: { userId: true },
     });
     if (assignee && assignee.userId !== notice.actorUserId) {
-      ids.unshift(assignee.userId);
+      recipients.unshift({ userId: assignee.userId, reason: 'ASSIGNEE' });
     }
   }
-  return ids;
+  return recipients;
 }
 
 /** Users that turned email off. No row means the default: email on. */
