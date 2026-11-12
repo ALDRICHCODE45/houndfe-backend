@@ -88,6 +88,31 @@ const UNREAD_CUSTOMER_MESSAGES = Prisma.sql`(CASE WHEN r."conversationRef" IS NO
    AND cm."author" = 'CUSTOMER'
   WHERE cv."tenantId" = r."tenantId" AND cv."conversationRef" = r."conversationRef"
     AND cm."tenantId" = r."tenantId") ELSE 0 END)`;
+/**
+ * Unit 11 (§12.4 `liveSession`): the newest session of a conversation request,
+ * one correlated scalar subquery per field, all served by the index
+ * `(tenantId, requestId, epoch DESC)` and kept off every other row by the CASE.
+ * An ENDED session on an open request reads as WAITING (reverted or released).
+ */
+const LIVE_LATEST = Prisma.sql`(SELECT s."epoch" FROM "chatbot_live_sessions" s
+  WHERE s."tenantId" = r."tenantId" AND s."requestId" = r."id"
+  ORDER BY s."epoch" DESC LIMIT 1)`;
+const live = (column: string) =>
+  Prisma.sql`(CASE WHEN r."kind" = 'CONVERSATION' THEN (SELECT ${Prisma.raw(column)}
+    FROM "chatbot_live_sessions" s
+    WHERE s."tenantId" = r."tenantId" AND s."requestId" = r."id"
+    ORDER BY s."epoch" DESC LIMIT 1) END)`;
+const LIVE_STATE = Prisma.sql`(CASE WHEN r."kind" <> 'CONVERSATION' THEN NULL ELSE (SELECT
+    CASE WHEN s."state" <> 'ENDED' THEN s."state"
+         WHEN r."status" IN ('NEW', 'IN_PROGRESS') THEN 'WAITING'
+         ELSE 'ENDED' END
+  FROM "chatbot_live_sessions" s
+  WHERE s."tenantId" = r."tenantId" AND s."requestId" = r."id"
+  ORDER BY s."epoch" DESC LIMIT 1) END)`;
+const LIVE_LAST_CUSTOMER = Prisma.sql`(CASE WHEN r."kind" = 'CONVERSATION' AND ${LIVE_LATEST} IS NOT NULL THEN (
+  SELECT cv."lastCustomerMessageAt" FROM "chatbot_conversations" cv
+  WHERE cv."tenantId" = r."tenantId" AND cv."conversationRef" = r."conversationRef") END)`;
+const LIVE_ACTIVE_AT = live('s."activeAt"');
 const COLUMNS = Prisma.sql`
   r."id", r."folio", r."kind"::text AS "kind", r."subtype"::text AS "subtype",
   r."status"::text AS "status", r."version", r."customerKey", r."customerId",
@@ -101,7 +126,13 @@ const COLUMNS = Prisma.sql`
   ${MERGED_INTO} AS "mergedInto",
   ${LAST_RELEASED_NEW} AS "lastReleasedAt",
   ${ZONE_HAS_VALIDATION} AS "zoneHasValidation",
-  ${UNREAD_CUSTOMER_MESSAGES} AS "unreadCustomerMessages"`;
+  ${UNREAD_CUSTOMER_MESSAGES} AS "unreadCustomerMessages",
+  ${LIVE_STATE} AS "liveSessionState",
+  ${live('s."epoch"')} AS "liveHandoffEpoch",
+  ${live('s."lastStaffActivityAt"')} AS "liveLastStaffActivityAt",
+  ${live('s."startedAt"')} AS "liveStartedAt",
+  ${LIVE_ACTIVE_AT} AS "liveActiveAt",
+  ${LIVE_LAST_CUSTOMER} AS "liveLastCustomerMessageAt"`;
 /**
  * S9: open requests of the group's customer with `overdueAt` set, exact. A
  * correlated scalar subquery in the page CTE: it runs once per group of the

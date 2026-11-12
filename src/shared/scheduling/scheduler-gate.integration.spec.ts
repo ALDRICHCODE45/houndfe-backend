@@ -49,9 +49,9 @@ describeIfDb('scheduled jobs under integration tests (real AppModule)', () => {
     const restore = enableSchedulersForSpec();
     try {
       const { intervals, timeouts, crons } = await registered();
-      // 16 @Interval providers today (unnamed jobs get generated ids, so the
+      // 17 @Interval providers today (unnamed jobs get generated ids, so the
       // count is the inventory). Update when a scheduled provider is added.
-      expect(intervals).toHaveLength(16);
+      expect(intervals).toHaveLength(17);
       expect(timeouts).toEqual([]);
       expect(crons).toEqual([]);
     } finally {

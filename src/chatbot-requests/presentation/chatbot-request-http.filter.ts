@@ -61,6 +61,12 @@ const MESSAGES: Record<string, string> = {
   MEDIA_PURGED: 'The file was deleted by the retention policy',
   THUMB_UNAVAILABLE: 'This file has no thumbnail',
   MEDIA_STORAGE_FAILED: 'The file could not be stored or read, retry later',
+  SESSION_NOT_ACTIVE: 'The live session is not active',
+  STALE_EPOCH: 'The handoff epoch is not the current one',
+  SESSION_NOT_ENDING: 'The session is not ending: only the backend ends it',
+  WINDOW_CLOSED: 'The 24 h WhatsApp window is closed',
+  TEMPLATE_ALREADY_SENT: 'The template was already requested for this window',
+  TEMPLATE_NOT_CONFIGURED: 'No WhatsApp template is configured',
   REQUEST_ERROR: 'Request failed',
   INTERNAL_ERROR: 'Internal server error',
 };

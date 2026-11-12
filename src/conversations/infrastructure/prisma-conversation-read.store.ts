@@ -55,9 +55,19 @@ export class PrismaConversationReadStore implements ConversationReadStore {
     });
   }
 
+  async sessionStartSeq(requestId: string): Promise<number | null> {
+    const session = await this.db.chatbotLiveSession.findFirst({
+      where: { tenantId: this.tenantPrisma.getTenantId(), requestId },
+      orderBy: { epoch: 'desc' },
+      select: { startSeq: true },
+    });
+    return session?.startSeq ?? null;
+  }
+
   async page(
     conversationRef: string,
     query: ConversationPageQuery,
+    minSeq?: number,
   ): Promise<ConversationPageRows> {
     const tenantId = this.tenantPrisma.getTenantId();
     const conversation = await this.db.chatbotConversation.findFirst({
@@ -65,7 +75,13 @@ export class PrismaConversationReadStore implements ConversationReadStore {
       select: { id: true },
     });
     if (!conversation) return { rows: [], hasMoreBefore: false };
-    const where = { tenantId, conversationId: conversation.id };
+    const where = {
+      tenantId,
+      conversationId: conversation.id,
+      // Unit 11: an attendee without `read:ChatbotConversation` sees their
+      // session only (§2.5); the `seq` filters below add to this bound.
+      ...(minSeq !== undefined ? { seq: { gte: minSeq } } : {}),
+    };
 
     if (query.mode === 'after') {
       const rows = await this.db.conversationMessage.findMany({

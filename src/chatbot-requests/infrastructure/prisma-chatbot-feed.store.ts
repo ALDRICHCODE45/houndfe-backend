@@ -16,11 +16,15 @@ import {
   type FeedItemRow,
   type OutcomeAck,
 } from '../application/chatbot-feed.service';
+import { emitRealtimeEvents } from '../../shared/realtime/realtime-event-writes';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
+import { messageStatusForOutcome } from '../domain/live-session';
+import { applyStaffMessageOutcome } from './live-session-writes';
 import {
   classifyOutcome,
   DEFERRED_OUTCOMES,
   FEED_LIMITS,
+  FEED_TYPE,
   type FeedOutcome,
   type FeedOutcomeInput,
   isDeferredOutcome,
@@ -46,6 +50,7 @@ interface LockedDelivery {
   evidenceHash: string | null;
   outcome: FeedOutcome | null;
   ackedAt: Date | null;
+  messageId: string | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -145,7 +150,7 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
       const { db, tenantId } = this;
       const [row] = await db.$queryRaw<LockedDelivery[]>(Prisma.sql`
         SELECT "cursor", "requestId", "type", "attemptId", "evidenceHash",
-               "outcome", "ackedAt"
+               "outcome", "ackedAt", "payload"->>'messageId' AS "messageId"
         FROM "chatbot_feed_items"
         WHERE "tenantId" = ${tenantId} AND "deliveryId" = ${deliveryId}::uuid
         FOR UPDATE`);
@@ -231,6 +236,37 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
           },
         },
       });
+      // Unit 11: the outcome of a staff message or template moves the
+      // message's status, stores its wamid and tells the attendee (the realtime
+      // lock is the last lock of the transaction).
+      if (
+        row.messageId &&
+        (row.type === FEED_TYPE.staffMessage ||
+          row.type === FEED_TYPE.templateRequested) &&
+        input.outcome !== 'DEFERRED_HUMAN_SESSION'
+      ) {
+        const applied = await applyStaffMessageOutcome(db, tenantId, {
+          messageId: row.messageId,
+          status: messageStatusForOutcome(input.outcome),
+          providerMessageId: input.providerMessageId ?? null,
+          attemptedAt: input.attemptedAt ? new Date(input.attemptedAt) : null,
+        });
+        if (applied) {
+          await emitRealtimeEvents(db, [
+            {
+              tenantId,
+              userId: null,
+              type: 'message.status',
+              requestId: row.requestId,
+              payload: {
+                messageId: row.messageId,
+                seq: applied.seq,
+                deliveryStatus: applied.deliveryStatus,
+              },
+            },
+          ]);
+        }
+      }
       return this.toAck(deliveryId, input.outcome, input.attemptId, ackedAt);
     });
   }

@@ -28,6 +28,12 @@ import {
   enqueueCancelled,
   enqueueClarificationAnswer,
 } from './chatbot-feed-writes';
+import {
+  beginSessionEnding,
+  emitSessionEvent,
+  lockLatestSession,
+  startLiveSession,
+} from './live-session-writes';
 import { assignableUserWhere } from './assignable-users';
 import { lockZipCode } from '../../delivery-zones/infrastructure/delivery-zone-persistence';
 import {
@@ -204,6 +210,53 @@ export class PrismaChatbotRequestCommandStore implements ChatbotRequestCommandSt
       replyId,
       text,
     );
+  }
+
+  async startLiveSession(
+    row: ChatbotRequestRow,
+    actor: StaffActor,
+  ): Promise<void> {
+    const [window] = await this.tx.$queryRaw<
+      { lastCustomerMessageAt: Date | null }[]
+    >(Prisma.sql`
+      SELECT "lastCustomerMessageAt" FROM "chatbot_requests"
+      WHERE "tenantId" = ${this.tenantId} AND "id" = ${row.id}`);
+    await startLiveSession(
+      this.tx,
+      this.tenantId,
+      {
+        id: row.id,
+        conversationRef: row.conversationRef as string,
+        version: row.version,
+        requestLastCustomerMessageAt: window?.lastCustomerMessageAt ?? null,
+      },
+      actor,
+    );
+  }
+
+  async beginLiveSessionEnding(
+    row: ChatbotRequestRow,
+    reason: 'FINISHED' | 'FORCED',
+  ): Promise<void> {
+    const session = await lockLatestSession(this.tx, this.tenantId, row.id);
+    if (!session || row.conversationRef === null) {
+      throw new Error('finish: the ACTIVE session vanished under the lock');
+    }
+    await beginSessionEnding(
+      this.tx,
+      this.tenantId,
+      session,
+      row.conversationRef,
+      reason,
+    );
+  }
+
+  emitSessionEvent(
+    requestId: string,
+    type: 'session.starting' | 'session.ending',
+    version: number,
+  ): Promise<void> {
+    return emitSessionEvent(this.tx, this.tenantId, requestId, type, version);
   }
 
   async lockZoneOf(requestId: string): Promise<void> {

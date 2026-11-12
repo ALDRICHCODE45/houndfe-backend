@@ -105,3 +105,34 @@ export class LinkCustomerDto extends ExpectedVersionDto {
   @IsUUID()
   customerId!: string;
 }
+
+/**
+ * Unit 11 (§4.8 `finish {expectedVersion, note ≤ 1000, complaintOutcome?}`).
+ * `note` is `unknown` on purpose: `parseFinishNote` (domain) owns the rules.
+ * `complaintOutcome` is only recorded in this unit (unit 12 enforces it).
+ */
+export class FinishDto extends ExpectedVersionDto {
+  @IsDefined()
+  note!: unknown;
+
+  @IsOptional()
+  @IsIn(['RETURN', 'REPLACEMENT', 'REFUND', 'NO_ACTION'])
+  complaintOutcome?: string;
+}
+
+/**
+ * Unit 11 (§4.4 `messages {clientMessageId, expectedEpoch, text}`). The header
+ * `Idempotency-Key` must equal `clientMessageId`. `text` is `unknown`:
+ * `parseStaffMessageText` owns the rules.
+ */
+export class StaffMessageDto {
+  @IsUUID()
+  clientMessageId!: string;
+
+  @IsInt()
+  @Min(1)
+  expectedEpoch!: number;
+
+  @IsDefined()
+  text!: unknown;
+}

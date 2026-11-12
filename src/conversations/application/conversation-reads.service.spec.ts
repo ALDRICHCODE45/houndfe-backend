@@ -37,7 +37,9 @@ function build(
   request: Partial<ConversationRequestRef> = {},
   rows: MessageRecord[] = [row(1), row(2), row(3)],
   markRead: jest.Mock = jest.fn().mockResolvedValue(true),
+  sessionStartSeq: number | null = null,
 ) {
+  const page = jest.fn().mockResolvedValue({ rows, hasMoreBefore: false });
   const store: ConversationReadStore = {
     findRequest: jest.fn().mockResolvedValue({
       id: 'r-1',
@@ -46,13 +48,56 @@ function build(
       assigneeUserId: null,
       ...request,
     }),
-    page: jest.fn().mockResolvedValue({ rows, hasMoreBefore: false }),
+    page,
     markRead,
+    sessionStartSeq: jest.fn().mockResolvedValue(sessionStartSeq),
     media: jest.fn().mockResolvedValue([]),
     users: jest.fn().mockResolvedValue([]),
   };
-  return { service: new ConversationReadsService(store), store, markRead };
+  return {
+    service: new ConversationReadsService(store),
+    store,
+    page,
+    markRead,
+  };
 }
+
+describe('ConversationReadsService, attendee without read:ChatbotConversation (unit 11, §2.5)', () => {
+  it('sees only the messages of their own session, from its first seq, and moves no marker', async () => {
+    const {
+      service,
+      page: pageMock,
+      markRead,
+    } = build(
+      { status: 'IN_PROGRESS', assigneeUserId: 'u-2' },
+      [row(5), row(6)],
+      undefined,
+      5,
+    );
+    const page = await service.page(
+      { userId: 'u-2', ability: ATTENDEE },
+      'r-1',
+      {},
+    );
+    expect(page.items.map((m) => m.seq)).toEqual([5, 6]);
+    expect(pageMock).toHaveBeenCalledWith(
+      'wa:5215512345678',
+      expect.anything(),
+      5,
+    );
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('a full reader is not limited to a session', async () => {
+    const { service, page: pageMock } = build({}, undefined, undefined, 5);
+    await service.page({ userId: 'u-1', ability: READER }, 'r-1', {});
+    expect(pageMock).toHaveBeenCalledWith(
+      'wa:5215512345678',
+      expect.anything(),
+      undefined,
+    );
+  });
+});
 
 describe('ConversationReadsService, S12 read marker', () => {
   it('moves the marker to the newest message the page showed', async () => {
@@ -66,7 +111,7 @@ describe('ConversationReadsService, S12 read marker', () => {
     expect(markRead).toHaveBeenCalledWith('wa:5215512345678', 3);
   });
 
-  it('an assignee without read:ChatbotConversation gets the empty page and moves nothing', async () => {
+  it('an assignee without read:ChatbotConversation and with no session gets the empty page and moves nothing', async () => {
     const { service, markRead } = build({
       status: 'IN_PROGRESS',
       assigneeUserId: 'u-2',

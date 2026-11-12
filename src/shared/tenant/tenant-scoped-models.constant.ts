@@ -174,4 +174,8 @@ export const TENANT_SCOPED_MODELS = new Set([
   // a `tenantId` and no foreign key (it outlives the tenant on purpose); the
   // sweep that settles it is a system flow on the global client.
   'ConversationMediaIntent',
+  // Live conversation (human-intervention / unit 11): sessions and the paid
+  // template record. Both carry `tenantId` and a tenant FK.
+  'ChatbotLiveSession',
+  'ChatbotSessionTemplate',
 ]);

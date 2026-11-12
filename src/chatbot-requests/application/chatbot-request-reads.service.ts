@@ -17,6 +17,7 @@ import {
   type ChatbotRequestKind,
   type ChatbotRequestStatus,
   type ChatbotRequestSubtype,
+  type LiveSessionState,
   type StaffCancelReason,
 } from '../domain/chatbot-request.commands';
 import type { CustomerKeySealer } from '../domain/customer-key-sealer';
@@ -33,6 +34,7 @@ import {
   type ActionAvailability,
   type CursorKind,
 } from '../domain/staff-inbox';
+import { finishIdle } from '../domain/live-session';
 import { toStaffPhone } from '../domain/staff-phone';
 import type { SlaAnchors, SlaLevel } from '../domain/chatbot-sla';
 import { isWindowClosingSoon } from '../domain/window-closing-soon';
@@ -154,6 +156,13 @@ export interface RequestRecord {
   zoneHasValidation?: boolean | null;
   /** S12: customer messages since a staff member last opened the chat (open requests). */
   unreadCustomerMessages?: number;
+  /** Unit 11: the newest session of a live request (§12.4); null/absent: none. */
+  liveSessionState?: LiveSessionState | null;
+  liveHandoffEpoch?: number | null;
+  liveLastStaffActivityAt?: Date | null;
+  liveStartedAt?: Date | null;
+  liveActiveAt?: Date | null;
+  liveLastCustomerMessageAt?: Date | null;
 }
 
 export interface GroupRecord {
@@ -804,6 +813,15 @@ export class ChatbotRequestReadsService {
             request.subtype === 'DELIVERY_ZONE' && !record.zoneImpact,
           hasMergeCandidate: record.hasMergeCandidate,
           hasLinkCandidate: record.candidates.length > 0,
+          finishIdle: finishIdle(
+            {
+              state: request.liveSessionState === 'ACTIVE' ? 'ACTIVE' : 'ENDED',
+              startedAt: request.liveStartedAt ?? new Date(),
+              activeAt: request.liveActiveAt ?? null,
+            },
+            new Date(),
+            request.liveLastCustomerMessageAt ?? null,
+          ),
           customer: {
             customerId: request.customerId,
             customerKey: request.customerKey,
@@ -990,7 +1008,14 @@ export class ChatbotRequestReadsService {
       scheduledFor: iso(r.scheduledFor),
       requiresTemplateAtStart: r.requiresTemplateAtStart,
       needsReschedule: r.needsReschedule,
-      liveSession: null,
+      liveSession: r.liveSessionState
+        ? {
+            state: r.liveSessionState,
+            handoffEpoch: r.liveHandoffEpoch ?? 0,
+            lastStaffActivityAt: iso(r.liveLastStaffActivityAt ?? null),
+            lastCustomerMessageAt: iso(r.liveLastCustomerMessageAt ?? null),
+          }
+        : null,
       closedAt: iso(r.closedAt),
       resolvedBy: r.resolvedByActorId
         ? { id: r.resolvedByActorId, displayName: r.resolvedByDisplayName }
