@@ -62,7 +62,7 @@ A `TALK_TO_HUMAN` or `COMPLAINT` request goes live when someone **claims** it ("
 }
 ```
 
-The message is stored in the same transaction as the item the bot reads, so it exists if and only if it will be delivered. Order is **`seq`** (never the clock). A repeat of the same `clientMessageId` and text answers `200` with the stored message; the same id with another text (or another request) is `409 IDEMPOTENCY_CONFLICT`.
+The message is stored in the same transaction as the item the bot reads, so it exists if and only if it will be delivered. Order is **`seq`** (never the clock). A repeat of the same `clientMessageId` and text answers `200` with the stored message; the same id with another text (or another request) is `409 IDEMPOTENCY_CONFLICT`. **The replay is checked before the session, epoch and window refusals**: if the message was stored and meanwhile the session ended, the epoch changed or the window closed, the repeat still answers `200` with the stored message (never `SESSION_NOT_ACTIVE` / `STALE_EPOCH` / `WINDOW_CLOSED`). Only `404`, `422 ACTION_NOT_ALLOWED` and `403 NOT_ASSIGNEE` (the request was reassigned meanwhile) come before it; on that `403` refresh the detail instead of putting the text back in the draft (the caller can no longer send, so there is no duplicate risk). `POST :id/template` follows the same order.
 
 | Error                                                           | When                                                                                                                                              |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
