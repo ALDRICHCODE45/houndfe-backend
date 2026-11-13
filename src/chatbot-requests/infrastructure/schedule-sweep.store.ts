@@ -39,6 +39,7 @@ import { isStartStillOpen, planScheduleStep } from '../domain/schedule-sweep';
 import { enqueueScheduledReminder } from './chatbot-feed-writes';
 import type { TenantClient } from './chatbot-request-writes';
 import { NEEDS_RESCHEDULE_CAUSE } from './scheduled-reschedule-flag';
+import { describePrismaError } from './prisma-error-detail';
 import { loadSchedulingConfig } from './scheduling-store';
 
 export interface ScheduleSweepResult {
@@ -85,6 +86,16 @@ interface LockedRow {
   lastCustomerMessageAt: Date | null;
   whatsappWindowClosesAt: Date | null;
 }
+
+/**
+ * A candidate whose transaction threw keeps its `scheduleDueAt` and would sit
+ * at the head of the due queue forever: enough of them (more than the rows one
+ * tick reads) starve every genuine due row behind them. So a failure pushes that
+ * row's due instant forward by this much, in its own short transaction; the row
+ * is tried again later and the queue moves on. Fixed, so a poison row is retried
+ * once a minute and never delays a reminder by more than that.
+ */
+export const FAILURE_BACKOFF_MS = 60_000;
 
 type Outcome = keyof Omit<ScheduleSweepResult, 'candidates' | 'failed'>;
 
@@ -143,15 +154,45 @@ export class ScheduleSweepStore {
         if (outcome.flagged) result.flagged += 1;
       } catch (error) {
         result.failed += 1;
+        // Ids and tenant only: no message, no customer data (A5).
         this.logger.error(
-          `schedule sweep failed for request ${candidate.id}: ${error instanceof Error ? error.name : 'unknown'}`,
+          `schedule sweep failed for request ${candidate.id} tenant ${candidate.tenantId}: ${describePrismaError(error)}`,
         );
+        await this.backOff(candidate, now);
       }
     }
     return { ...result, last };
   }
 
-  private async handle(
+  /**
+   * Pushes a failed candidate's due instant `FAILURE_BACKOFF_MS` past `now`, in
+   * its own transaction (the failed one rolled back). Guarded by the stage and
+   * version the candidate was read with, so a reschedule or another sweep that
+   * moved the row meanwhile is left alone, and `SKIP LOCKED`, so a staff command
+   * holding the row is never waited for (the row simply stays due). Never
+   * throws: a backoff that fails too only means the row is retried next tick.
+   */
+  private async backOff(candidate: Candidate, now: Date): Promise<void> {
+    try {
+      const retryAt = new Date(now.getTime() + FAILURE_BACKOFF_MS);
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "chatbot_requests"
+        SET "scheduleDueAt" = ${retryAt}
+        WHERE "id" IN (
+          SELECT "id" FROM "chatbot_requests"
+          WHERE "tenantId" = ${candidate.tenantId} AND "id" = ${candidate.id}
+            AND "scheduleDueAt" IS NOT NULL AND "scheduleDueAt" <= ${now}
+            AND "scheduleVersion" = ${candidate.scheduleVersion}
+            AND "scheduleStage" = ${candidate.scheduleStage}
+          FOR UPDATE SKIP LOCKED)`);
+    } catch (error) {
+      this.logger.error(
+        `schedule sweep backoff failed for request ${candidate.id} tenant ${candidate.tenantId}: ${describePrismaError(error)}`,
+      );
+    }
+  }
+
+  protected async handle(
     tx: TenantClient,
     candidate: Candidate,
     now: Date,

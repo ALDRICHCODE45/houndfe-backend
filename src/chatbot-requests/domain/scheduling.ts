@@ -147,13 +147,14 @@ export interface BookableInput {
 
 /**
  * `true` when `startsAt` is exactly the start of a block (grid, open hours,
- * not a closed date) at least `MIN_LEAD_MINUTES` ahead and within the
- * horizon. Capacity is a separate check, under the counter's lock.
+ * not a closed date) at least `MIN_LEAD_MINUTES` ahead and before the end of
+ * the horizon (`[now + lead, now + HORIZON_DAYS)`, half-open like
+ * `blockStarts`). Capacity is a separate check, under the counter's lock.
  */
 export function isBookableStart(input: BookableInput): boolean {
   const { from, to } = bounds(input.now);
   const ms = input.startsAt.getTime();
-  if (!Number.isFinite(ms) || ms < from.getTime() || ms > to.getTime()) {
+  if (!Number.isFinite(ms) || ms < from.getTime() || ms >= to.getTime()) {
     return false;
   }
   const slot = input.slotMinutes * MINUTE;

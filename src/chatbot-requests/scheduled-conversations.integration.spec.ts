@@ -17,6 +17,7 @@ import {
   type ExecutionContext,
   type INestApplication,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -1238,6 +1239,79 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       }).expect(403);
     });
 
+    it('a refused move (full target, later or earlier) leaves every seat where it was and stores no receipt (A3)', async () => {
+      const b = await branch({ max: 1 });
+      const first = await bookOk(b, customerOf());
+      const second = await bookOk(b, customerOf());
+      const third = await bookOk(b, customerOf());
+      expect([first, second, third].map((r) => Date.parse(r.startsAt))).toEqual(
+        [first, second, third]
+          .map((r) => Date.parse(r.startsAt))
+          .sort((x, y) => x - y),
+      );
+
+      /** Every counter equals the open scheduled rows of that block. */
+      const seatsAreConsistent = async () => {
+        const counters = await prisma.scheduledSlotCounter.findMany({
+          where: { tenantId: b.tenantId },
+        });
+        const rows = await prisma.chatbotRequest.findMany({
+          where: {
+            tenantId: b.tenantId,
+            scheduledFor: { not: null },
+            status: { not: 'CANCELLED' },
+          },
+          select: { scheduledFor: true },
+        });
+        const perBlock = new Map<number, number>();
+        for (const r of rows) {
+          const key = (r.scheduledFor as Date).getTime();
+          perBlock.set(key, (perBlock.get(key) ?? 0) + 1);
+        }
+        const stored = new Map(
+          counters
+            .filter((c) => c.booked > 0)
+            .map((c) => [c.startsAt.getTime(), c.booked]),
+        );
+        expect(stored).toEqual(perBlock);
+      };
+      await seatsAreConsistent();
+
+      // later: the old seat is the one `moveSeat` releases first
+      const laterKey = randomUUID();
+      const later = await staffReschedule(b, first.id, 1, second.startsAt, {
+        key: laterKey,
+      }).expect(409);
+      expect(later.body.code).toBe('SLOT_UNAVAILABLE');
+      // earlier: the target is reserved first, so nothing was touched
+      const earlierKey = randomUUID();
+      const earlier = await staffReschedule(b, third.id, 1, second.startsAt, {
+        key: earlierKey,
+      }).expect(409);
+      expect(earlier.body.code).toBe('SLOT_UNAVAILABLE');
+
+      for (const r of [first, second, third]) {
+        expect(await booked(b, r.startsAt)).toBe(1);
+      }
+      for (const [r, version] of [
+        [first, 1],
+        [third, 1],
+      ] as const) {
+        const stored = await row(r.id);
+        expect(stored.scheduledFor?.toISOString()).toBe(r.startsAt);
+        expect(stored.version).toBe(version);
+        expect(stored.scheduleVersion).toBe(1);
+        expect(await eventsOf(r.id, 'RESCHEDULED')).toHaveLength(0);
+      }
+      await seatsAreConsistent();
+      // a refusal rolls back whole: no receipt, so the key is free to retry
+      expect(
+        await prisma.staffCommandReceipt.count({
+          where: { idempotencyKey: { in: [laterKey, earlierKey] } },
+        }),
+      ).toBe(0);
+    });
+
     it('GET /chatbot-requests/:id/scheduling/slots lists up to 24 blocks for the picker', async () => {
       const b = await branch();
       const { id } = await bookOk(b, customerOf());
@@ -1360,15 +1434,31 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       });
       expect(res.body.allowedActions).toContain('RESCHEDULE');
       expect(res.body.allowedActions).not.toContain('CLAIM');
-      expect(res.body.deniedActions).toContainEqual({
+      const tooEarly = {
         action: 'CLAIM',
         code: 'SCHEDULED_TOO_EARLY',
-      });
+        claimableAt: new Date(Date.parse(startsAt) - 5 * MIN).toISOString(),
+      };
+      expect(res.body.deniedActions).toContainEqual(tooEarly);
       const groups = await server()
         .get('/chatbot-requests/groups')
         .set(as(b))
         .expect(200);
       expect(JSON.stringify(groups.body)).toContain(startsAt);
+      // the list row carries the same informative denial (A1)
+      const listed = (
+        groups.body.items as Array<{
+          requests: Array<{
+            id: string;
+            allowedActions: string[];
+            deniedActions: unknown[];
+          }>;
+        }>
+      )
+        .flatMap((g) => g.requests)
+        .find((r) => r.id === id);
+      expect(listed?.allowedActions).not.toContain('CLAIM');
+      expect(listed?.deniedActions).toContainEqual(tooEarly);
       const reader = await detail(b, id).set(as(b, 'reader')).expect(200);
       expect(reader.body.allowedActions).not.toContain('RESCHEDULE');
       // a request that is not scheduled never offers it
@@ -1498,6 +1588,110 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       }
     }
     const peekStore = () => new PeekStore(app.get(PrismaService));
+
+    /** Throws a database-shaped error for the poisoned ids, handles the rest. */
+    class PoisonStore extends ScheduleSweepStore {
+      poisoned = new Set<string>();
+      protected override handle(
+        ...args: Parameters<ScheduleSweepStore['handle']>
+      ) {
+        if (this.poisoned.has(args[1].id)) {
+          return Promise.reject(
+            new Prisma.PrismaClientKnownRequestError('poison', {
+              code: 'P2002',
+              clientVersion: 'test',
+              meta: { target: ['tenantId', 'folio'] },
+            }),
+          );
+        }
+        return super.handle(...args);
+      }
+    }
+
+    it('poison rows back off one minute and never starve a genuine due row (A4, A5)', async () => {
+      const b = await branch();
+      const { id: genuine, startsAt } = await bookOk(b, customerOf());
+      const template = await row(genuine);
+      const now = minus(startsAt, -10);
+      const POISON = 520; // more than the 5 x 100 rows one tick can read
+      const top = await prisma.chatbotRequest.aggregate({
+        where: { tenantId: b.tenantId },
+        _max: { folio: true },
+      });
+      const older = new Date(now.getTime() - 60 * MIN);
+      const {
+        id: _id,
+        folio: _folio,
+        sourceRequestId: _src,
+        customerKey: _key,
+        conversationRef: _ref,
+        dedupKey: _dedup,
+        context: _context,
+        resolution: _resolution,
+        ...rest
+      } = template;
+      void [_id, _folio, _src, _key, _ref, _dedup, _context, _resolution];
+      const ids = Array.from({ length: POISON }, () => randomUUID());
+      await prisma.chatbotRequest.createMany({
+        data: ids.map((id, n) => ({
+          ...rest,
+          context: Prisma.DbNull,
+          resolution: Prisma.DbNull,
+          id,
+          folio: (top._max.folio ?? 0) + 1 + n,
+          sourceRequestId: `poison-${id}`,
+          customerKey: `poison-${id}`,
+          conversationRef: null,
+          dedupKey: null,
+          // older than the genuine row, so they sort first
+          scheduleDueAt: new Date(older.getTime() + n),
+          // not a second open booking of the same slot for the unique index
+          scheduledFor: new Date(
+            template.scheduledFor!.getTime() + (n + 1) * 60_000,
+          ),
+        })),
+      });
+      const store = new PoisonStore(app.get(PrismaService));
+      store.poisoned = new Set(ids);
+      const scheduler = new ScheduleSweepScheduler(store);
+      const errors = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+
+      const first = await scheduler.tick(now);
+      expect(first.failed).toBe(500);
+      expect(await remindersOf(b, genuine)).toHaveLength(0);
+      // each failed row moved forward by a minute, off the head of the queue
+      const pushed = await prisma.chatbotRequest.findMany({
+        where: { id: { in: ids }, scheduleDueAt: { gt: now } },
+        select: { scheduleDueAt: true },
+      });
+      expect(pushed).toHaveLength(500);
+      for (const p of pushed) {
+        expect(p.scheduleDueAt?.getTime()).toBe(now.getTime() + MIN);
+      }
+
+      const second = await scheduler.tick(now);
+      expect(second.failed).toBe(POISON - 500);
+      // the sweep is global: other tests' due rows may fire too
+      expect(second.reminders).toBeGreaterThanOrEqual(1);
+      expect(await remindersOf(b, genuine)).toHaveLength(1);
+
+      // A5: the code, the target and the tenant, no message and no customer data
+      const logged = errors.mock.calls.map((c) => String(c[0]));
+      expect(logged[0]).toContain(`tenant ${b.tenantId}`);
+      expect(logged[0]).toContain('code=P2002');
+      expect(logged[0]).toContain('target=tenantId,folio');
+      expect(logged[0]).not.toContain('poison-');
+      errors.mockRestore();
+
+      // a poisoned row that still fails keeps backing off, one minute at a time
+      await scheduler.tick(new Date(now.getTime() + MIN));
+      const again = await prisma.chatbotRequest.findUniqueOrThrow({
+        where: { id: ids[0] },
+      });
+      expect(again.scheduleDueAt?.getTime()).toBe(now.getTime() + 2 * MIN);
+    });
 
     it('creates the reminder at the lead time, once, and serves it on the feed; the claim and overdue clocks stay anchored at scheduledFor', async () => {
       const b = await branch();

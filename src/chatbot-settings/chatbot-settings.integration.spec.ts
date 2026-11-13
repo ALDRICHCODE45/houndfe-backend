@@ -40,6 +40,7 @@ import {
   applyRequestPatch,
 } from '../chatbot-requests/infrastructure/chatbot-request-writes';
 import * as recomputeModule from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import * as flagModule from '../chatbot-requests/infrastructure/scheduled-reschedule-flag';
 import { recomputeOpenRequests } from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
 import { slaColumnsForNew } from '../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
@@ -1696,6 +1697,37 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
         const again = await put(tenant, body(ALWAYS_OPEN(), 1)).expect(200);
         expect(again.body.version).toBe(1);
         expect(again.body.recompute).toBe('NOT_NEEDED');
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
+    });
+
+    it('a failing flag pass of scheduled requests is logged with the Prisma code, the target and the tenant, and never fails the write (A5)', async () => {
+      const tenant: string = randomUUID();
+      await prisma.tenant.create({
+        data: { id: tenant, name: 'Falla flag', slug: `cs-${tenant}` },
+      });
+      try {
+        jest.spyOn(flagModule, 'flagUnbookableSchedules').mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError(
+            'Unique constraint failed on phone 5255123456',
+            {
+              code: 'P2002',
+              clientVersion: 'test',
+              meta: { target: ['tenantId', 'folio'] },
+            },
+          ),
+        );
+        const res = await put(tenant, body(ALWAYS_OPEN(), 0)).expect(200);
+        expect(res.body.version).toBe(1);
+        // the recompute still ran: the flag pass has its own try
+        expect(res.body.recompute).toBe('DONE');
+        const logged = loggerError.mock.calls.map((c) => String(c[0]));
+        const line = logged.find((l) => l.includes('flagging scheduled'));
+        expect(line).toContain(`tenant ${tenant}`);
+        expect(line).toContain('code=P2002');
+        expect(line).toContain('target=tenantId,folio');
+        expect(line).not.toMatch(/5255|Unique constraint/);
       } finally {
         await prisma.tenant.delete({ where: { id: tenant } });
       }

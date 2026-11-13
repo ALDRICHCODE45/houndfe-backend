@@ -272,4 +272,23 @@ describe('isBookableStart', () => {
     expect(isBookableStart(input('2026-11-10T16:00:00.000Z', now))).toBe(true);
     expect(isBookableStart(input('2026-11-30T16:00:00.000Z'))).toBe(false);
   });
+  it('the horizon is half-open like the offer: exactly now + 14 days is not bookable, the block before is (A2)', () => {
+    // 2026-11-23 15:30Z is Monday 09:30 local, a grid start inside the hours.
+    const now = at('2026-11-09T15:30:00.000Z');
+    const boundary = '2026-11-23T15:30:00.000Z';
+    expect(Date.parse(boundary) - now.getTime()).toBe(14 * 86_400_000);
+    expect(isBookableStart(input(boundary, now))).toBe(false);
+    expect(isBookableStart(input('2026-11-23T15:00:00.000Z', now))).toBe(true);
+    // consistent with what is offered: the boundary block is never listed
+    const listed = listBookable({
+      calendar: cal,
+      slotMinutes: 30,
+      limit: 10_000,
+      now,
+      windowClosesAt: at('2027-01-01T00:00:00.000Z'),
+      full: new Set(),
+    }).map((slot) => slot.startsAt.toISOString());
+    expect(listed).not.toContain(boundary);
+    expect(listed).toContain('2026-11-23T15:00:00.000Z');
+  });
 });

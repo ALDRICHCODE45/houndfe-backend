@@ -42,6 +42,7 @@ import {
   rowToSettings,
 } from '../../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { recomputeOpenRequests } from '../../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import { describePrismaError } from '../../chatbot-requests/infrastructure/prisma-error-detail';
 import { flagUnbookableSchedules } from '../../chatbot-requests/infrastructure/scheduled-reschedule-flag';
 import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factory';
 import { PrismaService } from '../../shared/prisma/prisma.service';
@@ -537,7 +538,7 @@ export class ChatbotSettingsService {
       });
     } catch (error) {
       this.logger.error(
-        `[settings] tenant ${tenantId}: settings saved but flagging scheduled requests failed: ${error instanceof Error ? error.name : 'unknown'}`,
+        `[settings] tenant ${tenantId}: settings saved but flagging scheduled requests failed: ${describePrismaError(error)}`,
       );
     }
     try {

@@ -20,6 +20,7 @@ import {
   type ChatbotRequestState,
   type CommandResult,
 } from './chatbot-request.commands';
+import { claimableAt } from './scheduling';
 import { rescheduleRefusal } from './scheduling-view';
 import {
   canResolveSubtype,
@@ -111,6 +112,11 @@ export type DeniedCode =
 export interface DeniedAction {
   action: AllowedAction;
   code: DeniedCode;
+  /**
+   * Only on `SCHEDULED_TOO_EARLY` (unit 14, §4.9.6): the instant (ISO) the
+   * claim opens, `scheduledFor - 5 min`, so the FE can say when.
+   */
+  claimableAt?: string;
 }
 
 export interface ActionAvailability {
@@ -307,10 +313,18 @@ export function computeActionAvailability(
     if (answer === 'OK' && permitted) {
       allowedActions.push(action);
     } else if (answer === 'OK' || INFORMATIVE.includes(answer)) {
-      deniedActions.push({
-        action,
-        code: permitted ? (answer as DeniedCode) : 'INSUFFICIENT_PERMISSIONS',
-      });
+      const code = permitted
+        ? (answer as DeniedCode)
+        : 'INSUFFICIENT_PERMISSIONS';
+      deniedActions.push(
+        code === 'SCHEDULED_TOO_EARLY' && state.scheduledFor
+          ? {
+              action,
+              code,
+              claimableAt: claimableAt(state.scheduledFor).toISOString(),
+            }
+          : { action, code },
+      );
     }
   }
   return { allowedActions, deniedActions };
