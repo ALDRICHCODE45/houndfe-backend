@@ -28,6 +28,36 @@ describe('toNotificationView (S10)', () => {
       cause: null,
       reason: null,
       requestOpen: true,
+      level: null,
+    });
+  });
+
+  describe('level', () => {
+    it.each([5, 15])(
+      'a CONVERSATION_UNANSWERED row exposes level %i as a flat field',
+      (level) => {
+        const view = toNotificationView(
+          row({
+            type: 'CONVERSATION_UNANSWERED',
+            payload: { folio: 7, subtype: 'TALK_TO_HUMAN', level },
+          }),
+        );
+        expect(view.level).toBe(level);
+        expect(view.title).toBe(`Cliente esperando respuesta (${level} min)`);
+      },
+    );
+
+    it('is null for other types, and for an unknown stored value', () => {
+      expect(
+        toNotificationView(
+          row({ type: 'REQUEST_CREATED', payload: { folio: 1, level: 5 } }),
+        ).level,
+      ).toBeNull();
+      expect(
+        toNotificationView(
+          row({ type: 'CONVERSATION_UNANSWERED', payload: { level: 7 } }),
+        ).level,
+      ).toBeNull();
     });
   });
 

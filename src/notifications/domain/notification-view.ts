@@ -17,6 +17,8 @@ import {
   type ClosedCause,
   type NoticePayload,
   type NoticeReason,
+  UNANSWERED_LEVELS,
+  type UnansweredLevel,
 } from './chatbot-request-notice';
 
 export interface NotificationView {
@@ -37,6 +39,8 @@ export interface NotificationView {
   reason: NoticeReason | null;
   /** The linked request is `NEW` or `IN_PROGRESS` now; `null` if none/gone. */
   requestOpen: boolean | null;
+  /** `CONVERSATION_UNANSWERED` only: minutes waited (5 or 15); `null` otherwise. */
+  level: UnansweredLevel | null;
 }
 
 /** A notification joined with the status of its request (if any). */
@@ -83,5 +87,10 @@ export function toNotificationView(row: NotificationViewRow): NotificationView {
       row.requestId === null || row.requestStatus === null
         ? null
         : OPEN_STATUSES.has(row.requestStatus),
+    level:
+      row.type === 'CONVERSATION_UNANSWERED' &&
+      (UNANSWERED_LEVELS as readonly unknown[]).includes(payload?.level)
+        ? (payload?.level as UnansweredLevel)
+        : null,
   };
 }

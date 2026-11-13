@@ -113,6 +113,7 @@ const ITEM_KEYS = [
   'createdAt',
   'folio',
   'id',
+  'level',
   'readAt',
   'reason',
   'requestId',
