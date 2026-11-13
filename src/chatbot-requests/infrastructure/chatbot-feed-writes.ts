@@ -23,6 +23,8 @@ import {
   buildClarificationAnswerPayload,
   buildMergedPayload,
   buildOverdueNoticePayload,
+  buildRescheduledPayload,
+  buildScheduledReminderPayload,
   FEED_CHANNEL,
   FEED_TYPE,
   type AnswerSource,
@@ -40,6 +42,8 @@ export async function insertFeedItems(
   tx: TenantClient,
   tenantId: string,
   drafts: FeedDraft[],
+  /** `ON CONFLICT DO NOTHING`: for items a unique index keeps single. */
+  options: { skipDuplicates?: boolean } = {},
 ): Promise<void> {
   if (drafts.length === 0) return;
   const key = `chatbot-feed:${tenantId}`;
@@ -48,6 +52,7 @@ export async function insertFeedItems(
     Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`,
   );
   await tx.chatbotFeedItem.createMany({
+    skipDuplicates: options.skipDuplicates === true,
     data: drafts.map((draft) => ({
       tenantId,
       requestId: draft.requestId,
@@ -365,4 +370,47 @@ export async function enqueueOverdueNotice(
     Prisma.sql`SELECT pg_notify(${FEED_CHANNEL}, ${tenantId})::text`,
   );
   return true;
+}
+
+/** `conversation.rescheduled` (unit 14): in the transaction of the staff reschedule. */
+export async function enqueueRescheduled(
+  tx: TenantClient,
+  tenantId: string,
+  conversationRef: string | null,
+  input: Parameters<typeof buildRescheduledPayload>[0],
+): Promise<void> {
+  await insertFeedItems(tx, tenantId, [
+    {
+      requestId: input.requestId,
+      type: FEED_TYPE.conversationRescheduled,
+      conversationRef,
+      payload: buildRescheduledPayload(input),
+    },
+  ]);
+}
+
+/**
+ * `conversation.scheduled_reminder` (unit 14): in the schedule sweep's
+ * transaction. The partial unique index (request, scheduleVersion) makes a
+ * repeat a no-op, so a retry or a second replica can never send two.
+ */
+export async function enqueueScheduledReminder(
+  tx: TenantClient,
+  tenantId: string,
+  conversationRef: string | null,
+  input: Parameters<typeof buildScheduledReminderPayload>[0],
+): Promise<void> {
+  await insertFeedItems(
+    tx,
+    tenantId,
+    [
+      {
+        requestId: input.requestId,
+        type: FEED_TYPE.scheduledReminder,
+        conversationRef,
+        payload: buildScheduledReminderPayload(input),
+      },
+    ],
+    { skipDuplicates: true },
+  );
 }

@@ -178,4 +178,6 @@ export const TENANT_SCOPED_MODELS = new Set([
   // template record. Both carry `tenantId` and a tenant FK.
   'ChatbotLiveSession',
   'ChatbotSessionTemplate',
+  // Unit 14 (§4.9): the per-block capacity counter. `tenantId` + tenant FK.
+  'ScheduledSlotCounter',
 ]);

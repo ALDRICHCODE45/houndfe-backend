@@ -20,6 +20,8 @@ import {
   type ChatbotRequestState,
   type CommandResult,
 } from './chatbot-request.commands';
+import { claimableAt } from './scheduling';
+import { rescheduleRefusal } from './scheduling-view';
 import {
   canResolveSubtype,
   legacyResolvePermission,
@@ -39,10 +41,9 @@ export function closedWindowCutoff(now: Date): Date {
 }
 
 /**
- * Commands the caller can run right now. `RESCHEDULE` is never offered (the
- * route arrives with unit 14), nor are the message, template and finish
- * actions: their routes do not exist yet. `REPLY` (unit 10) is the clarification
- * answer.
+ * Commands the caller can run right now. `RESCHEDULE` (unit 14) is offered on
+ * an open scheduled request whose session has not started. `REPLY` (unit 10)
+ * is the clarification answer.
  */
 export type AllowedAction =
   | 'CLAIM'
@@ -57,7 +58,8 @@ export type AllowedAction =
   // `FINISH` once the customer has been silent for 30 min (no confirmation).
   | 'SEND_MESSAGE'
   | 'FINISH'
-  | 'FINISH_IDLE';
+  | 'FINISH_IDLE'
+  | 'RESCHEDULE';
 
 export interface AllowedActionsOptions {
   /**
@@ -104,11 +106,17 @@ export type DeniedCode =
   | 'INSUFFICIENT_PERMISSIONS'
   | 'REQUEST_CLAIMED_BY_OTHER'
   | 'NOT_ASSIGNEE'
-  | 'CANCEL_NOT_ALLOWED';
+  | 'CANCEL_NOT_ALLOWED'
+  | 'SCHEDULED_TOO_EARLY';
 
 export interface DeniedAction {
   action: AllowedAction;
   code: DeniedCode;
+  /**
+   * Only on `SCHEDULED_TOO_EARLY` (unit 14, §4.9.6): the instant (ISO) the
+   * claim opens, `scheduledFor - 5 min`, so the FE can say when.
+   */
+  claimableAt?: string;
 }
 
 export interface ActionAvailability {
@@ -121,6 +129,7 @@ const INFORMATIVE: readonly string[] = [
   'REQUEST_CLAIMED_BY_OTHER',
   'NOT_ASSIGNEE',
   'CANCEL_NOT_ALLOWED',
+  'SCHEDULED_TOO_EARLY',
 ];
 
 /**
@@ -285,6 +294,11 @@ export function computeActionAvailability(
     ],
     ['FINISH', canUpdate, finishAnswer],
     [
+      'RESCHEDULE',
+      canUpdate,
+      rescheduleRefusal(state) === null ? 'OK' : 'NOT_APPLICABLE',
+    ],
+    [
       'FINISH_IDLE',
       canUpdate,
       finishAnswer === 'OK' && options.finishIdle === true
@@ -299,10 +313,18 @@ export function computeActionAvailability(
     if (answer === 'OK' && permitted) {
       allowedActions.push(action);
     } else if (answer === 'OK' || INFORMATIVE.includes(answer)) {
-      deniedActions.push({
-        action,
-        code: permitted ? (answer as DeniedCode) : 'INSUFFICIENT_PERMISSIONS',
-      });
+      const code = permitted
+        ? (answer as DeniedCode)
+        : 'INSUFFICIENT_PERMISSIONS';
+      deniedActions.push(
+        code === 'SCHEDULED_TOO_EARLY' && state.scheduledFor
+          ? {
+              action,
+              code,
+              claimableAt: claimableAt(state.scheduledFor).toISOString(),
+            }
+          : { action, code },
+      );
     }
   }
   return { allowedActions, deniedActions };

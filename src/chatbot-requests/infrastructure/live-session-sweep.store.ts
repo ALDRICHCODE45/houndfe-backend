@@ -563,6 +563,9 @@ export class LiveSessionSweepStore {
       UPDATE "chatbot_requests"
       SET "status" = 'RESOLVED', "resolvedAt" = ${now}, "closedAt" = ${now},
           "nextSlaCheckAt" = NULL,
+          -- a scheduled request claimed early stops being due (a seat is kept:
+          -- only CANCELLED releases it)
+          "scheduleDueAt" = NULL,
           "resolution" = ${JSON.stringify({ action: 'FINISH', note, auto: true })}::jsonb
       WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}`);
     await tx.chatbotRequestEvent.create({

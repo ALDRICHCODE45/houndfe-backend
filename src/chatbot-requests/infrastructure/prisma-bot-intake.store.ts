@@ -10,11 +10,10 @@ import { CUSTOMER_REPLY_WINDOW_MS } from '../../delivery-zones/domain/delivery-z
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type {
-  BotCancelResponse,
-  BotCreateResponse,
   BotIntakeStore,
   DirectDraft,
   IntakeOutcome,
+  ReceiptKind,
 } from '../application/bot-request-intake.service';
 import type { ChatbotRequestRow } from '../application/chatbot-request-commands.service';
 import type { WrappedSubtype } from '../domain/bot-request-envelope';
@@ -32,6 +31,19 @@ import {
   recordMerge,
   type OpenRequestRef,
 } from './chatbot-request-intake-writes';
+import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
+import {
+  isBookableStart,
+  isWithinWindow,
+  reminderAt,
+} from '../domain/scheduling';
+import { businessHoursView } from '../domain/scheduling-view';
+import { slotUnavailable } from './scheduling-reads';
+import {
+  loadSchedulingConfig,
+  reserveSeat,
+  type SchedulingConfig,
+} from './scheduling-store';
 import { linkByPhone, WRAP_SOURCE } from './chatbot-request-wrapper';
 import {
   allocateFolio,
@@ -82,11 +94,11 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     return this.tenantPrisma.runInTransaction(work);
   }
 
-  lockKey(kind: 'CREATE' | 'CANCEL', key: string): Promise<void> {
+  lockKey(kind: ReceiptKind, key: string): Promise<void> {
     return lockBotKey(this.tx, this.tenantId, kind, key);
   }
 
-  findReceipt(kind: 'CREATE' | 'CANCEL', idempotencyKey: string) {
+  findReceipt(kind: ReceiptKind, idempotencyKey: string) {
     return this.tx.chatbotBotReceipt.findFirst({
       where: { tenantId: this.tenantId, kind, idempotencyKey },
       select: { commandHash: true, responseSnapshot: true },
@@ -94,11 +106,11 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
   }
 
   async saveReceipt(
-    kind: 'CREATE' | 'CANCEL',
+    kind: ReceiptKind,
     idempotencyKey: string,
     commandHash: string,
     requestId: string | null,
-    snapshot: BotCreateResponse | BotCancelResponse,
+    snapshot: unknown,
   ): Promise<void> {
     await this.tx.chatbotBotReceipt.create({
       data: {
@@ -108,7 +120,7 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
         commandHash,
         requestId,
         // SAFETY: the snapshots hold only strings, numbers and nulls.
-        responseSnapshot: snapshot as unknown as Prisma.InputJsonObject,
+        responseSnapshot: snapshot as Prisma.InputJsonObject,
       },
     });
   }
@@ -155,7 +167,9 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     if (!customerKey) throw new InvalidArgumentError('Invalid');
 
     await lockCustomerIntake(tx, tenantId, customerKey);
-    if (envelope.dedupKey) {
+    // Unit 14: a scheduled create never merges (it holds a seat of its own).
+    const scheduledFor = envelope.scheduledFor;
+    if (envelope.dedupKey && !scheduledFor) {
       const open = await findOpenDedup(
         tx,
         tenantId,
@@ -167,8 +181,27 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     await assertIntakeLimits(tx, tenantId, customerKey, limits);
     await assertTenantLinks(tx, tenantId, { customerId: link.customerId });
 
-    const folio = await allocateFolio(tx, tenantId);
+    // Unit 14 (Q16): every create answers the branch's hours; a booking also
+    // proves the time and takes the seat HERE, in the insert's transaction
+    // (lock order: customer lock, settings share, counter, folio, insert).
+    const now = new Date();
+    const config = await loadSchedulingConfig(tx, tenantId, 'SHARE');
+    const businessHours = businessHoursView(config.calendar, now);
     const lastMessage = envelope.lastCustomerMessageAt;
+    const windowClosesAt = lastMessage
+      ? new Date(lastMessage.getTime() + CUSTOMER_REPLY_WINDOW_MS)
+      : null;
+    let schedule: IntakeOutcome['schedule'];
+    if (scheduledFor) {
+      schedule = await this.bookSeat(
+        { customerKey, subtype: envelope.subtype, scheduledFor },
+        config,
+        now,
+        windowClosesAt ?? now,
+      );
+    }
+
+    const folio = await allocateFolio(tx, tenantId);
     const id = await insertRequestOnDedup(tx, {
       tenantId,
       folio,
@@ -184,13 +217,20 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
       phone: link.phone,
       conversationRef: envelope.conversationRef,
       lastCustomerMessageAt: lastMessage,
-      whatsappWindowClosesAt: lastMessage
-        ? new Date(lastMessage.getTime() + CUSTOMER_REPLY_WINDOW_MS)
-        : null,
+      whatsappWindowClosesAt: windowClosesAt,
       summary: envelope.summary,
       needs: envelope.needs,
       context: envelope.context ?? undefined,
-      dedupKey: envelope.dedupKey,
+      dedupKey: scheduledFor ? null : envelope.dedupKey,
+      ...(schedule
+        ? {
+            scheduledFor: schedule.scheduledFor,
+            requiresTemplateAtStart: schedule.requiresTemplateAtStart,
+            scheduleVersion: schedule.scheduleVersion,
+            scheduleStage: 0,
+            scheduleDueAt: reminderAt(schedule.scheduledFor),
+          }
+        : {}),
       source: BOT_REQUEST_SOURCE,
       sourceRequestId: envelope.sourceRequestId,
       canonicalRequestHash: hash,
@@ -211,19 +251,103 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
           subtype: envelope.subtype,
           sourceRequestId: envelope.sourceRequestId,
           triggerWaMessageId: envelope.triggerWaMessageId,
+          ...(schedule
+            ? {
+                scheduledFor: schedule.scheduledFor.toISOString(),
+                requiresTemplate: schedule.requiresTemplateAtStart,
+                scheduleVersion: schedule.scheduleVersion,
+              }
+            : {}),
         },
       },
     });
     // Unit 6: one outbox row in this transaction; a rollback leaves no notice.
-    await enqueueNotice(tx, tenantId, {
-      type: 'REQUEST_CREATED',
-      requestId: id,
-      folio,
-      subtype: envelope.subtype,
-      dedupKey: `created:${id}`,
-    });
+    // A scheduled request is announced at `scheduledFor`, not at booking
+    // (§4.9.4; the schedule sweep is a later step of unit 14).
+    if (!schedule) {
+      await enqueueNotice(tx, tenantId, {
+        type: 'REQUEST_CREATED',
+        requestId: id,
+        folio,
+        subtype: envelope.subtype,
+        dedupKey: `created:${id}`,
+      });
+    }
     await refreshCustomerGroup(tx, tenantId, customerKey);
-    return { outcome: 'CREATED', id, folio, status: 'NEW' };
+    return {
+      outcome: 'CREATED',
+      id,
+      folio,
+      status: 'NEW',
+      businessHours,
+      ...(schedule ? { schedule: { ...schedule, windowClosesAt } } : {}),
+    };
+  }
+
+  /**
+   * The booking rules, under the customer lock: scheduling enabled, one open
+   * scheduled request per customer and subtype (S19 Q4, S20 9: the identity is
+   * the customer key, `customerId` when linked else the canonical phone), the
+   * time is exactly a bookable block, and a free seat (one atomic upsert, so
+   * two bookings for the last seat cannot both win). Any refusal throws, which
+   * rolls the transaction back: nothing is stored (S20 1).
+   */
+  private async bookSeat(
+    who: { customerKey: string; subtype: string; scheduledFor: Date },
+    config: SchedulingConfig,
+    now: Date,
+    windowClosesAt: Date,
+  ): Promise<NonNullable<IntakeOutcome['schedule']>> {
+    const { tx, tenantId } = this;
+    const { scheduling } = config.settings;
+    if (!scheduling.enabled) {
+      throw new ChatbotRequestCommandError('SCHEDULING_DISABLED', 422);
+    }
+    const [open] = await tx.$queryRaw<
+      Array<{ id: string; scheduledFor: Date }>
+    >(Prisma.sql`
+      SELECT "id", "scheduledFor" FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "customerKey" = ${who.customerKey}
+        AND "subtype" = ${who.subtype}::"ChatbotRequestSubtype"
+        AND "scheduledFor" IS NOT NULL AND "status" IN ('NEW', 'IN_PROGRESS')
+      LIMIT 1`);
+    if (open) {
+      throw new ChatbotRequestCommandError(
+        'ALREADY_SCHEDULED',
+        409,
+        undefined,
+        {
+          requestId: open.id,
+          scheduledFor: open.scheduledFor.toISOString(),
+        },
+      );
+    }
+    const bookable = isBookableStart({
+      calendar: config.calendar,
+      slotMinutes: scheduling.slotMinutes,
+      now,
+      startsAt: who.scheduledFor,
+    });
+    if (
+      !bookable ||
+      !(await reserveSeat(
+        tx,
+        tenantId,
+        who.scheduledFor,
+        scheduling.maxScheduledPerSlot,
+      ))
+    ) {
+      throw await slotUnavailable(tx, tenantId, config, now, windowClosesAt);
+    }
+    return {
+      scheduledFor: who.scheduledFor,
+      scheduleVersion: 1,
+      requiresTemplateAtStart: !isWithinWindow(
+        who.scheduledFor,
+        windowClosesAt,
+      ),
+      windowClosesAt: null,
+    };
   }
 
   /**

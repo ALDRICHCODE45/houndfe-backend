@@ -40,6 +40,7 @@ import {
   applyRequestPatch,
 } from '../chatbot-requests/infrastructure/chatbot-request-writes';
 import * as recomputeModule from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import * as flagModule from '../chatbot-requests/infrastructure/scheduled-reschedule-flag';
 import { recomputeOpenRequests } from '../chatbot-requests/infrastructure/chatbot-sla-recompute';
 import { slaColumnsForNew } from '../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
@@ -1701,6 +1702,37 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       }
     });
 
+    it('a failing flag pass of scheduled requests is logged with the Prisma code, the target and the tenant, and never fails the write (A5)', async () => {
+      const tenant: string = randomUUID();
+      await prisma.tenant.create({
+        data: { id: tenant, name: 'Falla flag', slug: `cs-${tenant}` },
+      });
+      try {
+        jest.spyOn(flagModule, 'flagUnbookableSchedules').mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError(
+            'Unique constraint failed on phone 5255123456',
+            {
+              code: 'P2002',
+              clientVersion: 'test',
+              meta: { target: ['tenantId', 'folio'] },
+            },
+          ),
+        );
+        const res = await put(tenant, body(ALWAYS_OPEN(), 0)).expect(200);
+        expect(res.body.version).toBe(1);
+        // the recompute still ran: the flag pass has its own try
+        expect(res.body.recompute).toBe('DONE');
+        const logged = loggerError.mock.calls.map((c) => String(c[0]));
+        const line = logged.find((l) => l.includes('flagging scheduled'));
+        expect(line).toContain(`tenant ${tenant}`);
+        expect(line).toContain('code=P2002');
+        expect(line).toContain('target=tenantId,folio');
+        expect(line).not.toMatch(/5255|Unique constraint/);
+      } finally {
+        await prisma.tenant.delete({ where: { id: tenant } });
+      }
+    });
+
     it('PUT reports recompute DONE when it works', async () => {
       const tenant: string = randomUUID();
       await prisma.tenant.create({
@@ -2106,6 +2138,107 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       });
       expect(after?.templateLanguageCode).toBe('es_US');
       expect(after?.startTimeoutSeconds).toBe(600);
+    });
+  });
+  describe('needsReschedule on a settings change (unit 14, S19 Q6)', () => {
+    const closedDay = '2026-12-14';
+
+    /** A branch with open hours and two open scheduled requests, one on `closedDay`. */
+    async function scene() {
+      const id = randomUUID();
+      tenants.push(id);
+      await prisma.tenant.create({
+        data: { id, name: 'Sucursal agenda', slug: `cs-${id}` },
+      });
+      await put(id, body(ALWAYS_OPEN(), 0)).expect(200);
+      const scheduled = (iso: string) =>
+        seedRequest(id, {
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          status: 'NEW',
+          scheduledFor: new Date(iso),
+          scheduleVersion: 1,
+          scheduleStage: 0,
+          scheduleDueAt: new Date(new Date(iso).getTime() - 10 * 60_000),
+        });
+      return {
+        id,
+        hit: await scheduled(`${closedDay}T15:00:00.000Z`),
+        miss: await scheduled('2026-12-15T15:00:00.000Z'),
+      };
+    }
+    const flagOf = async (requestId: string) =>
+      prisma.chatbotRequest.findUniqueOrThrow({
+        where: { id: requestId },
+        select: { needsReschedule: true, version: true },
+      });
+    const updatedEvents = (tenantId: string, requestId: string) =>
+      prisma.realtimeEvent.findMany({
+        where: { tenantId, requestId, type: 'request.updated' },
+      });
+
+    it('PUT flags the open scheduled requests whose time is now a closed date, announces request.updated and tells the customer nothing', async () => {
+      const { id, hit, miss } = await scene();
+      const before = await flagOf(hit.id);
+      const res = await put(
+        id,
+        body({ ...ALWAYS_OPEN(), closedDates: [closedDay] }, 1),
+      ).expect(200);
+      expect(res.body.recompute).toBe('DONE');
+      expect(await flagOf(hit.id)).toEqual({
+        needsReschedule: true,
+        version: before.version + 1,
+      });
+      expect((await flagOf(miss.id)).needsReschedule).toBe(false);
+      expect(
+        (await updatedEvents(id, hit.id)).map((e) => e.payload),
+      ).toContainEqual({
+        version: before.version + 1,
+        cause: 'NEEDS_RESCHEDULE',
+      });
+      expect(
+        await prisma.chatbotFeedItem.count({ where: { tenantId: id } }),
+      ).toBe(0);
+    });
+
+    it('apply-to-all flags the scheduled requests of the tenants it changes', async () => {
+      const { id, hit, miss } = await scene();
+      const allBranches = await prisma.permission.findUniqueOrThrow({
+        where: {
+          subject_action: {
+            subject: 'ChatbotSettingsAllBranches',
+            action: 'update',
+          },
+        },
+      });
+      const role = await prisma.role.create({
+        data: {
+          tenantId: id,
+          name: 'admin',
+          permissions: { create: [{ permissionId: allBranches.id }] },
+        },
+      });
+      roleIds.push(role.id);
+      const membership = await prisma.tenantMembership.create({
+        data: { userId, tenantId: id, roleId: role.id },
+      });
+      try {
+        const source = (await get(tenantA)).body;
+        await put(
+          tenantA,
+          body({ ...ALWAYS_OPEN(), closedDates: [closedDay] }, source.version),
+        ).expect(200);
+        const res = await applyAll(tenantA).expect(200);
+        expect(
+          res.body.tenantsApplied.find(
+            (t: { tenantId: string }) => t.tenantId === id,
+          ),
+        ).toMatchObject({ recompute: 'DONE' });
+        expect((await flagOf(hit.id)).needsReschedule).toBe(true);
+        expect((await flagOf(miss.id)).needsReschedule).toBe(false);
+      } finally {
+        await prisma.tenantMembership.delete({ where: { id: membership.id } });
+      }
     });
   });
 });

@@ -131,6 +131,8 @@ export interface RequestRecord {
   scheduledFor: Date | null;
   requiresTemplateAtStart: boolean;
   needsReschedule: boolean;
+  /** Unit 14 (S20 6): monotonic per request; 0 when never scheduled. */
+  scheduleVersion?: number;
   summary: string;
   createdAt: Date;
   closedAt: Date | null;
@@ -1019,6 +1021,7 @@ export class ChatbotRequestReadsService {
       scheduledFor: iso(r.scheduledFor),
       requiresTemplateAtStart: r.requiresTemplateAtStart,
       needsReschedule: r.needsReschedule,
+      scheduleVersion: r.scheduleVersion ?? 0,
       liveSession: r.liveSessionState
         ? {
             state: r.liveSessionState,

@@ -7,7 +7,7 @@ Shapes in this document come from the controller, DTOs, scoped filter and their 
 **Not in this slice:**
 - The read routes (`GET /chatbot-requests/groups`, `/counts`, `/:id`, `/history`, `/assignable-users`) are documented in `14-chatbot-request-inbox.md`; the `version` to send comes from there.
 - `resolve` is documented in `12-chatbot-request-resolve.md` (unit 3). It needs one more permission per subtype on top of `read`/`update:ChatbotRequest`.
-- `reply` (answering a clarification) is documented in `19-clarification-replies.md` (unit 10). `messages`, `template`, `finish` and `reschedule` arrive in later units.
+- `reply` (answering a clarification) is documented in `19-clarification-replies.md` (unit 10). `messages`, `template` and `finish` are in `20-live-conversation.md` (unit 11), and `reschedule` (staff moving a scheduled conversation) in `21-scheduled-conversations.md` (unit 14). Claiming a scheduled conversation more than 5 minutes before its time is `409 SCHEDULED_TOO_EARLY {claimableAt}` (handoff 21, 1.2).
 - Phone masking (`toStaffPhone`) arrives with unit 4. The command response carries no phone and no `customerKey`.
 
 ## 1. Who can do what
@@ -88,6 +88,7 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 | 409 | `VERSION_CONFLICT` | `expectedVersion` is stale, or you claim a request you already hold (second tab) | ✓ |
 | 409 | `REQUEST_CLAIMED_BY_OTHER` | Claim of a request someone else holds | ✓ |
 | 409 | `REQUEST_CLOSED` | The request is already `RESOLVED` or `CANCELLED` | ✓ |
+| 409 | `SCHEDULED_TOO_EARLY` | Claim of a scheduled conversation before `scheduledFor − 5 min`; body adds `claimableAt` (unit 14, handoff 21) | ✓ |
 | 409 | `CANCEL_NOT_ALLOWED` | Cancel of a live conversation (`STARTING`/`ACTIVE`/`ENDING`); from unit 11 | ✓ |
 | 409 | `IDEMPOTENCY_CONFLICT` | Same `Idempotency-Key` already used with another body or route | — |
 | 422 | `ACTION_NOT_ALLOWED` | Release of a `NEW` request; reassign of a `NEW` request or to the current assignee | ✓ |
@@ -120,6 +121,8 @@ Switch on `code`, never on `message`. Command errors that come from the request'
 Body: `{ "expectedVersion": 1 }`. `NEW` → `IN_PROGRESS`, assignee = caller, `version` + 1.
 
 Two people (or two tabs) claim at once: exactly one gets `200`; the other gets `409 REQUEST_CLAIMED_BY_OTHER` (or `VERSION_CONFLICT` for the same person) with `current.claimedBy`.
+
+A **scheduled** conversation (`scheduledFor` set) can be claimed only from 5 minutes before its time: earlier, the answer is `409 SCHEDULED_TOO_EARLY` with `claimableAt` (ISO) beside `code` and `current`, checked after `VERSION_CONFLICT`; nothing changes. Handoff 21, 1.2.
 
 ### 3.2 `POST /chatbot-requests/:id/release`
 

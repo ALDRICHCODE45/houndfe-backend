@@ -12,10 +12,10 @@ Shapes in this document come from the controller, the DTOs, the service and the 
 | `unreadCustomerMessages` | Number of **customer** messages (never bot or staff ones) of the request's chat since the last time **any** staff member opened the conversation (`GET /chatbot-requests/:id/conversation` by someone with `read:ChatbotConversation`); it goes to `0` **for everyone** when anyone opens it (owner decision S12). Shared by the chat, not by user or request: two open requests of one customer show the same number and opening either clears both. An assignee who has no `read:ChatbotConversation` and gets the empty page did **not** open anything. Closed requests read `0`. Same value on groups rows, the by-customer list, the detail, merge candidates and the stream's row. See handoff 18 §4 for how it stays fresh |
 | `slaPaused`, `slaResumesAt` | derived on every read (unit 7c): `slaPaused` is `true` when the tenant's calendar is closed **now** (outside the opening hours or a closed date) **and** the request is open; `slaResumesAt` is then the next opening (ISO), else `null`. Closed requests are never paused. It is computed per response, so it changes without the row changing: do not use it to order or to detect updates |
 | `claimDeadlineAt`, `resolveDeadlineAt`, `overdueAt` | `claimDeadlineAt`/`resolveDeadlineAt` filled when the subtype has a deadline; `overdueAt` is set by the SLA sweep (every 30 s) at the **deadline instant** of the first overdue and never cleared (`displayStatus` `EXPIRED`). The sweep does not change `version` (it is not a command), so a row can gain `overdueAt` without a new `version`: the stream (unit 8) sends it as `request.overdue` with the **same** `version`, so a client applies an incoming row when its `version` is greater **or equal** (`17-realtime-sse.md` section 3.1) |
-| `scheduledFor`, `requiresTemplateAtStart`, `needsReschedule` | `null`/`false` (scheduling is unit 14) |
+| `scheduledFor`, `requiresTemplateAtStart`, `needsReschedule`, `scheduleVersion` | **Built (unit 14): `21-scheduled-conversations.md`.** `null`/`false`/`0` on a request that was never scheduled; `scheduleVersion` is new and additive |
 | `templateCostText` in the detail | not sent (it only comes with `SEND_TEMPLATE`, unit 11) |
 | `GET /chatbot-requests/:id/conversation`, `GET /chatbot-media/:id` | **built (unit 9): `18-conversation.md`**. Not part of the detail: ask for it separately |
-| `reply`, `messages`, `template`, `finish`, `reschedule` | not built yet (`merge` and `link-customer` are in handoff 11, `assignable-users` in section 13 below) |
+| `reply`, `messages`, `template`, `finish`, `reschedule` | all built (`reply` handoff 19, `messages`/`template`/`finish` handoff 20, `reschedule` handoff 21); `merge` and `link-customer` are in handoff 11, `assignable-users` in section 13 below |
 | `q` (free-text search) on `history` | not supported: it answers `400` like any unknown parameter (`groups` supports it, section 4) |
 | The `200 {request}` of the commands (handoffs 11 and 12) | still the small shape (no phone, no `customerKey`). The full row, with the caller's `allowedActions`, arrives on the stream (`request.*` events, `17-realtime-sse.md`), and from the list/detail routes. Do not wait for it: update from the small response and let the event or a refetch complete the row |
 
@@ -122,7 +122,7 @@ Query (all optional; unknown parameters are `400`):
 - With a filter (`subtype`, `assignee`, `overdue`, `windowClosingSoon`, or the `scheduled` tab), a group appears only if it has a matching open request, and `requests` and `moreRequests` count only the matching ones. `openCount` is always the customer's open total.
 - `customer.id` and `displayName` are `null` for a customer that is not linked to a `Customer` (the phone is the only identity); show the masked phone.
 - **`status=resolved` and `status=cancelled`** show only requests closed in the **last 7 days** (D17). These groups are ordered by the latest closing, have `openCount: 0`, `mostUrgentAt: null` and an extra `lastClosedAt`, and their rows are ordered by `closedAt` descending. Filters apply to them too (`assignee` is the person who held it).
-- `status=scheduled` lists open conversations with a `scheduledFor` (none exist until unit 14).
+- `status=scheduled` lists open conversations with a `scheduledFor` (unit 14, handoff 21): the "Agendadas" tab. Scheduled rows are also in `open`.
 - Window rule, exactly: a closed request belongs to the inbox while `closedAt >= now − 7 days` and to the history from `closedAt < now − 7 days`. The two lists never overlap and never skip a request.
 
 ## 5. `GET /chatbot-requests?customerKey=`
@@ -144,7 +144,7 @@ Order is the same as inside a group (open: nearest deadline, then `createdAt`, `
   "resolved7d": 12, "cancelled7d": 5, "openGroups": 9, "unassigned": 4 }
 ```
 
-The first seven are over open requests of the current sucursal. `new` and `inProgress` are by status; `mine` is the caller's `IN_PROGRESS` requests; `windowClosingSoon` uses the same window as the filter: the sucursal's `windowWarningMinutes` setting (S11, handoff 16; 120 minutes while it has never saved settings). `new`/`inProgress` include scheduled requests.
+The first seven are over open requests of the current sucursal. `new` and `inProgress` are by status; `mine` is the caller's `IN_PROGRESS` requests; `windowClosingSoon` uses the same window as the filter: the sucursal's `windowWarningMinutes` setting (S11, handoff 16; 120 minutes while it has never saved settings). `new`/`inProgress` include scheduled requests. `scheduled` counts open requests with a `scheduledFor` (unit 14, including a time already passed that nobody claimed) and `needsReschedule` the open ones flagged (handoff 21).
 
 **`unassigned` (S9, v1.5, additive).** Open requests with no assignee: the total behind the «Sin responsable» filter (`assignee=unassigned`). Section 15.2.
 
@@ -237,7 +237,7 @@ The row (section 3) plus:
 
   **`deniedActions`** (S8) is computed by the same evaluation: section 14.4.
 
-  `RESCHEDULE`, `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH` and `FINISH_IDLE` are **never** in the list yet: their routes do not exist. A read-only user always gets `[]`. Examples: a Manager on a new restock request whose phone has no customer gets `["CLAIM","RESOLVE"]`, and `["CLAIM","RESOLVE","LINK_CUSTOMER"]` when a customer with that phone exists; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","REPLY","CANCEL"]` (and `["CLAIM","REPLY","CANCEL"]` while it is still `NEW`), plus `MERGE` when that customer has another open question in the same conversation. A Cashier looking at a colleague's request gets neither `MERGE` nor `CANCEL` (a Manager gets both).
+  `RESCHEDULE` (unit 14: an open, scheduled, not-started request; handoff 21) and `SEND_MESSAGE`, `SEND_TEMPLATE`, `FINISH`, `FINISH_IDLE` (unit 11, handoff 20) are offered when their rules hold. While a scheduled request is more than 5 minutes ahead, `CLAIM` is missing and `deniedActions` carries `SCHEDULED_TOO_EARLY` (handoff 21, 1.2). A read-only user always gets `[]`. Examples: a Manager on a new restock request whose phone has no customer gets `["CLAIM","RESOLVE"]`, and `["CLAIM","RESOLVE","LINK_CUSTOMER"]` when a customer with that phone exists; the Cashier who claimed an `UNKNOWN_QUESTION` gets `["RELEASE","REPLY","CANCEL"]` (and `["CLAIM","REPLY","CANCEL"]` while it is still `NEW`), plus `MERGE` when that customer has another open question in the same conversation. A Cashier looking at a colleague's request gets neither `MERGE` nor `CANCEL` (a Manager gets both).
 
 ## 9. `GET /chatbot-requests/:id/audit`
 
@@ -356,7 +356,7 @@ Computed on every read **in business time** (the clock pauses outside the openin
 - **`claimDeadlineAt` / `resolveDeadlineAt` already include the paused time** (they are absolute instants computed in business time). Show them as they are; do **not** add the pause yourself. While `slaPaused` is `true` show `slaResumesAt` ("se reanuda a las 09:00") and keep the level you were given: it does not advance while paused.
 - `null` for a closed request, for an open request whose active clock has no deadline (a live conversation after it was taken: resolves live) **and no `overdueAt`**, and when the sucursal's settings cannot be read (the server logs it once per response and still answers: `slaPaused` is then `false`). Show no light for `null`.
 - **`overdueAt` wins.** An open request with `overdueAt` set is always `OVERDUE`, so `slaLevel` agrees with `displayStatus: "EXPIRED"` and with the overdue notice its assignee already received. The mark is never cleared: a request that went overdue while waiting to be taken and is then claimed (or released) stays `OVERDUE` even if its new window (the later resolve deadline, a fresh claim window) has plenty of time left. Without `overdueAt` the level follows the **active** clock as described above. This also holds when the sucursal's settings cannot be read (it needs no calendar).
-- **A scheduled request whose `scheduledFor` has not arrived yet reads `OK`:** all its milestones are still ahead. Use `scheduledFor` to show it as scheduled rather than green if you prefer.
+- **A scheduled request whose `scheduledFor` has not arrived yet reads `OK`:** all its milestones are still ahead (its claim clock starts at `scheduledFor`). Use `scheduledFor` to show it as scheduled rather than green (handoff 21).
 - Like `slaPaused` it is computed per response, so it changes without the row changing: **do not** use it to order, to detect updates or as a cache key. For ordering keep `mostUrgentAt` and the deadlines.
 - The sweep records its notices up to 30 seconds after an instant; `slaLevel` is exact at read time. It never disagrees with a recorded milestone (it can only be ahead of it for a few seconds); the `overdueAt` rule above is the one place it deliberately goes beyond the active clock.
 
@@ -377,7 +377,7 @@ Computed on every read **in business time** (the clock pauses outside the openin
 | `TEMPLATE_SENT` | `USER` | not emitted yet (unit 11) |
 | `FINISHED` | `USER` | not emitted yet (unit 11) |
 | `CANCELLED` | `USER` (staff) or `SERVICE` (customer withdrew) | staff: `{reason, note?, customerNote?}` with `reason` one of the four staff reasons; customer: `{reason: "CUSTOMER_WITHDREW" \| "AUTO_RESOLVED"}`. `note` is internal and `customerNote` is what the bot relays; both are written by staff and shown only here |
-| `RESCHEDULED` | `USER` | not emitted yet (scheduling, unit 14) |
+| `RESCHEDULED` | `USER` (staff) or `SERVICE` (the bot) | `{from, to, requiresTemplate, scheduleVersion}` plus `byUser: {id, displayName}` (staff) or `triggerWaMessageId` (bot) |
 | `CUSTOMER_LINKED` | `USER` | `{customerId}` |
 | `SLA_MILESTONE` | `SYSTEM` | `{milestone: "HALF" \| "ESCALATION" \| "OVERDUE", clock: "CLAIM" \| "RESOLVE", cycle, dueAt, notice, noticeNotBefore?, customerNotice?}`: `cycle` is the clock's start in ms as a string, `dueAt` the instant the milestone was due, `notice` the notice sent (or `null`), `noticeNotBefore` when staff notices were held until the next opening, `customerNotice` (`SENT` \| `SKIPPED_STALE`) on the first overdue only |
 | `DELIVERY_OUTCOME` | `SERVICE` | `{deliveryId, feedType, outcome, attemptId, evidenceHash, ackReceivedAt, needsReconciliation}`: what the bot reported about a queued answer (`outcome` as in `deliveries[]`) |

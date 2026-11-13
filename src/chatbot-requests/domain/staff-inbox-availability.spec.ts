@@ -251,6 +251,61 @@ describe('computeActionAvailability: deniedActions', () => {
   });
 });
 
+describe('computeActionAvailability: scheduled conversations (unit 14, A1)', () => {
+  const SCHEDULED_FOR = new Date('2026-11-14T16:00:00.000Z');
+  const CLAIMABLE_AT = '2026-11-14T15:55:00.000Z';
+  const scheduled = (over: Partial<ChatbotRequestState> = {}) =>
+    state({
+      kind: 'CONVERSATION',
+      subtype: 'TALK_TO_HUMAN',
+      scheduledFor: SCHEDULED_FOR,
+      ...over,
+    });
+  const at = (iso: string) => {
+    jest.useFakeTimers({ now: new Date(iso) });
+  };
+  afterEach(() => jest.useRealTimers());
+
+  it('denies CLAIM with SCHEDULED_TOO_EARLY and claimableAt while too early', () => {
+    at('2026-11-14T15:54:59.999Z');
+    const view = computeActionAvailability(scheduled(), CASHIER, ME);
+    expect(view.allowedActions).not.toContain('CLAIM');
+    expect(view.deniedActions).toContainEqual({
+      action: 'CLAIM',
+      code: 'SCHEDULED_TOO_EARLY',
+      claimableAt: CLAIMABLE_AT,
+    });
+  });
+
+  it('offers CLAIM once claimable (scheduledFor - 5 min, inclusive) and drops the denial', () => {
+    at(CLAIMABLE_AT);
+    const view = computeActionAvailability(scheduled(), CASHIER, ME);
+    expect(view.allowedActions).toContain('CLAIM');
+    expect(view.deniedActions.map((d) => d.action)).not.toContain('CLAIM');
+  });
+
+  it('a permission gate still comes first: no update permission is INSUFFICIENT_PERMISSIONS, without claimableAt', () => {
+    at('2026-11-14T10:00:00.000Z');
+    const view = computeActionAvailability(scheduled(), READ_ONLY, ME);
+    expect(view.deniedActions).toContainEqual({
+      action: 'CLAIM',
+      code: 'INSUFFICIENT_PERMISSIONS',
+    });
+  });
+
+  it('claimableAt appears only on the SCHEDULED_TOO_EARLY entry', () => {
+    at('2026-11-14T10:00:00.000Z');
+    const { deniedActions } = computeActionAvailability(
+      scheduled(),
+      MANAGER,
+      ME,
+    );
+    for (const entry of deniedActions) {
+      expect('claimableAt' in entry).toBe(entry.code === 'SCHEDULED_TOO_EARLY');
+    }
+  });
+});
+
 // ---------------------------------------------------------------- differential
 
 /** Verbatim copy of `computeAllowedActions` before S8 (the oracle). */

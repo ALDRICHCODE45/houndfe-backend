@@ -73,6 +73,34 @@ interface StoredMedia {
 
 const MAX_ACK_ATTEMPTS = 3;
 
+/** S20 3: the bot's recovery view of an open scheduled request. */
+export interface ScheduledRequestView {
+  requestId: string;
+  subtype: string;
+  scheduledFor: string;
+  needsReschedule: boolean;
+  scheduleVersion: number;
+}
+
+interface ScheduledRow {
+  requestId: string | null;
+  subtype: string | null;
+  scheduledFor: Date | null;
+  needsReschedule: boolean | null;
+  scheduleVersion: number | null;
+}
+
+const toScheduledView = (row: ScheduledRow): ScheduledRequestView | null =>
+  row.requestId && row.scheduledFor
+    ? {
+        requestId: row.requestId,
+        subtype: row.subtype as string,
+        scheduledFor: row.scheduledFor.toISOString(),
+        needsReschedule: row.needsReschedule === true,
+        scheduleVersion: row.scheduleVersion ?? 0,
+      }
+    : null;
+
 @Injectable()
 export class PrismaLiveConversationStore {
   constructor(private readonly tenantPrisma: TenantPrismaService) {}
@@ -188,9 +216,22 @@ export class PrismaLiveConversationStore {
     sessionState: string | null;
     requestId: string | null;
     assigneeFirstName: string | null;
+    scheduledRequest: ScheduledRequestView | null;
   } | null> {
     const tenantId = this.tenantPrisma.getTenantId();
     const tx = this.tenantPrisma.getClient();
+    // The nearest open scheduled request of this chat (one per subtype may
+    // exist; the partial index on the conversation ref serves it).
+    const [scheduledRow] = await tx.$queryRaw<ScheduledRow[]>(Prisma.sql`
+      SELECT "id" AS "requestId", "subtype"::text AS "subtype", "scheduledFor",
+             "needsReschedule", "scheduleVersion"
+      FROM "chatbot_requests"
+      WHERE "tenantId" = ${tenantId} AND "conversationRef" = ${conversationRef}
+        AND "scheduledFor" IS NOT NULL AND "status" IN ('NEW', 'IN_PROGRESS')
+      ORDER BY "scheduledFor" LIMIT 1`);
+    const scheduledRequest = scheduledRow
+      ? toScheduledView(scheduledRow)
+      : null;
     const [row] = await tx.$queryRaw<
       {
         mode: 'BOT' | 'HUMAN';
@@ -211,7 +252,19 @@ export class PrismaLiveConversationStore {
       LEFT JOIN "chatbot_requests" r
         ON r."tenantId" = c."tenantId" AND r."id" = s."requestId"
       WHERE c."tenantId" = ${tenantId} AND c."conversationRef" = ${conversationRef}`);
-    if (!row) return null;
+    if (!row) {
+      // A booked chat the mirror has not seen yet is still the bot's to answer.
+      return scheduledRequest
+        ? {
+            mode: 'BOT',
+            handoffEpoch: 0,
+            sessionState: null,
+            requestId: null,
+            assigneeFirstName: null,
+            scheduledRequest,
+          }
+        : null;
+    }
     const live = row.sessionState !== null;
     return {
       mode: row.mode,
@@ -219,6 +272,7 @@ export class PrismaLiveConversationStore {
       sessionState: live ? row.sessionState : null,
       requestId: live ? row.requestId : null,
       assigneeFirstName: live ? staffFirstName(row.assigneeDisplayName) : null,
+      scheduledRequest,
     };
   }
 
@@ -240,6 +294,7 @@ export class PrismaLiveConversationStore {
       sessionState: string | null;
       requestId: string | null;
       assigneeFirstName: string | null;
+      scheduledRequest: ScheduledRequestView | null;
     }>;
     nextLast: string | null;
   }> {
@@ -253,10 +308,18 @@ export class PrismaLiveConversationStore {
         sessionState: string | null;
         requestId: string | null;
         assigneeDisplayName: string | null;
+        schedRequestId: string | null;
+        schedSubtype: string | null;
+        schedFor: Date | null;
+        schedNeeds: boolean | null;
+        schedVersion: number | null;
       }[]
     >(Prisma.sql`
       SELECT c."conversationRef", c."mode"::text AS "mode", c."handoffEpoch",
-             s."state" AS "sessionState", s."requestId", r."assigneeDisplayName"
+             s."state" AS "sessionState", s."requestId", r."assigneeDisplayName",
+             sr."id" AS "schedRequestId", sr."subtype"::text AS "schedSubtype",
+             sr."scheduledFor" AS "schedFor", sr."needsReschedule" AS "schedNeeds",
+             sr."scheduleVersion" AS "schedVersion"
       FROM "chatbot_conversations" c
       LEFT JOIN LATERAL (
         SELECT s."state", s."requestId" FROM "chatbot_live_sessions" s
@@ -265,6 +328,14 @@ export class PrismaLiveConversationStore {
         ORDER BY s."epoch" DESC LIMIT 1) s ON TRUE
       LEFT JOIN "chatbot_requests" r
         ON r."tenantId" = c."tenantId" AND r."id" = s."requestId"
+      LEFT JOIN LATERAL (
+        SELECT q."id", q."subtype", q."scheduledFor", q."needsReschedule",
+               q."scheduleVersion"
+        FROM "chatbot_requests" q
+        WHERE q."tenantId" = c."tenantId"
+          AND q."conversationRef" = c."conversationRef"
+          AND q."scheduledFor" IS NOT NULL AND q."status" IN ('NEW', 'IN_PROGRESS')
+        ORDER BY q."scheduledFor" LIMIT 1) sr ON TRUE
       WHERE c."tenantId" = ${tenantId} AND c."mode" = 'HUMAN'
         ${after === null ? Prisma.empty : Prisma.sql`AND c."conversationRef" > ${after}`}
       ORDER BY c."conversationRef" LIMIT ${limit + 1}`);
@@ -281,6 +352,13 @@ export class PrismaLiveConversationStore {
           assigneeFirstName: live
             ? staffFirstName(row.assigneeDisplayName)
             : null,
+          scheduledRequest: toScheduledView({
+            requestId: row.schedRequestId,
+            subtype: row.schedSubtype,
+            scheduledFor: row.schedFor,
+            needsReschedule: row.schedNeeds,
+            scheduleVersion: row.schedVersion,
+          }),
         };
       }),
       nextLast:

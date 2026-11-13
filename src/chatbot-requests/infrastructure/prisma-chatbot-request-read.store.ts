@@ -119,7 +119,7 @@ const COLUMNS = Prisma.sql`
   r."phoneCountryCode", r."phone", r."assigneeUserId", r."assigneeDisplayName",
   r."claimedAt", r."claimDeadlineAt", r."resolveDeadlineAt", r."overdueAt",
   r."whatsappWindowClosesAt", r."scheduledFor", r."requiresTemplateAtStart",
-  r."needsReschedule", r."summary", r."createdAt", r."closedAt",
+  r."needsReschedule", r."scheduleVersion", r."summary", r."createdAt", r."closedAt",
   r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt",
   r."cancelReason"::text AS "cancelReason",
   r."staffCancelReason"::text AS "staffCancelReason",

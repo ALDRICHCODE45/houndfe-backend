@@ -10,6 +10,7 @@
  * R4: claim/release/reassign patch only `chatbot_requests` columns, so a
  * wrapped `HumanDecision.version` (fixed 1 -> 2) is never touched by them.
  */
+import { CLAIM_LEAD_MINUTES } from './scheduling';
 
 export type ChatbotRequestKind = 'DECISION' | 'CLARIFICATION' | 'CONVERSATION';
 export type ChatbotRequestSubtype =
@@ -55,6 +56,8 @@ export interface ChatbotRequestState {
   overdueAt: Date | null;
   /** `null` when the request is not a conversation or has no session yet. */
   liveSessionState: LiveSessionState | null;
+  /** Unit 14: the booked time, when the request is scheduled. */
+  scheduledFor?: Date | null;
 }
 
 export interface ChatbotRequestPatch {
@@ -80,6 +83,13 @@ export interface ChatbotRequestPatch {
   /** `link-customer` (R1): the customer the staff picked. */
   customerId?: string;
   ambiguousCustomer?: boolean;
+  /** Unit 14: written by a reschedule (the seat is moved by the caller). */
+  scheduledFor?: Date;
+  scheduleVersion?: number;
+  scheduleStage?: number;
+  scheduleDueAt?: Date | null;
+  needsReschedule?: boolean;
+  requiresTemplateAtStart?: boolean;
 }
 
 /** Row for the append-only `chatbot_request_events` table (§6.2). */
@@ -93,7 +103,8 @@ export interface ChatbotRequestEventDraft {
     | 'MERGED'
     | 'CUSTOMER_LINKED'
     | 'REPLIED'
-    | 'FINISHED';
+    | 'FINISHED'
+    | 'RESCHEDULED';
   actorKind: 'USER' | 'SERVICE';
   actorId: string;
   actorDisplayName: string | null;
@@ -114,6 +125,10 @@ export type ChatbotRequestErrorCode =
   | 'MERGE_NOT_ALLOWED'
   | 'SESSION_NOT_ACTIVE'
   | 'COMPLAINT_OUTCOME_REQUIRED'
+  // Unit 14 (§4.9): scheduled conversations.
+  | 'SCHEDULED_TOO_EARLY'
+  | 'NOT_SCHEDULED'
+  | 'RESCHEDULE_NOT_ALLOWED'
   | 'VALIDATION_ERROR';
 
 export interface ChatbotRequestError {
@@ -125,6 +140,8 @@ export interface ChatbotRequestError {
     status: ChatbotRequestStatus;
     claimedBy: { id: string; displayName: string } | null;
   };
+  /** Small fixed-shape facts for the error body (`{claimableAt}`). */
+  extra?: Record<string, unknown>;
 }
 
 export type CommandResult =
@@ -208,6 +225,23 @@ export function claim(
     return reject(state, 'REQUEST_CLAIMED_BY_OTHER', 409);
   if (state.version !== cmd.expectedVersion || state.status !== 'NEW')
     return reject(state, 'VERSION_CONFLICT', 409);
+  // Unit 14 (§4.9.6): a scheduled conversation is claimable from 5 min before.
+  if (state.scheduledFor) {
+    const claimableAt = new Date(
+      state.scheduledFor.getTime() - CLAIM_LEAD_MINUTES * 60_000,
+    );
+    if (cmd.now.getTime() < claimableAt.getTime()) {
+      const refused = reject(state, 'SCHEDULED_TOO_EARLY', 409);
+      if (refused.ok) throw new Error('reject() always fails');
+      return {
+        ok: false,
+        error: {
+          ...refused.error,
+          extra: { claimableAt: claimableAt.toISOString() },
+        },
+      };
+    }
+  }
   return accept(
     state,
     {
