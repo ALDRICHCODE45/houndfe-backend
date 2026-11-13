@@ -35,7 +35,10 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 import { noticeReleaseAt } from '../domain/chatbot-sla-sweep';
 import { newestInstant, windowClosesAtOf } from '../domain/scheduling-view';
 import { REMINDER_LEAD_MINUTES } from '../domain/scheduling';
-import { isStartStillOpen, planScheduleStep } from '../domain/schedule-sweep';
+import {
+  needsRescheduleReasonOf,
+  planScheduleStep,
+} from '../domain/schedule-sweep';
 import { enqueueScheduledReminder } from './chatbot-feed-writes';
 import type { TenantClient } from './chatbot-request-writes';
 import { NEEDS_RESCHEDULE_CAUSE } from './scheduled-reschedule-flag';
@@ -223,12 +226,14 @@ export class ScheduleSweepStore {
     const config = closed
       ? null
       : await loadSchedulingConfig(tx, tenantId, 'SHARE');
-    const flag =
+    const flagReason =
       config !== null &&
       row.scheduleStage === 0 &&
       row.status === 'NEW' &&
-      !row.needsReschedule &&
-      !isStartStillOpen(config.calendar, row.scheduledFor);
+      !row.needsReschedule
+        ? needsRescheduleReasonOf(config.calendar, row.scheduledFor)
+        : null;
+    const flag = flagReason !== null;
     const plan = planScheduleStep({
       stage: row.scheduleStage,
       scheduledFor: row.scheduledFor,
@@ -284,7 +289,7 @@ export class ScheduleSweepStore {
           "scheduleDueAt" = ${plan.dueAt ? plan.dueAt.toISOString() : null}::timestamp
           ${
             flag
-              ? Prisma.sql`, "needsReschedule" = true, "version" = "version" + 1, "updatedAt" = now()`
+              ? Prisma.sql`, "needsReschedule" = true, "needsRescheduleReason" = ${flagReason}, "version" = "version" + 1, "updatedAt" = now()`
               : Prisma.empty
           }
       WHERE "tenantId" = ${tenantId} AND "id" = ${id}

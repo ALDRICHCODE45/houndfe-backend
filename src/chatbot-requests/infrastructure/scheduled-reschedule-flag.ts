@@ -24,7 +24,10 @@ import {
   REALTIME_CHANNEL,
   realtimeLockKey,
 } from '../../shared/realtime/realtime-event-writes';
-import { isStartStillOpen } from '../domain/schedule-sweep';
+import {
+  needsRescheduleReasonOf,
+  type NeedsRescheduleReason,
+} from '../domain/schedule-sweep';
 import { loadSchedulingConfig } from './scheduling-store';
 import type { TxRunner } from './chatbot-sla-policy';
 
@@ -80,17 +83,22 @@ async function flagBatch(
   if (rows.length === 0) return { flagged: 0, lastId: null };
   // Request rows first, settings second (the order every command uses).
   const { calendar } = await loadSchedulingConfig(tx, tenantId);
-  const ids = rows
-    .filter((row) => !isStartStillOpen(calendar, row.scheduledFor))
-    .map((row) => row.id);
+  const flagging = rows.flatMap((row) => {
+    const reason = needsRescheduleReasonOf(calendar, row.scheduledFor);
+    return reason ? [{ id: row.id, reason }] : [];
+  });
+  const ids = flagging.map((row) => row.id);
+  const reasons: NeedsRescheduleReason[] = flagging.map((row) => row.reason);
   const lastId = rows.length < batchSize ? null : rows[rows.length - 1].id;
   if (ids.length === 0) return { flagged: 0, lastId };
   const updated = await tx.$queryRaw<Array<{ id: string; version: number }>>(
     Prisma.sql`
-    UPDATE "chatbot_requests"
-    SET "needsReschedule" = true, "version" = "version" + 1, "updatedAt" = now()
-    WHERE "tenantId" = ${tenantId} AND "id" = ANY(${ids}::text[])
-    RETURNING "id", "version"`,
+    UPDATE "chatbot_requests" r
+    SET "needsReschedule" = true, "needsRescheduleReason" = u."reason",
+        "version" = r."version" + 1, "updatedAt" = now()
+    FROM unnest(${ids}::text[], ${reasons}::text[]) AS u("id", "reason")
+    WHERE r."tenantId" = ${tenantId} AND r."id" = u."id"
+    RETURNING r."id", r."version"`,
   );
   // The realtime tenant lock is the last lock of the transaction. The events
   // go in ONE statement (same lock key, same channel and same rows as

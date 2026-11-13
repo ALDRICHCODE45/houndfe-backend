@@ -3856,6 +3856,9 @@ model ChatbotRequest {
   scheduledFor            DateTime?
   requiresTemplateAtStart Boolean   @default(false)
   needsReschedule         Boolean   @default(false)
+  // Why `needsReschedule` is set: CLOSED_DATE | HOURS_CHANGED (CHECK in the
+  // migration, written and cleared together with the flag); NULL when not flagged.
+  needsRescheduleReason   String?
   // Unit 14 (§4.9): the scheduled-conversation sweep's durable cursor. Stage 0 =
   // the reminder is due at `scheduleDueAt` (scheduledFor - 10 min), 1 = the
   // "solicitud nueva" notice is due (scheduledFor), 2 = nothing left (due NULL).

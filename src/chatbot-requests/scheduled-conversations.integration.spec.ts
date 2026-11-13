@@ -924,7 +924,7 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       const { id, startsAt } = await bookOk(b, c);
       await prisma.chatbotRequest.update({
         where: { id },
-        data: { needsReschedule: true },
+        data: { needsReschedule: true, needsRescheduleReason: 'CLOSED_DATE' },
       });
       const target = await firstSlot(b, c, 2);
       const res = await reschedule(b, id, {
@@ -946,6 +946,7 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       const stored = await row(id);
       expect(stored.scheduledFor?.toISOString()).toBe(target);
       expect(stored.needsReschedule).toBe(false);
+      expect(stored.needsRescheduleReason).toBeNull();
       expect(stored.scheduleVersion).toBe(2);
       expect(stored.scheduleDueAt?.getTime()).toBe(
         Date.parse(target) - 10 * MIN,
@@ -1917,6 +1918,7 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       await sweep().tick(minus(startsAt, -10));
       const flagged = await row(id);
       expect(flagged.needsReschedule).toBe(true);
+      expect(flagged.needsRescheduleReason).toBe('CLOSED_DATE');
       expect(flagged.version).toBe(versionBefore + 1);
       expect(await remindersOf(b, id)).toHaveLength(0);
       const events = await prisma.realtimeEvent.findMany({
@@ -1965,8 +1967,10 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
         });
         const after = await row(id);
         expect(after.needsReschedule).toBe(true);
+        expect(after.needsRescheduleReason).toBe('CLOSED_DATE');
         expect(after.version).toBe(versionBefore + 1);
         expect((await row(cancelled.id)).needsReschedule).toBe(false);
+        expect((await row(cancelled.id)).needsRescheduleReason).toBeNull();
         expect((await row(past.id)).needsReschedule).toBe(false);
         // Not told to the customer: no feed item at all, no audit event.
         expect(
@@ -1991,6 +1995,7 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
         expect((await row(id)).version).toBe(versionBefore + 1);
         const inbox = await detail(b, id).expect(200);
         expect(inbox.body.needsReschedule).toBe(true);
+        expect(inbox.body.needsRescheduleReason).toBe('CLOSED_DATE');
 
         // The customer reschedules: the flag clears.
         const target = await firstSlot(b, flaggedC, 0);
@@ -1998,6 +2003,9 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
           200,
         );
         expect((await row(id)).needsReschedule).toBe(false);
+        expect((await row(id)).needsRescheduleReason).toBeNull();
+        const cleared = await detail(b, id).expect(200);
+        expect(cleared.body.needsRescheduleReason).toBeNull();
       });
 
       it('flags when the business hours are shortened so that the booked time is outside them', async () => {
@@ -2012,7 +2020,25 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
         expect(
           await flagUnbookableSchedules(app.get(PrismaService), b.tenantId),
         ).toEqual({ flagged: 1 });
-        expect((await row(id)).needsReschedule).toBe(true);
+        const flagged = await row(id);
+        expect(flagged.needsReschedule).toBe(true);
+        expect(flagged.needsRescheduleReason).toBe('HOURS_CHANGED');
+        const inbox = await detail(b, id).expect(200);
+        expect(inbox.body.needsRescheduleReason).toBe('HOURS_CHANGED');
+      });
+
+      it('a date that is closed AND outside the hours reads CLOSED_DATE (the closed date wins)', async () => {
+        const b = await branch();
+        const { id, startsAt } = await bookOk(b, customerOf());
+        await changeSettings(b, {
+          closedDates: [localDate(new Date(startsAt))],
+          days: WEEKDAYS.map((day) => ({
+            day,
+            ranges: [{ open: '00:00', close: '00:01' }],
+          })) as unknown as Prisma.InputJsonArray,
+        });
+        await flagUnbookableSchedules(app.get(PrismaService), b.tenantId);
+        expect((await row(id)).needsRescheduleReason).toBe('CLOSED_DATE');
       });
     });
   });

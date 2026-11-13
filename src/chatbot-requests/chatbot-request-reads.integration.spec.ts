@@ -957,6 +957,59 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
       expect(reassigner.body.allowedActions).toEqual(['RELEASE', 'REASSIGN']);
     });
 
+    it('exposes templateCostText (the tenant setting, or null with no row) on the detail to a reader without ChatbotSettings, and never on list rows', async () => {
+      const { id } = await restockRequest();
+      // `tenantA` has no settings row here: the detail says null.
+      const bare = await get(`/chatbot-requests/${id}`, 'readOnly');
+      expect(bare.status).toBe(200);
+      expect(bare.body.templateCostText).toBeNull();
+
+      const base = defaultSettings();
+      await prisma.chatbotAttentionSettings.create({
+        data: {
+          tenantId: tenantA,
+          version: 1,
+          timeZone: base.openingHours.timeZone,
+          days: base.openingHours.days as never,
+          closedDates: [],
+          slas: base.slas as never,
+          windowWarningMinutes: base.windowWarningMinutes,
+          templateCostText: 'Cada plantilla cuesta 2 pesos.',
+          enabledSubtypes: base.enabledSubtypes,
+          receiptCloseMarginMinutes: base.receiptCloseMarginMinutes,
+          schedulingEnabled: false,
+          slotMinutes: 30,
+          slotsOffered: 3,
+          maxScheduledPerSlot: 3,
+        },
+      });
+      try {
+        for (const role of ['readOnly', 'cashier', 'manager']) {
+          const res = await get(`/chatbot-requests/${id}`, role);
+          expect(res.body.templateCostText).toBe(
+            'Cada plantilla cuesta 2 pesos.',
+          );
+        }
+        // Not on the list rows nor on the other open rows of the detail.
+        const groups = await get(
+          '/chatbot-requests/groups?limit=50',
+          'manager',
+        );
+        const rows = groups.body.items.flatMap((g: any) => g.requests);
+        expect(rows.length).toBeGreaterThan(0);
+        for (const row of rows)
+          expect(row).not.toHaveProperty('templateCostText');
+        const detail = await get(`/chatbot-requests/${id}`, 'manager');
+        for (const row of detail.body.otherOpenRequests) {
+          expect(row).not.toHaveProperty('templateCostText');
+        }
+      } finally {
+        await prisma.chatbotAttentionSettings.deleteMany({
+          where: { tenantId: tenantA },
+        });
+      }
+    });
+
     it('builds the customer card, decision, other open requests, deliveries and audit', async () => {
       const customer = await prisma.customer.create({
         data: {

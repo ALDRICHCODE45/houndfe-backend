@@ -131,6 +131,8 @@ export interface RequestRecord {
   scheduledFor: Date | null;
   requiresTemplateAtStart: boolean;
   needsReschedule: boolean;
+  /** Why it is flagged; `null` when not flagged (or flagged before the column). */
+  needsRescheduleReason?: 'CLOSED_DATE' | 'HOURS_CHANGED' | null;
   /** Unit 14 (S20 6): monotonic per request; 0 when never scheduled. */
   scheduleVersion?: number;
   summary: string;
@@ -248,6 +250,11 @@ export interface DetailRecord {
   zoneImpact: ZoneImpactView | null;
   audit: AuditRecord[];
   deliveries: DeliveryRecord[];
+  /**
+   * The tenant's `templateCostText` for the paid-template confirmation
+   * (detail only); `null` when the tenant has no settings row.
+   */
+  templateCostText?: string | null;
 }
 
 export interface InboxCounts {
@@ -751,6 +758,9 @@ export class ChatbotRequestReadsService {
         : null;
     return {
       ...row,
+      // Detail only, readable without `read:ChatbotSettings`: the attendee
+      // shows it in the paid-template confirmation (handoff 20, section 3c).
+      templateCostText: record.templateCostText ?? null,
       needs: request.needs,
       context: request.context ?? null,
       customer: {
@@ -1021,6 +1031,9 @@ export class ChatbotRequestReadsService {
       scheduledFor: iso(r.scheduledFor),
       requiresTemplateAtStart: r.requiresTemplateAtStart,
       needsReschedule: r.needsReschedule,
+      needsRescheduleReason: r.needsReschedule
+        ? (r.needsRescheduleReason ?? null)
+        : null,
       scheduleVersion: r.scheduleVersion ?? 0,
       liveSession: r.liveSessionState
         ? {

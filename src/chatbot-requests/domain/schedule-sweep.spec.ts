@@ -7,6 +7,7 @@ import { createBusinessCalendar } from './business-hours-calendar';
 import {
   MIN_REMINDER_REMAINING_MINUTES,
   isStartStillOpen,
+  needsRescheduleReasonOf,
   planScheduleStep,
 } from './schedule-sweep';
 
@@ -115,5 +116,20 @@ describe('isStartStillOpen', () => {
     const evening = new Date('2026-11-17T00:30:00.000Z'); // 18:30 local
     expect(isStartStillOpen(open(), evening)).toBe(true);
     expect(isStartStillOpen(open([], '18:00'), evening)).toBe(false);
+  });
+
+  it('needsRescheduleReasonOf: null while open, CLOSED_DATE on a closed date (it wins), HOURS_CHANGED otherwise', () => {
+    const evening = new Date('2026-11-17T00:30:00.000Z'); // 18:30 local, 16th
+    expect(needsRescheduleReasonOf(open(), AT)).toBeNull();
+    expect(needsRescheduleReasonOf(open(['2026-11-16']), AT)).toBe(
+      'CLOSED_DATE',
+    );
+    expect(needsRescheduleReasonOf(open([], '18:00'), evening)).toBe(
+      'HOURS_CHANGED',
+    );
+    // closed date AND outside the hours: the date wins
+    expect(
+      needsRescheduleReasonOf(open(['2026-11-16'], '18:00'), evening),
+    ).toBe('CLOSED_DATE');
   });
 });

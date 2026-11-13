@@ -265,6 +265,11 @@ export class BusinessCalendar {
     );
   }
 
+  /** `true` when the instant's local date (in the zone) is a closed date. */
+  isClosedDateAt(at: Date): boolean {
+    return this.closed.has(keyOf(this.localDateOf(at.getTime())));
+  }
+
   /** The instant at which `minutes` business minutes have elapsed since `from`. */
   addBusinessMinutes(from: Date, minutes: number): Date {
     if (!Number.isFinite(minutes) || minutes < 0) {

@@ -226,6 +226,7 @@ export class PrismaSchedulingStore implements SchedulingStore {
       scheduleStage: 0,
       scheduleDueAt: reminderAt(input.to),
       needsReschedule: false,
+      needsRescheduleReason: null,
       requiresTemplateAtStart,
     };
     const staff = input.actor.kind === 'USER' ? input.actor : null;

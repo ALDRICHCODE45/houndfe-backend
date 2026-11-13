@@ -89,6 +89,8 @@ export interface ChatbotRequestPatch {
   scheduleStage?: number;
   scheduleDueAt?: Date | null;
   needsReschedule?: boolean;
+  /** Cleared together with `needsReschedule` by a reschedule. */
+  needsRescheduleReason?: null;
   requiresTemplateAtStart?: boolean;
 }
 

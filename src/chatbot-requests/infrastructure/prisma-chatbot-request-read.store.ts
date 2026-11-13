@@ -119,7 +119,7 @@ const COLUMNS = Prisma.sql`
   r."phoneCountryCode", r."phone", r."assigneeUserId", r."assigneeDisplayName",
   r."claimedAt", r."claimDeadlineAt", r."resolveDeadlineAt", r."overdueAt",
   r."whatsappWindowClosesAt", r."scheduledFor", r."requiresTemplateAtStart",
-  r."needsReschedule", r."scheduleVersion", r."summary", r."createdAt", r."closedAt",
+  r."needsReschedule", r."needsRescheduleReason", r."scheduleVersion", r."summary", r."createdAt", r."closedAt",
   r."resolvedByActorId", r."resolvedByDisplayName", ${URGENCY} AS "urgencyAt",
   r."cancelReason"::text AS "cancelReason",
   r."staffCancelReason"::text AS "staffCancelReason",
@@ -534,6 +534,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       decision,
       candidates,
       hasMergeCandidate,
+      costText,
     ] = await Promise.all([
       customerId ? this.customers([customerId]) : Promise.resolve([]),
       customerId
@@ -567,6 +568,9 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       readDecision(this.db, tenantId, request.subtype, links),
       customerId === null ? this.linkCandidates(request) : Promise.resolve([]),
       this.hasMergeCandidate(request),
+      this.db.$queryRaw<Array<{ templateCostText: string }>>(Prisma.sql`
+        SELECT "templateCostText" FROM "chatbot_attention_settings"
+        WHERE "tenantId" = ${tenantId}`),
     ]);
     return {
       request,
@@ -579,6 +583,7 @@ export class PrismaChatbotRequestReadStore implements ChatbotRequestReadStore {
       zoneImpact: decision.zoneImpact,
       audit,
       deliveries: deliveries.map((d) => ({ ...d })),
+      templateCostText: costText[0]?.templateCostText ?? null,
     };
   }
 

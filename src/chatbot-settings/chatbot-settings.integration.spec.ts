@@ -2170,7 +2170,11 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
     const flagOf = async (requestId: string) =>
       prisma.chatbotRequest.findUniqueOrThrow({
         where: { id: requestId },
-        select: { needsReschedule: true, version: true },
+        select: {
+          needsReschedule: true,
+          needsRescheduleReason: true,
+          version: true,
+        },
       });
     const updatedEvents = (tenantId: string, requestId: string) =>
       prisma.realtimeEvent.findMany({
@@ -2187,9 +2191,13 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       expect(res.body.recompute).toBe('DONE');
       expect(await flagOf(hit.id)).toEqual({
         needsReschedule: true,
+        needsRescheduleReason: 'CLOSED_DATE',
         version: before.version + 1,
       });
-      expect((await flagOf(miss.id)).needsReschedule).toBe(false);
+      expect(await flagOf(miss.id)).toMatchObject({
+        needsReschedule: false,
+        needsRescheduleReason: null,
+      });
       expect(
         (await updatedEvents(id, hit.id)).map((e) => e.payload),
       ).toContainEqual({
@@ -2199,6 +2207,38 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       expect(
         await prisma.chatbotFeedItem.count({ where: { tenantId: id } }),
       ).toBe(0);
+    });
+
+    it('PUT shortening the hours flags the requests that fall outside them as HOURS_CHANGED, and a reschedule clears both fields', async () => {
+      const { id, hit, miss } = await scene();
+      // Open from 00:00 to 00:01 every day: both booked times are outside.
+      const open = ALWAYS_OPEN();
+      const short = {
+        ...open,
+        openingHours: {
+          ...open.openingHours,
+          days: open.openingHours.days.map((d) => ({
+            day: d.day,
+            ranges: [{ open: '00:00', close: '00:01' }],
+          })),
+        },
+      };
+      await put(id, body(short, 1)).expect(200);
+      for (const r of [hit, miss]) {
+        expect(await flagOf(r.id)).toMatchObject({
+          needsReschedule: true,
+          needsRescheduleReason: 'HOURS_CHANGED',
+        });
+      }
+      // The reschedule write clears the flag and the reason together.
+      await prisma.chatbotRequest.update({
+        where: { id: hit.id },
+        data: { needsReschedule: false, needsRescheduleReason: null },
+      });
+      expect(await flagOf(hit.id)).toMatchObject({
+        needsReschedule: false,
+        needsRescheduleReason: null,
+      });
     });
 
     it('apply-to-all flags the scheduled requests of the tenants it changes', async () => {

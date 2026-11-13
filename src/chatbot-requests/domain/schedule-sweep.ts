@@ -86,3 +86,19 @@ export const isStartStillOpen = (
   calendar: BusinessCalendar,
   startsAt: Date,
 ): boolean => calendar.isOpenAt(startsAt);
+
+/** Why a booked time needs rescheduling (`needsRescheduleReason`). */
+export type NeedsRescheduleReason = 'CLOSED_DATE' | 'HOURS_CHANGED';
+
+/**
+ * `null` while the start is still open; otherwise why not: the date is closed
+ * (it wins when the hours would also exclude it) or the time is outside the
+ * open hours of an open date.
+ */
+export const needsRescheduleReasonOf = (
+  calendar: BusinessCalendar,
+  startsAt: Date,
+): NeedsRescheduleReason | null => {
+  if (isStartStillOpen(calendar, startsAt)) return null;
+  return calendar.isClosedDateAt(startsAt) ? 'CLOSED_DATE' : 'HOURS_CHANGED';
+};
