@@ -97,6 +97,7 @@ import { CustomerKeySealer } from './domain/customer-key-sealer';
 import { ChatbotSlaSweepStore } from './infrastructure/chatbot-sla-sweep.store';
 import { PgFeedWakeup } from './infrastructure/feed-wakeup';
 import { LiveSessionSweepScheduler } from './infrastructure/live-session-sweep.scheduler';
+import { ScheduleSweepStore } from './infrastructure/schedule-sweep.store';
 import { LiveSessionSweepStore } from './infrastructure/live-session-sweep.store';
 import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.store';
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
@@ -632,6 +633,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         sessionState: 'STARTING',
         requestId: l.id,
         assigneeFirstName: 'Ana',
+        scheduledRequest: null,
       });
     });
 
@@ -1080,6 +1082,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         sessionState: null,
         requestId: null,
         assigneeFirstName: null,
+        scheduledRequest: null,
       });
       // a STARTED for an ended epoch is the late ack after a revert/end
       const late = await sessionAck(b, l.ref, {
@@ -1282,6 +1285,29 @@ describeIfDb('live conversation (PostgreSQL)', () => {
       expect(await items(b, l.id, 'conversation.ended')).toHaveLength(1);
       await sessionAck(b, l.ref, { epoch: 1, state: 'ENDED' }).expect(200);
       expect((await sessions(b, l.id))[0].state).toBe('ENDED');
+    });
+
+    it('idle end of a scheduled request that was claimed early clears scheduleDueAt (like every other close): the schedule sweep finds nothing afterwards', async () => {
+      const b = await branch();
+      const scheduledFor = new Date(Date.now() + 3 * MIN);
+      const l = await liveRequest(b, {
+        scheduledFor,
+        // The reminder would fall due while the session is idle.
+        scheduleDueAt: new Date(Date.now() + 60 * MIN),
+      });
+      await activeSession(b, l);
+      expect((await row(l.id)).scheduleDueAt).not.toBeNull();
+
+      await sweepScheduler().tick(new Date(Date.now() + 125 * MIN));
+      const resolved = await row(l.id);
+      expect(resolved.status).toBe('RESOLVED');
+      expect(resolved.scheduleDueAt).toBeNull();
+      const schedule = new ScheduleSweepStore(
+        prisma as unknown as PrismaService,
+      );
+      expect(
+        (await schedule.runBatch(new Date(Date.now() + 130 * MIN))).candidates,
+      ).toBe(0);
     });
 
     it("idle clock counts from the customer's last message: a customer message 90 minutes in postpones the end", async () => {
@@ -2326,6 +2352,7 @@ describeIfDb('live conversation (PostgreSQL)', () => {
         sessionState: 'STARTING',
         requestId: starting.id,
         assigneeFirstName: 'Ana',
+        scheduledRequest: null,
       });
       expect(byRef.get(active.ref)).toMatchObject({
         sessionState: 'ACTIVE',

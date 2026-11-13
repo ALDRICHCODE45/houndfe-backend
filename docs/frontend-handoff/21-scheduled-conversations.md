@@ -160,7 +160,7 @@ On `SLOT_UNAVAILABLE`, replace the picker's list with `slots` (the next free blo
 
 ## 4. Cancel
 
-There is no new route. A scheduled request is cancelled by the existing staff `POST /chatbot-requests/:id/cancel` (handoff 11, 3.4) or by the customer through the bot. Either way the **seat is freed in the same transaction**, `scheduleVersion` + 1, the schedule stops (no reminder, no "Nueva solicitud" at the old time) and the request becomes `CANCELLED` as usual (`request.cancelled`). A customer who cancelled can book again immediately. A scheduled request cannot be **merged away** (it is the target of a merge, never the source: handoff 11, 3.5).
+There is no new route. A scheduled request is cancelled by the existing staff `POST /chatbot-requests/:id/cancel` (handoff 11, 3.4) or by the customer through the bot. Either way the **seat is freed in the same transaction**, `scheduleVersion` + 1, the schedule stops (no reminder, no "Nueva solicitud" at the old time) and the request becomes `CANCELLED` as usual (`request.cancelled`). A customer who cancelled can book again immediately. (The "one open scheduled request per customer and subtype" rule identifies the customer by their canonical phone, the request's `customerKey`, not by a linked customer record: one open scheduled request per phone and subtype.) A scheduled request cannot be **merged away** (it is the target of a merge, never the source: handoff 11, 3.5).
 
 ## 5. Realtime and notifications
 

@@ -23,8 +23,16 @@
 -- 6. The bot receipt kind is a closed set (CHECK of 20261110030000): it now
 --    also allows RESCHEDULE (the bot's reschedule receipt, keyed by the raw
 --    X-Idempotency-Key). Widening cannot fail validation, so the constraint is
---    added NOT VALID (no table scan under the exclusive lock) and validated
---    afterwards (SHARE UPDATE EXCLUSIVE only).
+--    added NOT VALID and then validated. NOTE: Prisma runs this file in ONE
+--    transaction, so the ACCESS EXCLUSIVE lock of every ALTER TABLE ... ADD
+--    CONSTRAINT is held until commit and VALIDATE gives no lock relief here
+--    (it would only hold SHARE UPDATE EXCLUSIVE in a separate transaction).
+--    Lock cost, therefore: the CHECK on "chatbot_requests" (item 2) validates
+--    immediately, scanning the table under ACCESS EXCLUSIVE, and the three plain
+--    CREATE INDEX statements (item 3 and 4) block writes to their table while
+--    they scan. Duration grows with the size of "chatbot_requests" and
+--    "chatbot_feed_items" (short at current production sizes): run it in the
+--    rollout's maintenance window.
 --
 -- Existing rows have no scheduledFor, so nothing is scheduled or indexed by
 -- the new indexes. Safe on a populated database; SET LOCAL lock_timeout bounds

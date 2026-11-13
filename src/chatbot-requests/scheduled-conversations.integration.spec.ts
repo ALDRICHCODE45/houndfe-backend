@@ -1749,4 +1749,170 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       });
     });
   });
+
+  // ------------------------------------------------- parallel commands (verify)
+
+  describe('parallel commands on the same seats (no deadlock, one consistent outcome)', () => {
+    /**
+     * Seats = scheduled requests not cancelled, per block: every counter row
+     * equals the count of non-CANCELLED scheduled rows at that instant, and
+     * every such instant has a counter row.
+     */
+    async function expectSeatsConsistent(b: Branch) {
+      const counters = await prisma.scheduledSlotCounter.findMany({
+        where: { tenantId: b.tenantId },
+      });
+      const rows = await prisma.chatbotRequest.groupBy({
+        by: ['scheduledFor'],
+        where: {
+          tenantId: b.tenantId,
+          scheduledFor: { not: null },
+          status: { not: 'CANCELLED' },
+        },
+        _count: { _all: true },
+      });
+      const expected = new Map(
+        rows.map((r) => [r.scheduledFor!.getTime(), r._count._all]),
+      );
+      const actual = new Map(
+        counters
+          .filter((c) => c.booked > 0)
+          .map((c) => [c.startsAt.getTime(), c.booked]),
+      );
+      expect(actual).toEqual(expected);
+      for (const c of counters) expect(c.booked).toBeGreaterThanOrEqual(0);
+    }
+    /** What the settings PUT does: the write, then the post-commit flag pass. */
+    const putClosedDays = async (b: Branch, instants: string[]) => {
+      await prisma.chatbotAttentionSettings.update({
+        where: { tenantId: b.tenantId },
+        data: {
+          closedDates: [
+            ...new Set(instants.map((i) => localDate(new Date(i)))),
+          ],
+          version: { increment: 1 },
+        },
+      });
+      return flagUnbookableSchedules(app.get(PrismaService), b.tenantId);
+    };
+    const noServerError = (statuses: number[]) => {
+      for (const status of statuses) expect(status).toBeLessThan(500);
+    };
+
+    it('cancel vs reschedule of the same request: the request ends CANCELLED with no seat anywhere, whichever goes first', async () => {
+      for (let round = 0; round < 6; round++) {
+        const b = await branch();
+        const c = customerOf();
+        const { id, startsAt } = await bookOk(b, c);
+        const target = await firstSlot(b, c, 2);
+        const [cancelled, moved] = await Promise.all([
+          cancel(b, id),
+          reschedule(b, id, { scheduledFor: target }),
+        ]);
+        noServerError([cancelled.status, moved.status]);
+        // Cancel always lands; a reschedule that lost is REQUEST_CLOSED.
+        expect(cancelled.status).toBe(200);
+        expect([200, 409]).toContain(moved.status);
+        if (moved.status === 409)
+          expect(moved.body).toMatchObject({ code: 'REQUEST_CLOSED' });
+        const stored = await row(id);
+        expect(stored.status).toBe('CANCELLED');
+        expect(stored.scheduleDueAt).toBeNull();
+        expect(await booked(b, startsAt)).toBe(0);
+        expect(await booked(b, target)).toBe(0);
+        await expectSeatsConsistent(b);
+      }
+    });
+
+    it('two reschedules of the same request to different blocks: both apply in some order, one block ends with the seat', async () => {
+      for (let round = 0; round < 6; round++) {
+        const b = await branch();
+        const c = customerOf();
+        const { id, startsAt } = await bookOk(b, c);
+        const first = await firstSlot(b, c, 1);
+        const second = await firstSlot(b, c, 2);
+        const results = await Promise.all([
+          reschedule(b, id, { scheduledFor: first }),
+          reschedule(b, id, { scheduledFor: second }),
+        ]);
+        noServerError(results.map((r) => r.status));
+        expect(results.map((r) => r.status)).toEqual([200, 200]);
+        const stored = await row(id);
+        expect([first, second]).toContain(stored.scheduledFor?.toISOString());
+        // Each applied move bumped the version once: the loser of the lock ran second.
+        expect(stored.scheduleVersion).toBe(3);
+        expect(await eventsOf(id, 'RESCHEDULED')).toHaveLength(2);
+        expect(await booked(b, startsAt)).toBe(0);
+        expect(await booked(b, stored.scheduledFor!.toISOString())).toBe(1);
+        const other =
+          stored.scheduledFor!.toISOString() === first ? second : first;
+        expect(await booked(b, other)).toBe(0);
+        await expectSeatsConsistent(b);
+      }
+    });
+
+    it('a booking racing a settings PUT that closes its day: refused (409, nothing stored) or booked and then flagged needsReschedule', async () => {
+      const outcomes = new Set<number>();
+      for (let round = 0; round < 8; round++) {
+        const b = await branch();
+        const c = customerOf();
+        const slot = await firstSlot(b, c);
+        const [booking] = await Promise.all([
+          book(b, c, slot),
+          putClosedDays(b, [slot]),
+        ]);
+        noServerError([booking.status]);
+        outcomes.add(booking.status);
+        const rows = await prisma.chatbotRequest.findMany({
+          where: { tenantId: b.tenantId, scheduledFor: { not: null } },
+        });
+        if (booking.status === 409) {
+          expect(booking.body).toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+          expect(rows).toHaveLength(0);
+          expect(await booked(b, slot)).toBe(0);
+        } else {
+          expect(booking.status).toBe(201);
+          expect(rows).toHaveLength(1);
+          // The booking read the old hours and committed first: the flag pass
+          // (or, if it skipped a locked row, the backstop pass below, which
+          // stands for the schedule sweep) marks it.
+          await flagUnbookableSchedules(app.get(PrismaService), b.tenantId);
+          expect((await row(rows[0].id)).needsReschedule).toBe(true);
+        }
+        await expectSeatsConsistent(b);
+      }
+      expect([...outcomes].every((s) => s === 201 || s === 409)).toBe(true);
+    });
+
+    it('a reschedule racing a settings PUT that closes the day of its target: moved or refused, seats consistent, needsReschedule set for the final time', async () => {
+      for (let round = 0; round < 8; round++) {
+        const b = await branch();
+        const c = customerOf();
+        const { id, startsAt } = await bookOk(b, c);
+        const target = await firstSlot(b, c, 2);
+        const [moved] = await Promise.all([
+          reschedule(b, id, { scheduledFor: target }),
+          putClosedDays(b, [startsAt, target]),
+        ]);
+        noServerError([moved.status]);
+        expect([200, 409]).toContain(moved.status);
+        const stored = await row(id);
+        if (moved.status === 409) {
+          expect(moved.body).toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+          expect(stored.scheduledFor?.toISOString()).toBe(startsAt);
+          expect(await booked(b, target)).toBe(0);
+        } else {
+          expect(stored.scheduledFor?.toISOString()).toBe(target);
+          expect(await booked(b, startsAt)).toBe(0);
+        }
+        expect(await booked(b, stored.scheduledFor!.toISOString())).toBe(1);
+        // Both days are closed, so the final time is not bookable. The flag pass
+        // of the PUT may have skipped the row the command held (SKIP LOCKED);
+        // the second pass stands for the schedule sweep that catches it.
+        await flagUnbookableSchedules(app.get(PrismaService), b.tenantId);
+        expect((await row(id)).needsReschedule).toBe(true);
+        await expectSeatsConsistent(b);
+      }
+    });
+  });
 });
