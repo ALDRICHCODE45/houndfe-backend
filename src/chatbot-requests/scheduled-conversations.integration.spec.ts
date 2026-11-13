@@ -574,7 +574,13 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       const b = await branch({ closedDates: ['2099-12-25'] });
       const c = customerOf();
       const before = Date.now();
-      const { body } = await slotsOf(b, c.ref).expect(200);
+      // the customer wrote 10 min ago (an unknown time is a closed window)
+      const wrote = before - 10 * MIN;
+      const { body } = await slotsOf(
+        b,
+        c.ref,
+        `&lastCustomerMessageAt=${encodeURIComponent(new Date(wrote).toISOString())}`,
+      ).expect(200);
       expect(body.timeZone).toBe(ZONE);
       expect(body.slots).toHaveLength(3);
       for (const slot of body.slots) {
@@ -589,12 +595,9 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       }
       const starts = body.slots.map((s: any) => Date.parse(s.startsAt));
       expect(starts).toEqual([...starts].sort((x, y) => x - y));
-      // the chat is unknown, so the customer "wrote now": 24 h from now
-      expect(
-        Math.abs(
-          Date.parse(body.whatsappWindowClosesAt) - (before + 24 * 60 * MIN),
-        ),
-      ).toBeLessThan(60_000);
+      expect(Date.parse(body.whatsappWindowClosesAt)).toBe(
+        wrote + 24 * 60 * MIN,
+      );
       expect(body.businessHours).toMatchObject({
         openNow: true,
         timeZone: ZONE,
@@ -660,6 +663,46 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
       expect(body.slots.length).toBeGreaterThan(0);
       // 23 h 50 min old: the window closes in 10 min, no block keeps its greeting free
       expect(body.slots.every((s: any) => s.withinWindow === false)).toBe(true);
+    });
+
+    it('with no customer message time known anywhere the window is closed now (bot and staff picker)', async () => {
+      const b = await branch();
+      const c = customerOf();
+      const before = Date.now();
+      const bot = await slotsOf(b, c.ref).expect(200);
+      expect(bot.body.slots.length).toBeGreaterThan(0);
+      expect(bot.body.slots.every((s: any) => s.withinWindow === false)).toBe(
+        true,
+      );
+      expect(Date.parse(bot.body.whatsappWindowClosesAt)).toBeLessThanOrEqual(
+        Date.now(),
+      );
+      expect(
+        Date.parse(bot.body.whatsappWindowClosesAt),
+      ).toBeGreaterThanOrEqual(before - 1_000);
+
+      // a request that never learned the time, and a chat the mirror never saw
+      const created = await prisma.chatbotRequest.create({
+        data: {
+          tenantId: b.tenantId,
+          folio: 1000 + ++b.folio,
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          customerKey: c.key,
+          conversationRef: c.ref,
+          summary: 'Quiere hablar con una persona',
+          source: 'chatbot',
+          sourceRequestId: randomUUID(),
+        },
+      });
+      const picker = await server()
+        .get(`/chatbot-requests/${created.id}/scheduling/slots`)
+        .set(as(b, 'reader'))
+        .expect(200);
+      expect(picker.body.slots.length).toBeGreaterThan(0);
+      expect(
+        picker.body.slots.every((s: any) => s.withinWindow === false),
+      ).toBe(true);
     });
   });
 
@@ -1126,6 +1169,36 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
           .code,
       ).toBe('OUTCOME_NOT_ALLOWED');
       await outcome({ outcome: 'STALE' }).expect(200);
+    });
+
+    it('a booking with no known window stays requiresTemplateAtStart after a staff reschedule and expects no customer notice', async () => {
+      const b = await branch();
+      const c = customerOf();
+      const startsAt = await firstSlot(b, c, 2);
+      const booked1 = await book(b, c, startsAt).expect(201);
+      const id = booked1.body.id as string;
+      // the bot always sends the time, so forget it here: nothing knows it now
+      await prisma.chatbotRequest.update({
+        where: { id },
+        data: {
+          lastCustomerMessageAt: null,
+          whatsappWindowClosesAt: null,
+          requiresTemplateAtStart: true,
+        },
+      });
+      const target = await firstSlot(b, c, 0);
+      expect(Date.parse(target)).toBeLessThan(Date.parse(startsAt));
+      const res = await staffReschedule(b, id, 1, target).expect(200);
+      expect(res.body.customerNotice).toEqual({ expected: false });
+      expect(res.body.request).toMatchObject({
+        id,
+        scheduledFor: target,
+        previousScheduledFor: startsAt,
+        requiresTemplateAtStart: true,
+      });
+      expect((await row(id)).requiresTemplateAtStart).toBe(true);
+      const [event] = await eventsOf(id, 'RESCHEDULED');
+      expect(event.data).toMatchObject({ requiresTemplate: true });
     });
 
     it('answers VERSION_CONFLICT, SLOT_UNAVAILABLE {slots}, REQUEST_CLOSED, NOT_SCHEDULED and refuses a reader', async () => {

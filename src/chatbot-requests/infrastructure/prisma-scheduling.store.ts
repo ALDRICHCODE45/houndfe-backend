@@ -81,7 +81,8 @@ export class PrismaSchedulingStore implements SchedulingStore {
     if (!config.settings.scheduling.enabled) {
       throw new ChatbotRequestCommandError('SCHEDULING_DISABLED', 422);
     }
-    const closes = windowClosesAtOf(last ?? now);
+    // no known customer message time: the window is closed now (as booking)
+    const closes = last ? windowClosesAtOf(last) : now;
     const slots = await freshSlots(
       this.db,
       this.tenantId,
@@ -169,7 +170,8 @@ export class PrismaSchedulingStore implements SchedulingStore {
       input.lastCustomerMessageAt,
       await this.lastMessageOf(row.conversationRef, stored.last),
     );
-    const closes = windowClosesAtOf(last ?? now);
+    // no known customer message time: the window is closed now (as booking)
+    const closes = last ? windowClosesAtOf(last) : now;
     const noticeExpected = closes.getTime() > now.getTime();
     const base = {
       scheduleVersion: row.scheduleVersion ?? 0,
