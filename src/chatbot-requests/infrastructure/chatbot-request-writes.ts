@@ -14,6 +14,7 @@ import type {
   ChatbotRequestPatch,
 } from '../domain/chatbot-request.commands';
 import { slaColumnsForTransition } from './chatbot-sla-policy';
+import { releaseSeat } from './scheduling-store';
 
 export type TenantClient = ReturnType<TenantPrismaService['getClient']>;
 
@@ -164,6 +165,7 @@ const REQUEST_ROW = Prisma.sql`
          cr."version", cr."customerKey", cr."conversationRef", cr."assigneeUserId",
          cr."assigneeDisplayName", cr."claimedAt", cr."overdueAt", cr."closedAt",
          cr."humanDecisionId", cr."deliveryZoneRequestId", cr."receiptEvidenceId",
+         cr."scheduledFor", cr."scheduleVersion", cr."needsReschedule",
          -- Unit 11: the request-level session state of §4.2/§12.4. An ENDED
          -- session on an open request is WAITING (reverted or released).
          CASE WHEN ls."state" IS NULL THEN NULL
@@ -262,6 +264,12 @@ export async function applyRequestPatch(
   now: Date = new Date(),
 ): Promise<void> {
   const { resolution, ...columns } = patch;
+  // Unit 14: a request that closes stops its schedule; a cancel gives the seat
+  // back (one hook for the bot cancel, the staff cancel and a merge source).
+  const closing =
+    patch.status === 'CANCELLED' || patch.status === 'RESOLVED'
+      ? await settleSchedule(tx, tenantId, row.id, patch.status === 'CANCELLED')
+      : null;
   // Unit 7a (§5.4): a claim moves the active clock to "resolve" and a release
   // restarts the claim clock, so both recompute the deadlines with the policy
   // read under `FOR SHARE` (a concurrent PUT of the settings waits for us).
@@ -274,6 +282,7 @@ export async function applyRequestPatch(
     where: { tenantId, id: row.id, version: row.version },
     data: {
       ...columns,
+      ...(closing ?? {}),
       ...(sla ?? {}),
       ...(resolution
         ? { resolution: resolution as Prisma.InputJsonObject }
@@ -289,6 +298,29 @@ export async function applyRequestPatch(
       data: event.data as Prisma.InputJsonObject,
     },
   });
+}
+
+/**
+ * Unit 14: the schedule columns a closing request gets. A scheduled request
+ * stops being due; a CANCELLED one releases its seat and bumps `scheduleVersion`
+ * (S20 6). The caller holds the request row lock (then the counter row: the
+ * lock order of docs/chatbot-requests-model.md). `null` for an unscheduled one.
+ */
+async function settleSchedule(
+  tx: TenantClient,
+  tenantId: string,
+  requestId: string,
+  cancelled: boolean,
+): Promise<{ scheduleDueAt: null; scheduleVersion?: number } | null> {
+  const [row] = await tx.$queryRaw<
+    Array<{ scheduledFor: Date | null; scheduleVersion: number }>
+  >(Prisma.sql`
+    SELECT "scheduledFor", "scheduleVersion" FROM "chatbot_requests"
+    WHERE "tenantId" = ${tenantId} AND "id" = ${requestId}`);
+  if (!row?.scheduledFor) return null;
+  if (!cancelled) return { scheduleDueAt: null };
+  await releaseSeat(tx, tenantId, row.scheduledFor);
+  return { scheduleDueAt: null, scheduleVersion: row.scheduleVersion + 1 };
 }
 
 /**

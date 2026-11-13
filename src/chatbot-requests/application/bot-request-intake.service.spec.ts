@@ -94,12 +94,13 @@ describe('BotRequestIntakeService.create', () => {
     expect(store.transaction).not.toHaveBeenCalled();
   });
 
-  it('refuses scheduledFor with 422 until unit 14', async () => {
-    const { create } = build();
+  it('refuses scheduledFor on a subtype that cannot be booked (Q1) with 400', async () => {
+    const { create, store } = build();
 
     await expect(
       create(clarification({ scheduledFor: NEXT_WEEK })),
-    ).rejects.toMatchObject({ code: 'SCHEDULING_DISABLED', httpStatus: 422 });
+    ).rejects.toBeInstanceOf(InvalidArgumentError);
+    expect(store.createDirect).not.toHaveBeenCalled();
   });
 
   it('rejects an Idempotency-Key that differs from sourceRequestId', async () => {

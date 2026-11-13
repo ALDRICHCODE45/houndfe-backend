@@ -341,7 +341,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
       });
     });
 
-    it('refuses a scheduled conversation and a receipt without writing', async () => {
+    it('refuses a scheduled conversation of a branch with scheduling off (the default) and a receipt without writing', async () => {
       const tenantId = await newTenant();
 
       expect(
@@ -350,6 +350,7 @@ describeIfDb('bot request intake (PostgreSQL)', () => {
             create(
               tenantId,
               direct({
+                subtype: 'TALK_TO_HUMAN',
                 scheduledFor: new Date(
                   Date.now() + 2 * 86_400_000,
                 ).toISOString(),

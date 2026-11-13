@@ -260,7 +260,12 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
         status: 'NEW',
         outcome: 'CREATED',
         mergedIntoId: null,
-        businessHours: null,
+        // Unit 14 (Q16): every direct create answers the branch's hours.
+        businessHours: {
+          openNow: expect.any(Boolean),
+          nextOpenAt: expect.any(String),
+          timeZone: 'America/Mexico_City',
+        },
         folio: 'S-000001',
       });
       expect(created.headers['cache-control']).toBe('no-store');
@@ -279,12 +284,15 @@ describeIfDb('bot requests HTTP routes (PostgreSQL)', () => {
       expect(conflict.body.code).toBe('IDEMPOTENCY_CONFLICT');
     });
 
-    it('answers 422 for a scheduled conversation and for a receipt', async () => {
+    it('answers 422 for a scheduled conversation of a branch with scheduling off and for a receipt', async () => {
       const b = await bot();
 
       const scheduled = await post(
         b,
-        envelope({ scheduledFor: '2026-11-12T15:00:00.000Z' }),
+        envelope({
+          subtype: 'TALK_TO_HUMAN',
+          scheduledFor: '2026-11-12T15:00:00.000Z',
+        }),
       );
       const receipt = await post(b, {
         sourceRequestId: randomUUID(),

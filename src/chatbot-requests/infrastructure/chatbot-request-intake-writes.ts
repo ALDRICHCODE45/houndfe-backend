@@ -185,7 +185,11 @@ export async function insertRequestOnDedup(
       ? await slaColumnsForNew(
           tx,
           data.tenantId,
-          { subtype: data.subtype },
+          {
+            subtype: data.subtype,
+            scheduledFor:
+              (data.scheduledFor as Date | null | undefined) ?? null,
+          },
           now,
         )
       : {
@@ -202,7 +206,9 @@ export async function insertRequestOnDedup(
       "context", "dedupKey", "humanDecisionId", "deliveryZoneRequestId",
       "receiptEvidenceId", "source", "sourceRequestId", "canonicalRequestHash",
       "submittedCredentialId", "claimDeadlineAt", "resolveDeadlineAt",
-      "slaPolicyVersion", "nextSlaCheckAt", "updatedAt")
+      "slaPolicyVersion", "nextSlaCheckAt", "scheduledFor",
+      "requiresTemplateAtStart", "scheduleVersion", "scheduleStage",
+      "scheduleDueAt", "updatedAt")
     VALUES (
       ${randomUUID()}, ${data.tenantId}, ${data.folio},
       ${data.kind}::"ChatbotRequestKind", ${data.subtype}::"ChatbotRequestSubtype",
@@ -218,7 +224,10 @@ export async function insertRequestOnDedup(
       ${data.source}, ${data.sourceRequestId}, ${data.canonicalRequestHash ?? null},
       ${data.submittedCredentialId ?? null}, ${sla.claimDeadlineAt},
       ${sla.resolveDeadlineAt}, ${sla.slaPolicyVersion}, ${sla.nextSlaCheckAt},
-      now())
+      ${(data.scheduledFor as Date | undefined) ?? null},
+      ${data.requiresTemplateAtStart ?? false}, ${data.scheduleVersion ?? 0},
+      ${data.scheduleStage ?? 0},
+      ${(data.scheduleDueAt as Date | undefined) ?? null}, now())
     ON CONFLICT ("tenantId", "customerKey", "dedupKey")
       WHERE "status" IN ('NEW', 'IN_PROGRESS') AND "dedupKey" IS NOT NULL
       DO NOTHING

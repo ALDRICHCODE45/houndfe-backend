@@ -182,6 +182,10 @@ export interface ChatbotRequestRow {
   humanDecisionId: string | null;
   deliveryZoneRequestId: string | null;
   receiptEvidenceId: string | null;
+  /** Unit 14: the booked time and its monotonic version (S20 6). */
+  scheduledFor?: Date | null;
+  scheduleVersion?: number;
+  needsReschedule?: boolean;
   /** Unit 11: the derived session state (§12.4); absent when not loaded. */
   liveSessionState?: LiveSessionState | null;
 }
@@ -316,6 +320,9 @@ export type ChatbotRequestCommandErrorCode =
   | 'CUSTOMER_RATE_LIMITED'
   | 'SUBTYPE_DISABLED'
   | 'SCHEDULING_DISABLED'
+  // Scheduled conversations (unit 14).
+  | 'SLOT_UNAVAILABLE'
+  | 'ALREADY_SCHEDULED'
   // Bot feed (unit 5, slice 5b).
   | 'RATE_LIMITED'
   | 'CURSOR_EXPIRED'
@@ -392,7 +399,10 @@ export function toState(
     | 'assigneeUserId'
     | 'assigneeDisplayName'
     | 'overdueAt'
-  > & { liveSessionState?: LiveSessionState | null },
+  > & {
+    liveSessionState?: LiveSessionState | null;
+    scheduledFor?: Date | null;
+  },
 ): ChatbotRequestState {
   return {
     kind: row.kind,
@@ -405,6 +415,7 @@ export function toState(
         : null,
     overdueAt: row.overdueAt,
     liveSessionState: row.liveSessionState ?? null,
+    scheduledFor: row.scheduledFor ?? null,
   };
 }
 
@@ -436,7 +447,7 @@ const rejected = (error: ChatbotRequestError) =>
     // settings screen, S11).
     error.code === 'COMPLAINT_OUTCOME_REQUIRED'
       ? { fieldErrors: [{ path: 'complaintOutcome', code: 'REQUIRED' }] }
-      : undefined,
+      : error.extra,
   );
 
 function commandHash(input: StaffCommandInput): string {

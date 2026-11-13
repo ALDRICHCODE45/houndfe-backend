@@ -42,7 +42,14 @@ const MESSAGES: Record<string, string> = {
   CUSTOMER_OPEN_LIMIT: 'The customer has too many open requests',
   CUSTOMER_RATE_LIMITED: 'Too many requests were created for this customer',
   SUBTYPE_DISABLED: 'This subtype cannot be created through this route',
-  SCHEDULING_DISABLED: 'Scheduled conversations are not available yet',
+  SCHEDULING_DISABLED:
+    'Scheduled conversations are not enabled for this branch',
+  SLOT_UNAVAILABLE:
+    'That time is not available; choose one of the listed times',
+  ALREADY_SCHEDULED: 'The customer already has a scheduled conversation',
+  NOT_SCHEDULED: 'The request has no scheduled time',
+  RESCHEDULE_NOT_ALLOWED: 'A live session already started; it cannot be moved',
+  SCHEDULED_TOO_EARLY: 'The scheduled conversation cannot be claimed yet',
   RATE_LIMITED: 'Too many requests',
   CURSOR_EXPIRED: 'The cursor is older than the feed retention',
   OUTCOME_ALREADY_RECORDED:

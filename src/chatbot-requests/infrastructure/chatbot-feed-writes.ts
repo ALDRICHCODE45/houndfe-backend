@@ -23,6 +23,7 @@ import {
   buildClarificationAnswerPayload,
   buildMergedPayload,
   buildOverdueNoticePayload,
+  buildRescheduledPayload,
   FEED_CHANNEL,
   FEED_TYPE,
   type AnswerSource,
@@ -365,4 +366,21 @@ export async function enqueueOverdueNotice(
     Prisma.sql`SELECT pg_notify(${FEED_CHANNEL}, ${tenantId})::text`,
   );
   return true;
+}
+
+/** `conversation.rescheduled` (unit 14): in the transaction of the staff reschedule. */
+export async function enqueueRescheduled(
+  tx: TenantClient,
+  tenantId: string,
+  conversationRef: string | null,
+  input: Parameters<typeof buildRescheduledPayload>[0],
+): Promise<void> {
+  await insertFeedItems(tx, tenantId, [
+    {
+      requestId: input.requestId,
+      type: FEED_TYPE.conversationRescheduled,
+      conversationRef,
+      payload: buildRescheduledPayload(input),
+    },
+  ]);
 }

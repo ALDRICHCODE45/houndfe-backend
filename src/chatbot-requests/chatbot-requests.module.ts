@@ -78,6 +78,13 @@ import { LiveSessionSweepStore } from './infrastructure/live-session-sweep.store
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
+import { BotSchedulingController } from './presentation/bot-scheduling.controller';
+import { ChatbotRequestSchedulingController } from './presentation/chatbot-request-scheduling.controller';
+import {
+  SCHEDULING_STORE,
+  SchedulingService,
+} from './application/scheduling.service';
+import { PrismaSchedulingStore } from './infrastructure/prisma-scheduling.store';
 import { ChatbotRequestCommandsController } from './presentation/chatbot-request-commands.controller';
 import { ChatbotRequestHttpFilter } from './presentation/chatbot-request-http.filter';
 import { ChatbotRequestRelationsController } from './presentation/chatbot-request-relations.controller';
@@ -98,6 +105,8 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     ChatbotRequestRelationsController,
     ChatbotRequestReadsController,
     BotRequestsController,
+    BotSchedulingController,
+    ChatbotRequestSchedulingController,
     BotFeedController,
     BotRecoveryController,
     LiveConversationStaffController,
@@ -128,6 +137,9 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     // §5.4: slaPaused derived on read from the tenant's calendar (unit 7c).
     { provide: SLA_PAUSE_READER, useClass: PrismaSlaPauseReader },
     BotRequestIntakeService,
+    // Unit 14: slots, bot and staff reschedule.
+    SchedulingService,
+    { provide: SCHEDULING_STORE, useClass: PrismaSchedulingStore },
     ChatbotFeedService,
     ChatbotRecoveryService,
     PgFeedWakeup,

@@ -34,6 +34,7 @@ import {
   type WrappedSubtype,
 } from '../domain/bot-request-envelope';
 import { canonicalPhone } from '../domain/canonical-phone';
+import type { BusinessHoursView } from '../domain/scheduling-view';
 import {
   cancelByCustomer,
   type ChatbotRequestEventDraft,
@@ -68,6 +69,15 @@ export interface IntakeOutcome {
   id: string;
   folio: number;
   status: 'NEW' | 'IN_PROGRESS';
+  /** Unit 14 (Q16): the branch's hours at creation; direct creates only. */
+  businessHours?: BusinessHoursView;
+  /** Unit 14: set when the create booked a seat. */
+  schedule?: {
+    scheduledFor: Date;
+    scheduleVersion: number;
+    requiresTemplateAtStart: boolean;
+    windowClosesAt: Date | null;
+  };
 }
 
 export interface DirectDraft {
@@ -96,7 +106,7 @@ export interface BotIntakeStore {
     key: string,
     commandHash: string,
     requestId: string | null,
-    snapshot: BotCreateResponse | BotCancelResponse,
+    snapshot: unknown,
   ): Promise<void>;
   /** A request the bot created itself, by its `sourceRequestId`. */
   findCreated(sourceRequestId: string): Promise<RequestRef | null>;
@@ -142,8 +152,13 @@ export interface BotCreateResponse {
   status: 'NEW' | 'IN_PROGRESS' | 'RESOLVED';
   outcome: 'CREATED' | 'REPLAYED' | 'MERGED';
   mergedIntoId: string | null;
-  /** The business calendar is unit 7; `null` until then. */
-  businessHours: null;
+  /** Unit 14 (Q16): direct creates; `null` for the wrapped subtypes. */
+  businessHours: BusinessHoursView | null;
+  /** Unit 14: only on a booking. */
+  scheduledFor?: string;
+  scheduleVersion?: number;
+  requiresTemplateAtStart?: boolean;
+  whatsappWindowClosesAt?: string | null;
   /** Wrapped subtypes: the legacy projection of the wrapped row. */
   legacy?: unknown;
 }
@@ -158,6 +173,8 @@ export interface BotCancelResponse {
   status: 'CANCELLED';
   reason: CustomerCancelReason;
   cancelledAt: string;
+  /** S20 6: only when the request was scheduled. */
+  scheduleVersion?: number;
 }
 
 const conflict = () =>
@@ -165,18 +182,31 @@ const conflict = () =>
 const invalid = () => new InvalidArgumentError('Invalid chatbot request body');
 
 function view(
-  ref: { id: string; folio: number },
+  ref: Pick<IntakeOutcome, 'businessHours' | 'schedule'> & {
+    id: string;
+    folio: number;
+  },
   outcome: BotCreateResponse['outcome'],
   status: 'NEW' | 'IN_PROGRESS' = 'NEW',
 ): BotCreateResponse {
   const merged = outcome === 'MERGED';
+  const { schedule } = ref;
   return {
     id: ref.id,
     folio: formatFolio(ref.folio),
     status,
     outcome,
     mergedIntoId: merged ? ref.id : null,
-    businessHours: null,
+    businessHours: ref.businessHours ?? null,
+    ...(schedule
+      ? {
+          scheduledFor: schedule.scheduledFor.toISOString(),
+          scheduleVersion: schedule.scheduleVersion,
+          requiresTemplateAtStart: schedule.requiresTemplateAtStart,
+          whatsappWindowClosesAt:
+            schedule.windowClosesAt?.toISOString() ?? null,
+        }
+      : {}),
   };
 }
 
@@ -202,9 +232,14 @@ export class BotRequestIntakeService {
     if (isDisabledSubtype(envelope.subtype)) {
       throw new ChatbotRequestCommandError('SUBTYPE_DISABLED', 422);
     }
-    if (envelope.scheduledFor) {
-      // Scheduled conversations are unit 14 (§4.9, §10).
-      throw new ChatbotRequestCommandError('SCHEDULING_DISABLED', 422);
+    // Unit 14 (Q1): only a conversation can be booked; the store checks the
+    // branch's settings, the block and the seat inside the transaction.
+    if (
+      envelope.scheduledFor &&
+      envelope.subtype !== 'TALK_TO_HUMAN' &&
+      envelope.subtype !== 'COMPLAINT'
+    ) {
+      throw invalid();
     }
     if (isWrappedSubtype(envelope.subtype)) assertDetail(envelope);
 
@@ -475,6 +510,10 @@ export class BotRequestIntakeService {
         status: 'CANCELLED',
         reason,
         cancelledAt: now.toISOString(),
+        // The same bump the shared close hook wrote (S20 6).
+        ...(row.scheduledFor
+          ? { scheduleVersion: (row.scheduleVersion ?? 0) + 1 }
+          : {}),
       };
       await this.store.saveReceipt('CANCEL', key, hash, row.id, response);
       return response;

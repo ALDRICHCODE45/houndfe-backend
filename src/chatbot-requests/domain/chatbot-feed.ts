@@ -22,6 +22,10 @@ export const FEED_TYPE = {
   conversationEnded: 'conversation.ended',
   /** S15 Q2 / S16 10: an ACTIVE session was handed to another attendee. */
   conversationReassigned: 'conversation.reassigned',
+  // Scheduled conversations (unit 14, §4.9): a staff-made change of the time.
+  conversationRescheduled: 'conversation.rescheduled',
+  /** Created by the reminder sweep (a later step of unit 14). */
+  scheduledReminder: 'conversation.scheduled_reminder',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -268,7 +272,11 @@ export function classifyOutcome(
       current.type === FEED_TYPE.conversationStarted ||
       current.type === FEED_TYPE.conversationEnded ||
       current.type === FEED_TYPE.conversationReassigned ||
-      current.type === FEED_TYPE.templateRequested)
+      current.type === FEED_TYPE.templateRequested ||
+      // Unit 14 (S19 Q9): a time change or a reminder delivered later only
+      // confuses; a reminder while a person talks is useless.
+      current.type === FEED_TYPE.conversationRescheduled ||
+      current.type === FEED_TYPE.scheduledReminder)
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
@@ -657,5 +665,29 @@ export function buildConversationEndedPayload(input: {
     // S15 Q1: after a start revert the bot sends a short "seguimos por aquí"
     // ONLY if it already told the customer it was handing over (it greeted).
     resumeNotice: input.reason === 'START_TIMEOUT',
+  };
+}
+
+/**
+ * `conversation.rescheduled` (unit 14, S20 6): staff changed the time. The bot
+ * tells the customer only when the 24 h window is open, else ACKs `STALE`.
+ */
+export function buildRescheduledPayload(input: {
+  requestId: string;
+  scheduledFor: Date;
+  previousScheduledFor: Date;
+  scheduleVersion: number;
+  timeZone: string;
+  whatsappWindowClosesAt: Date | null;
+  requiresTemplateAtStart: boolean;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    scheduledFor: input.scheduledFor.toISOString(),
+    previousScheduledFor: input.previousScheduledFor.toISOString(),
+    scheduleVersion: input.scheduleVersion,
+    timeZone: input.timeZone,
+    whatsappWindowClosesAt: input.whatsappWindowClosesAt?.toISOString() ?? null,
+    requiresTemplateAtStart: input.requiresTemplateAtStart,
   };
 }

@@ -190,6 +190,18 @@ export class ChatbotRequestRelationsService {
           }
         }
 
+        // Q14: a merge would silently drop a booking and its seat.
+        const scheduledSource = peeked.find(
+          (row) => row.id === input.requestId && row.scheduledFor,
+        );
+        if (scheduledSource) {
+          throw new ChatbotRequestCommandError(
+            'MERGE_NOT_ALLOWED',
+            422,
+            currentOf(scheduledSource),
+          );
+        }
+
         // `request.merged` names ONE conversation, so source and target must
         // share it. Checked before any lock on what the peek saw, and again
         // under the lock (in `merge`).

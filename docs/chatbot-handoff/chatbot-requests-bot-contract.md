@@ -969,7 +969,12 @@ Scope `requests:read`, class `read`. `conversationRef` as everywhere (1..200 cha
   "whatsappWindowClosesAt": "2026-11-10T03:10:00.000Z",
   "businessHours": {
     "openNow": false,
-    "nextOpenAt": "2026-11-10T15:00:00.000Z"
+    "nextOpenAt": "2026-11-10T15:00:00.000Z",
+    "timeZone": "America/Mexico_City",
+    "weeklyRanges": [
+      { "day": "MONDAY", "ranges": [{ "open": "09:00", "close": "19:00" }] }
+    ],
+    "closedDates": ["2026-12-25"]
   },
   "slots": [
     {
@@ -996,7 +1001,8 @@ Scope `requests:read`, class `read`. `conversationRef` as everywhere (1..200 cha
 - **Which blocks (Q2, Q3).** Blocks are `slotMinutes` long (default 30), laid out from each opening time of the branch's business hours (the chat's own hours, `GET /chatbot-settings`), inside the open ranges only, never on a closed date. A block is offered if `startsAt` is at least **10 minutes from now** and within **14 days**. The three offered are the next three free blocks ("the next opening and two more"), so on a quiet day they are consecutive.
 - **Window first (D9).** `withinWindow = startsAt + 15 min < whatsappWindowClosesAt` (the greeting is free). If at least one free block is within the window, **only within-window blocks are listed** (maybe fewer than 3). If none is, the list holds the first free blocks with `withinWindow: false`: booking one costs a paid template at the start (`requiresTemplateAtStart`, below). Say so to the customer if you want, and ask them to answer when the person greets them.
 - `whatsappWindowClosesAt` is `lastCustomerMessageAt + 24 h` as the backend computes it (informational; Meta decides at send time).
-- `businessHours` is what `POST /chatbot-api/requests` also answers from now on (see the status table): `openNow`, and `nextOpenAt` (the next start of an open range; equals now's range start when open is true).
+- `businessHours` (S20 4, 5): `openNow`; `nextOpenAt` (start of the open range that contains now, or of the next one within 14 days; `null` if none); `timeZone`; `weeklyRanges` (the seven days, Monday first, `HH:mm` ranges in the branch's zone: the chat's own hours) and `closedDates` (the branch's closed dates from today through the next 14 days, `YYYY-MM-DD`, sorted). A direct `POST /chatbot-api/requests` answers the same object **without** `weeklyRanges` and `closedDates` (Q16; the wrapped subtypes RESTOCK / EXPIRATION / DELIVERY_ZONE still answer `null`).
+- **`SCHEDULING_DISABLED` is the cue to fall back** to the unit 11 out-of-hours create (an unscheduled `TALK_TO_HUMAN` / `COMPLAINT` with the usual out-of-hours message and `businessHours.nextOpenAt` from the create answer).
 - Errors: `422 SCHEDULING_DISABLED` (the branch's `scheduling.enabled` is off, the default), `400 VALIDATION_ERROR`, `401`, `403 INSUFFICIENT_SCOPE`, `429 RATE_LIMITED`. An empty `slots` (nothing free for 14 days) is a `200` with `slots: []`: tell the customer nobody can be scheduled and fall back to the out-of-hours message with `businessHours.nextOpenAt`.
 - Cost: one read of the tenant's settings (cached), one primary-key range read of the block counters and the chat row; p95 under 100 ms (measured in `docs/perf/unit-14-scheduled-conversations.md` once shipped).
 
@@ -1006,7 +1012,7 @@ The same route and envelope as above (`sourceRequestId`, `customer`, `conversati
 
 - `subtype` must be `TALK_TO_HUMAN` or `COMPLAINT` (Q1); `scheduledFor` on another subtype is `400 VALIDATION_ERROR`. `scheduledFor: null` or absent is today's behaviour.
 - `scheduledFor` must be **exactly the `startsAt` of a bookable block** (not necessarily one of the three you showed): on the branch's block grid, inside open hours, not a closed date, at least 10 minutes away and within 14 days, **and with a free seat**. The backend re-checks all of it **inside the transaction**, after locking the block's counter, so two bookings for the last seat can never both win. Otherwise **`409 SLOT_UNAVAILABLE`** with the fresh list in the body: `{ "statusCode": 409, "code": "SLOT_UNAVAILABLE", "slots": [ … same shape as the slots route … ], "timeZone": "…", "whatsappWindowClosesAt": "…" }`. Offer the new list; do not retry the same slot.
-- At most one open scheduled request per customer and subtype (Q4); another is **`409 ALREADY_SCHEDULED`** `{requestId, scheduledFor}`: tell the customer they already have a time and offer to change it (`reschedule`).
+- At most one open scheduled request per customer and subtype (Q4); another is **`409 ALREADY_SCHEDULED`** `{requestId, scheduledFor}`: tell the customer they already have a time and offer to change it (`reschedule`). **Identity (S20 9):** the customer key of the request: the linked `customerId` when the phone matches a customer, else the canonical phone (so `55 1234 5678` and `5512345678` are one customer). One `TALK_TO_HUMAN` **and** one `COMPLAINT` may both be booked. The check runs before the seat is taken; a refused booking holds no seat.
 - The answer is the usual one plus `scheduledFor`, `requiresTemplateAtStart`, `whatsappWindowClosesAt`, `businessHours`:
 
 ```json
@@ -1018,16 +1024,20 @@ The same route and envelope as above (`sourceRequestId`, `customer`, `conversati
   "mergedIntoId": null,
   "businessHours": {
     "openNow": false,
-    "nextOpenAt": "2026-11-10T15:00:00.000Z"
+    "nextOpenAt": "2026-11-10T15:00:00.000Z",
+    "timeZone": "America/Mexico_City"
   },
   "scheduledFor": "2026-11-10T15:00:00.000Z",
+  "scheduleVersion": 1,
   "requiresTemplateAtStart": false,
   "whatsappWindowClosesAt": "2026-11-10T21:02:11.000Z"
 }
 ```
 
 - `requiresTemplateAtStart` is `true` when `scheduledFor + 15 min >= whatsappWindowClosesAt` at booking time: the paid-template case. It is **recorded in the audit** (`CREATED` event, `data.requiresTemplate`) so the cost can be measured, and it is shown to staff on the row. Q7: it is the booking-time value and is not recomputed when the customer writes later (the composer at claim time uses the live window anyway).
-- **Idempotency** as for every create: the key is `sourceRequestId`; a replay answers the first answer even if the seat was released since. A scheduled create never merges (no `dedupKey` merge with another request).
+- **Idempotency** as for every create: the key is `sourceRequestId`; a **2xx** replay answers the first answer (`outcome: "REPLAYED"`) even if the seat was released since. **4xx answers are never stored** (S20 1): after a `409 SLOT_UNAVAILABLE` or `ALREADY_SCHEDULED` the same `sourceRequestId` may book another slot (the whole transaction rolled back, no seat, no row). Same-key replay of a 2xx is an indexed lookup. A scheduled create never merges (a `dedupKey` is ignored for it).
+- `scheduleVersion` (S20 6) is monotonic per request: `1` at booking, `+1` on every reschedule and on the cancel of a scheduled request; it is on the create, reschedule and cancel answers and on both feed items.
+- **"Solicitud nueva" notice:** a scheduled booking does not notify staff at booking time; the notice at `scheduledFor` belongs to the schedule sweep (not shipped yet, see the status table).
 - **Times start at `scheduledFor`**, not at creation (§4.9.4): the claim deadline and the overdue clock are computed from it (business time), and the sweep never marks the request overdue before that hour.
 - Errors added to the table above: `409 SLOT_UNAVAILABLE`, `409 ALREADY_SCHEDULED`, `422 SCHEDULING_DISABLED` (now only when the branch has scheduling off).
 
@@ -1044,13 +1054,16 @@ Scope `requests:create`, class `write`, `X-Idempotency-Key: <uuid>` required (an
   "outcome": "RESCHEDULED",
   "scheduledFor": "2026-11-11T15:30:00.000Z",
   "previousScheduledFor": "2026-11-10T15:00:00.000Z",
+  "scheduleVersion": 2,
   "requiresTemplateAtStart": false,
   "whatsappWindowClosesAt": "2026-11-11T21:02:11.000Z"
 }
 ```
 
 - The old seat is released and the new one taken in **one transaction** (both counters locked in `startsAt` order, so two reschedules cannot deadlock). The claim, overdue and reminder clocks are recomputed from the new time; `needsReschedule` is cleared; the audit gets a `RESCHEDULED` event.
-- Same `scheduledFor` as the current one: `200` with `outcome: "UNCHANGED"` and nothing changes (the seat is not counted twice).
+- Same `scheduledFor` as the current one: `200` with `outcome: "UNCHANGED"` and nothing changes (the seat is not counted twice, `scheduleVersion` stays).
+- `triggerWaMessageId` is **audit only** (S20 10, stored on the `RESCHEDULED` event); idempotency is the `X-Idempotency-Key`: same key and body replays the first `200`, same key with another body is `409 IDEMPOTENCY_CONFLICT`. A 4xx is not stored, so the key may be reused after a `409 SLOT_UNAVAILABLE`.
+- `lastCustomerMessageAt` (Q5) is optional here too: the window of `requiresTemplateAtStart` uses the newest of it, the request's and the chat's value.
 - Allowed only while the session has **not started** (`WAITING`: a `NEW` request, also one whose time already passed, also one reverted after a start timeout). Same slot rules as booking, same `409 SLOT_UNAVAILABLE {slots}`.
 - Other errors: `404 NOT_FOUND` (unknown id or another branch), `409 REQUEST_CLOSED` (already `RESOLVED` or `CANCELLED`), `409 NOT_SCHEDULED` (the request has no `scheduledFor`; this route is not a way to schedule an existing request), `409 RESCHEDULE_NOT_ALLOWED` (a live session has started: the words go to the attendee), `422 SCHEDULING_DISABLED`, `409 IDEMPOTENCY_CONFLICT`, `400`.
 - It sends **no feed item**: you made the change, you already know. Tell the customer the new time yourself.
@@ -1058,18 +1071,18 @@ Scope `requests:create`, class `write`, `X-Idempotency-Key: <uuid>` required (an
 
 ### Cancel (`POST /chatbot-api/requests/:id/cancel`)
 
-Unchanged route and body (`CUSTOMER_WITHDREW`). On a scheduled request it also **releases the seat** in the same transaction and stops its reminder. It works while the session has not started (`WAITING`); after a claim it is `409 CANCEL_NOT_ALLOWED` as before. A cancel by **staff** (`request.cancelled` with `reason`, `customerNote?` as §12.14 says) frees the seat too and reaches you as the usual `request.cancelled` item: nothing new to implement, but if you tell the customer "your appointment was cancelled" use the `customerNote` rule of the feed section.
+Unchanged route and body (`CUSTOMER_WITHDREW`). On a scheduled request it also **releases the seat** in the same transaction, stops its schedule and answers `scheduleVersion` (previous `+1`; absent for an unscheduled request). It works while the session has not started (`WAITING`); after a claim it is `409 CANCEL_NOT_ALLOWED` as before. A cancel by **staff** (`request.cancelled` with `reason`, `customerNote?` as §12.14 says) frees the seat too and reaches you as the usual `request.cancelled` item: nothing new to implement, but if you tell the customer "your appointment was cancelled" use the `customerNote` rule of the feed section.
 
 ### Feed items
 
 Same envelope as every item (`cursor`, `deliveryId`, `type`, `requestId`, `conversationRef`, `payload`, `notBefore: null`, `expiresAt: null`), the same cursor, long-poll and `POST /chatbot-api/deliveries/:deliveryId/outcome`. Both are created in the **same transaction** as their cause (the sweep's, or the staff command's), so an item exists if and only if the change committed. Both are also served by `pending-deliveries` and the recovery route like any `conversation.*` item.
 
-| `type`                            | When                                                                                                                               | `payload`                                                                                                    |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `conversation.scheduled_reminder` | The backend's sweep, about **10 minutes before** `scheduledFor`, once per scheduled time, only for an open request still `WAITING` | `{requestId, scheduledFor, minutesBefore: 10, timeZone, whatsappWindowClosesAt, requiresTemplateAtStart}`    |
-| `conversation.rescheduled`        | **Staff** changed the time (`POST /chatbot-requests/:id/reschedule`)                                                               | `{requestId, scheduledFor, previousScheduledFor, timeZone, whatsappWindowClosesAt, requiresTemplateAtStart}` |
+| `type`                            | When                                                                                                                               | `payload`                                                                                                                     |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `conversation.scheduled_reminder` | The backend's sweep, about **10 minutes before** `scheduledFor`, once per scheduled time, only for an open request still `WAITING` | `{requestId, scheduledFor, minutesBefore: 10, timeZone, whatsappWindowClosesAt, requiresTemplateAtStart}`                     |
+| `conversation.rescheduled`        | **Staff** changed the time (`POST /chatbot-requests/:id/reschedule`)                                                               | `{requestId, scheduledFor, previousScheduledFor, scheduleVersion, timeZone, whatsappWindowClosesAt, requiresTemplateAtStart}` |
 
-- **Reminder.** Send "En 10 minutos le atiende una persona del equipo" (your wording, the customer's register) **only if the 24 h window is open** (the payload's `whatsappWindowClosesAt` is the backend's estimate, Meta is the truth). With the window closed, send nothing and ACK `STALE`: a reminder is never worth a paid template, and no sweep ever creates `template.requested` (§4.5). If the customer's appointment was cancelled, rescheduled or claimed before you read the item, the backend does not create it; if it was created and then the situation changed (rescheduled, cancelled), ACK `STALE` after comparing `scheduledFor` with what you hold (the backend does not settle it for you). The backend never creates a reminder when the sweep ran after `scheduledFor`: a late reminder only confuses.
+- **Reminder (not shipped yet; the ACK rules below already apply).** The reminder is never sent when fewer than 3 minutes remain before `scheduledFor` (S20 7) and is suppressed while `needsReschedule` is set (S20 8). Send "En 10 minutos le atiende una persona del equipo" (your wording, the customer's register) **only if the 24 h window is open** (the payload's `whatsappWindowClosesAt` is the backend's estimate, Meta is the truth). With the window closed, send nothing and ACK `STALE`: a reminder is never worth a paid template, and no sweep ever creates `template.requested` (§4.5). If the customer's appointment was cancelled, rescheduled or claimed before you read the item, the backend does not create it; if it was created and then the situation changed (rescheduled, cancelled), ACK `STALE` after comparing `scheduledFor` with what you hold (the backend does not settle it for you). The backend never creates a reminder when the sweep ran after `scheduledFor`: a late reminder only confuses.
 - **Rescheduled.** Tell the customer the new time ("Su conversación quedó para el <hora>") **only if the window is open**; otherwise ACK `STALE`. Q9: the backend does **not** defer it (`DEFERRED_WINDOW_CLOSED` is `422 OUTCOME_NOT_ALLOWED`): a time change delivered days later only confuses. Staff see the outcome in the request detail, and the staff command's answer says up front whether the customer can be told (`customerNotice.expected`).
 - Items are for the request's **current** scheduled time: each carries `scheduledFor`; ignore an item whose `scheduledFor` is not the one you hold after your own latest `reschedule`.
 
@@ -1091,15 +1104,20 @@ Anything else is `422 OUTCOME_NOT_ALLOWED` and the item stays pending (the same 
 - **No-show** is unit 11's §4.6 clocks counted from the greeting: no answer in 15 minutes the attendee may finish; after 2 hours the conversation goes back to you by itself (`conversation.ended`).
 - **If nobody claims.** The request is overdue by the usual rules counted from `scheduledFor`; the staff notices work as for any request. The customer is not told anything by the system.
 
+### Recovery: `scheduledRequest` on the state routes (S20 3)
+
+`GET /chatbot-api/conversations/:conversationRef/state` and each item of `GET /chatbot-api/conversations/state?mode=HUMAN` carry `scheduledRequest`: `null`, or `{requestId, subtype, scheduledFor, needsReschedule, scheduleVersion}` of the chat's **nearest open scheduled request** (a chat may hold one `TALK_TO_HUMAN` and one `COMPLAINT`; the earlier time is shown). A chat the mirror has not seen yet but that has a booking answers `200 {mode: "BOT", handoffEpoch: 0, sessionState: null, requestId: null, assigneeFirstName: null, scheduledRequest}` instead of `404`. Use it after an outage to rebuild "this customer is waiting for <time>".
+
 ### Closed days and hours that change (`needsReschedule`)
 
 Business hours and closed dates are the branch's chat settings (unit 7). When staff change them, open scheduled requests are re-checked in the same transaction as the change (one set-based statement per tenant): any whose `scheduledFor` is now outside the open hours or on a closed date gets **`needsReschedule: true`** and shows in the inbox (`counts.needsReschedule`, the "por reagendar" notice). **Nothing moves by itself and nothing is sent to the customer** (Q6): a person decides and reschedules (`conversation.rescheduled` then goes to you). A request flagged and still unclaimed at `scheduledFor` stays a normal claimable request. A flagged request that you **reschedule yourself** (the customer asks) clears the flag.
 
 ### Staff side (for your information; the FE has its own handoff `21-scheduled-conversations.md`)
 
-- `POST /chatbot-requests/:id/reschedule {expectedVersion, scheduledFor}` with `Idempotency-Key` (`update:ChatbotRequest`): same slot rules, `RESCHEDULED` audit event `{from, to, requiresTemplate, byUser}`, `conversation.rescheduled` to you, `request.updated` in realtime. `409 SLOT_UNAVAILABLE {slots}`, `409 REQUEST_CLOSED`, `409 NOT_SCHEDULED`, `409 RESCHEDULE_NOT_ALLOWED` (live), `409 VERSION_CONFLICT`.
+- `POST /chatbot-requests/:id/reschedule {expectedVersion, scheduledFor}` with `Idempotency-Key` (`update:ChatbotRequest`): same slot rules, `RESCHEDULED` audit event `{from, to, requiresTemplate, scheduleVersion, byUser}`, `conversation.rescheduled` to you (always created, in the same transaction), `request.updated` in realtime. It answers `200 {request: {…, scheduledFor, previousScheduledFor, scheduleVersion, requiresTemplateAtStart, customerNotice}, customerNotice: {expected}}`; `customerNotice.expected` is `false` when the 24 h window is closed (the bot will ACK `STALE`, S19 Q9) so the screen warns the attendee before they confirm. `409 SLOT_UNAVAILABLE {slots}`, `409 REQUEST_CLOSED`, `409 NOT_SCHEDULED`, `409 RESCHEDULE_NOT_ALLOWED` (live), `409 VERSION_CONFLICT`.
 - `GET /chatbot-requests/:id/scheduling/slots` (Q15) lists bookable blocks for the staff's picker.
-- `CLAIM` is not in `allowedActions` before `scheduledFor − 5 min` (with a reason); `RESCHEDULE` is, while the session has not started.
+- `CLAIM` before `scheduledFor − 5 min` is `409 SCHEDULED_TOO_EARLY {claimableAt}` and is listed in `deniedActions` with that code; `RESCHEDULE` is in `allowedActions` while the request is open, scheduled and the session has not started. Inbox rows and the detail carry `scheduledFor`, `scheduleVersion`, `needsReschedule`, `requiresTemplateAtStart`.
+- A staff **merge** of a scheduled request into another is `422 MERGE_NOT_ALLOWED` (Q14); an unscheduled request merged **into** a scheduled one leaves the target's single seat as is. A staff **cancel** of a scheduled request frees the seat and bumps `scheduleVersion`.
 
 ### Product questions the proposal leaves open (the backend implements the recommended default)
 
@@ -1127,10 +1145,11 @@ None of them changes the data model (the columns `scheduledFor`, `requiresTempla
 
 ### Status of this section (what the backend has shipped)
 
-Updated by step: see the end of this file's history in `docs/chatbot-requests-model.md` ("Scheduled conversations"). At the time of writing step 1 (the contract) is the only delivered part.
+Updated by step. Part 2 (this branch, not merged, not deployed) ships the routes below; the schedule sweep is still pending.
 
-| Part                                                                                                                                                                                                                                                                                                                                                                                                                              | Status                                                                                               |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| This contract and the product questions                                                                                                                                                                                                                                                                                                                                                                                           | **WRITTEN** (step 1)                                                                                 |
-| Pure scheduling domain (blocks, offer rule, bookable check, reminder/claim instants), migration `20261114000000_scheduled_conversations`, per-block seat counter with atomic reserve/release/move (parallel last-seat race proven), RESCHEDULED announced as `request.updated`                                                                                                                                                    | **IMPLEMENTED** (branch `feat/human-intervention-u14`, not merged, not deployed)                     |
-| Slots route, booking with `scheduledFor`, bot reschedule, cancel releasing the seat, feed items (`conversation.scheduled_reminder`, `conversation.rescheduled`), reminder sweep, `needsReschedule` flag, claim guard, staff routes, `scheduledRequest` on the state routes, S20 changes (`scheduleVersion`, 4xx not stored, weekly ranges, 3 min lower bound, reminder suppressed while `needsReschedule`, identity per customer) | **NOT YET IMPLEMENTED** (the text above is the target contract; S20 is not folded into the text yet) |
+| Part                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Status                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| This contract and the product questions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | **WRITTEN** (step 1)                                                                                            |
+| Pure scheduling domain, migration `20261114000000_scheduled_conversations`, atomic per-block seat counter                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | **IMPLEMENTED** (part 1)                                                                                        |
+| Slots route (`businessHours` with weekly ranges and closed dates, `SCHEDULING_DISABLED`), booking with `scheduledFor` (seat in the insert's transaction, `SLOT_UNAVAILABLE`, `ALREADY_SCHEDULED`, 4xx not stored, `scheduleVersion`), bot reschedule, staff reschedule + staff slots, `conversation.rescheduled` and its ACK rules (`DEFERRED_*` are `422`), cancel (bot and staff) and staff merge keeping the seat count right, claim guard `SCHEDULED_TOO_EARLY`, `RESCHEDULE` / `scheduleVersion` on the staff inbox, `scheduledRequest` on both state routes, `businessHours` on every direct create | **IMPLEMENTED** (part 2)                                                                                        |
+| Reminder sweep (`conversation.scheduled_reminder` 10 min before; none under 3 min; suppressed while `needsReschedule`), the "solicitud nueva" notice at `scheduledFor`, the `needsReschedule` flag when settings change (S19 Q6), the 24 h-window `requiresTemplateAtStart` recompute by the sweep                                                                                                                                                                                                                                                                                                        | **NOT YET IMPLEMENTED** (`scheduleStage` / `scheduleDueAt` are written at booking and reschedule, ready for it) |
