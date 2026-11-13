@@ -60,7 +60,7 @@ export class IntakeMergeSignal extends Error {
 export async function lockBotKey(
   tx: TenantClient,
   tenantId: string,
-  kind: 'CREATE' | 'CANCEL',
+  kind: 'CREATE' | 'CANCEL' | 'RESCHEDULE',
   key: string,
 ): Promise<void> {
   const namespaced = `chatbot-bot:${tenantId}:${kind}:${key}`;

@@ -61,7 +61,7 @@ export const BOT_INTAKE_STORE = Symbol('BOT_INTAKE_STORE');
 export const LEGACY_INTAKE = Symbol('LEGACY_INTAKE');
 export const BOT_INTAKE_LIMITS = Symbol('BOT_INTAKE_LIMITS');
 
-type ReceiptKind = 'CREATE' | 'CANCEL';
+export type ReceiptKind = 'CREATE' | 'CANCEL' | 'RESCHEDULE';
 const MAX_ATTEMPTS = 3;
 
 export interface IntakeOutcome {

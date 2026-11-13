@@ -49,6 +49,8 @@ import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-se
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
 import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
+import { PrismaService } from '../shared/prisma/prisma.service';
+import { NOTICE_NOTIFY_EVENT_TYPE } from '../notifications/domain/chatbot-request-notice';
 import { RealtimeModule } from '../shared/realtime/realtime.module';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { WEEKDAYS } from '../shipping/pickup/domain/opening-hours';
@@ -93,6 +95,12 @@ import { PrismaChatbotRequestReadStore } from './infrastructure/prisma-chatbot-r
 import { PrismaChatbotRequestRelationStore } from './infrastructure/prisma-chatbot-request-relation.store';
 import { PrismaLiveConversationStore } from './infrastructure/prisma-live-conversation.store';
 import { PrismaSchedulingStore } from './infrastructure/prisma-scheduling.store';
+import {
+  ScheduleSweepStore,
+  type ScheduleDueCursor,
+} from './infrastructure/schedule-sweep.store';
+import { ScheduleSweepScheduler } from './infrastructure/schedule-sweep.scheduler';
+import { flagUnbookableSchedules } from './infrastructure/scheduled-reschedule-flag';
 import { PrismaSlaPauseReader } from './infrastructure/prisma-sla-pause.reader';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
@@ -220,6 +228,8 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
         },
         SchedulingService,
         { provide: SCHEDULING_STORE, useClass: PrismaSchedulingStore },
+        ScheduleSweepStore,
+        ScheduleSweepScheduler,
         ChatbotRequestCommandsService,
         ChatbotRequestRelationsService,
         {
@@ -1372,6 +1382,371 @@ describeIfDb('scheduled conversations (PostgreSQL)', () => {
         scheduleVersion: 1,
       });
       expect(by(without.ref).scheduledRequest).toBeNull();
+    });
+  });
+  // ---------------------------------------------------- 7. schedule sweep
+
+  describe('schedule sweep (reminder, "solicitud nueva" at scheduledFor, needsReschedule)', () => {
+    const sweep = () => app.get(ScheduleSweepScheduler);
+    const minus = (startsAt: string, minutes: number) =>
+      new Date(new Date(startsAt).getTime() + minutes * MIN);
+    const remindersOf = (b: Branch, id: string) =>
+      feedOf(b, id, 'conversation.scheduled_reminder');
+    const noticesOf = (b: Branch, id: string) =>
+      prisma.outboxEvent.findMany({
+        where: {
+          tenantId: b.tenantId,
+          aggregateId: id,
+          eventType: NOTICE_NOTIFY_EVENT_TYPE,
+        },
+      });
+    /** Settings change with a version bump (the calendar is cached per version). */
+    const changeSettings = (
+      b: Branch,
+      data: { closedDates?: string[]; days?: Prisma.InputJsonArray },
+    ) =>
+      prisma.chatbotAttentionSettings.update({
+        where: { tenantId: b.tenantId },
+        data: { ...data, version: { increment: 1 } },
+      });
+
+    class PeekStore extends ScheduleSweepStore {
+      hook: (() => Promise<void>) | null = null;
+      peek(now: Date, after: ScheduleDueCursor | null = null) {
+        return this.readCandidates(now, after);
+      }
+      protected override async readCandidates(
+        now: Date,
+        after: ScheduleDueCursor | null,
+      ) {
+        const rows = await super.readCandidates(now, after);
+        await this.hook?.();
+        return rows;
+      }
+    }
+    const peekStore = () => new PeekStore(app.get(PrismaService));
+
+    it('creates the reminder at the lead time, once, and serves it on the feed; the claim and overdue clocks stay anchored at scheduledFor', async () => {
+      const b = await branch();
+      const c = customerOf();
+      const { id, startsAt } = await bookOk(b, c);
+      const before = await row(id);
+      expect(before.scheduleStage).toBe(0);
+      expect(before.scheduleDueAt).toEqual(minus(startsAt, -10));
+
+      await sweep().tick(minus(startsAt, -11));
+      expect(await remindersOf(b, id)).toHaveLength(0);
+
+      await sweep().tick(minus(startsAt, -10));
+      const [item] = await remindersOf(b, id);
+      expect(item.payload).toMatchObject({
+        requestId: id,
+        scheduledFor: startsAt,
+        scheduleVersion: 1,
+        minutesBefore: 10,
+        timeZone: ZONE,
+        requiresTemplateAtStart: false,
+      });
+      expect(item.conversationRef).toBe(c.ref);
+      const after = await row(id);
+      expect(after.scheduleStage).toBe(1);
+      expect(after.scheduleDueAt).toEqual(new Date(startsAt));
+      expect(await noticesOf(b, id)).toHaveLength(0);
+
+      await sweep().tick(minus(startsAt, -9));
+      expect(await remindersOf(b, id)).toHaveLength(1);
+
+      const feed = await asBot(
+        b,
+        server().get('/chatbot-api/feed?waitSeconds=0'),
+      ).expect(200);
+      expect(
+        feed.body.items.filter(
+          (i: any) => i.type === 'conversation.scheduled_reminder',
+        ),
+      ).toHaveLength(1);
+
+      // The SLA clock starts at scheduledFor: nothing is due before it.
+      const sla = await row(id);
+      expect(
+        sla.nextSlaCheckAt === null ||
+          sla.nextSlaCheckAt.getTime() >= new Date(startsAt).getTime(),
+      ).toBe(true);
+      expect(await eventsOf(id, 'SLA_MILESTONE')).toHaveLength(0);
+    });
+
+    it('writes the "solicitud nueva" notice at scheduledFor, once, and finishes the schedule', async () => {
+      const b = await branch();
+      const c = customerOf();
+      const { id, startsAt } = await bookOk(b, c);
+      await sweep().tick(minus(startsAt, -10));
+      expect(await noticesOf(b, id)).toHaveLength(0);
+
+      await sweep().tick(minus(startsAt, -0.5));
+      expect(await noticesOf(b, id)).toHaveLength(0);
+
+      await sweep().tick(new Date(startsAt));
+      const notices = await noticesOf(b, id);
+      expect(notices).toHaveLength(1);
+      expect(notices[0].payload).toMatchObject({
+        type: 'REQUEST_CREATED',
+        requestId: id,
+        dedupKey: `created:${id}`,
+      });
+      // Open at that hour: not held.
+      expect(notices[0].nextAttemptAt.getTime()).toBeLessThanOrEqual(
+        new Date(startsAt).getTime(),
+      );
+      const done = await row(id);
+      expect(done.scheduleStage).toBe(2);
+      expect(done.scheduleDueAt).toBeNull();
+
+      await sweep().tick(minus(startsAt, 5));
+      expect(await noticesOf(b, id)).toHaveLength(1);
+      expect(await remindersOf(b, id)).toHaveLength(1);
+    });
+
+    it('never creates the reminder with less than 3 minutes left (exactly 3 still does)', async () => {
+      const b = await branch({ max: 3 });
+      const late = await bookOk(b, customerOf(), {}, 0);
+      const edge = await bookOk(b, customerOf(), {}, 1);
+      await sweep().tick(minus(late.startsAt, -2));
+      expect(await remindersOf(b, late.id)).toHaveLength(0);
+      expect((await row(late.id)).scheduleStage).toBe(1);
+      await sweep().tick(minus(edge.startsAt, -3));
+      expect(await remindersOf(b, edge.id)).toHaveLength(1);
+    });
+
+    it('a sweep that ran after scheduledFor sends no reminder, only the notice', async () => {
+      const b = await branch();
+      const { id, startsAt } = await bookOk(b, customerOf());
+      await sweep().tick(minus(startsAt, 1));
+      expect(await remindersOf(b, id)).toHaveLength(0);
+      expect(await noticesOf(b, id)).toHaveLength(1);
+      expect((await row(id)).scheduleStage).toBe(2);
+    });
+
+    it('suppresses the reminder while needsReschedule is set; the notice still comes', async () => {
+      const b = await branch();
+      const { id, startsAt } = await bookOk(b, customerOf());
+      await prisma.chatbotRequest.update({
+        where: { id },
+        data: { needsReschedule: true },
+      });
+      await sweep().tick(minus(startsAt, -10));
+      expect(await remindersOf(b, id)).toHaveLength(0);
+      expect((await row(id)).scheduleStage).toBe(1);
+      await sweep().tick(new Date(startsAt));
+      expect(await noticesOf(b, id)).toHaveLength(1);
+    });
+
+    it('a reschedule moves the stages: the old time never fires, the new one does with the new version', async () => {
+      const b = await branch();
+      const c = customerOf();
+      const { id, startsAt } = await bookOk(b, c);
+      const target = await firstSlot(b, c, 2);
+      await staffReschedule(b, id, (await row(id)).version, target).expect(200);
+      const moved = await row(id);
+      expect(moved.scheduleStage).toBe(0);
+      expect(moved.scheduleDueAt).toEqual(minus(target, -10));
+
+      await sweep().tick(minus(startsAt, -10));
+      expect(await remindersOf(b, id)).toHaveLength(0);
+      await sweep().tick(minus(target, -10));
+      const [item] = await remindersOf(b, id);
+      expect(item.payload).toMatchObject({
+        scheduledFor: target,
+        scheduleVersion: 2,
+      });
+    });
+
+    it('a cancel stops the schedule: nothing is due and nothing is sent', async () => {
+      const b = await branch();
+      const { id, startsAt } = await bookOk(b, customerOf());
+      await cancel(b, id).expect(200);
+      expect((await row(id)).scheduleDueAt).toBeNull();
+      await sweep().tick(new Date(startsAt));
+      expect(await remindersOf(b, id)).toHaveLength(0);
+      expect(await noticesOf(b, id)).toHaveLength(0);
+    });
+
+    it('a candidate that a reschedule or a cancel moved after it was read is stale and left alone', async () => {
+      const b = await branch();
+      const c1 = customerOf();
+      const first = await bookOk(b, c1, {}, 0);
+      const second = await bookOk(b, customerOf(), {}, 1);
+      const target = await firstSlot(b, c1, 2);
+      const store = peekStore();
+      store.hook = async () => {
+        store.hook = null;
+        await staffReschedule(
+          b,
+          first.id,
+          (await row(first.id)).version,
+          target,
+        ).expect(200);
+        await cancel(b, second.id).expect(200);
+      };
+      const result = await store.runBatch(minus(second.startsAt, -10));
+      expect(result.stale).toBeGreaterThanOrEqual(2);
+      expect(await remindersOf(b, first.id)).toHaveLength(0);
+      expect(await remindersOf(b, second.id)).toHaveLength(0);
+      const moved = await row(first.id);
+      expect(moved.scheduleStage).toBe(0);
+      expect(moved.scheduleDueAt).toEqual(minus(target, -10));
+      expect((await row(second.id)).scheduleDueAt).toBeNull();
+    });
+
+    it('a second pass over a reset row cannot repeat the reminder (unique per version)', async () => {
+      const b = await branch();
+      const { id, startsAt } = await bookOk(b, customerOf());
+      await sweep().tick(minus(startsAt, -10));
+      await prisma.chatbotRequest.update({
+        where: { id },
+        data: { scheduleStage: 0, scheduleDueAt: minus(startsAt, -10) },
+      });
+      const result = await sweep().tick(minus(startsAt, -9));
+      expect(result.failed).toBe(0);
+      expect(await remindersOf(b, id)).toHaveLength(1);
+      expect((await row(id)).scheduleStage).toBe(1);
+    });
+
+    it('reads due rows only, oldest due first, with a keyset, through the due index', async () => {
+      const b = await branch();
+      const first = await bookOk(b, customerOf(), {}, 0);
+      const second = await bookOk(b, customerOf(), {}, 1);
+      const store = peekStore();
+      const ours = (rows: Array<{ id: string; tenantId: string }>) =>
+        rows.filter((r) => r.tenantId === b.tenantId).map((r) => r.id);
+
+      expect(ours(await store.peek(minus(first.startsAt, -11)))).toEqual([]);
+      const both = await store.peek(minus(second.startsAt, -10));
+      expect(ours(both)).toEqual([first.id, second.id]);
+      const head = both.find((r) => r.id === first.id)!;
+      const rest = await store.peek(minus(second.startsAt, -10), {
+        dueAt: head.dueAt,
+        id: head.id,
+      });
+      expect(ours(rest)).toEqual([second.id]);
+
+      const plan = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL enable_seqscan = off`;
+        return tx.$queryRaw<Array<Record<string, string>>>(Prisma.sql`
+          EXPLAIN SELECT r."id" FROM "chatbot_requests" r
+          WHERE r."scheduleDueAt" IS NOT NULL AND r."scheduleDueAt" <= ${new Date()}
+          ORDER BY r."scheduleDueAt", r."id" LIMIT 100`);
+      });
+      expect(plan.map((l) => l['QUERY PLAN']).join('\n')).toContain(
+        'chatbot_requests_schedule_due_idx',
+      );
+    });
+
+    it('holds the notice to the next opening when the branch is closed at scheduledFor (L69) and flags the request when its reminder falls due', async () => {
+      const b = await branch();
+      const { id, startsAt } = await bookOk(b, customerOf());
+      const versionBefore = (await row(id)).version;
+      await changeSettings(b, { closedDates: [localDate(new Date(startsAt))] });
+
+      await sweep().tick(minus(startsAt, -10));
+      const flagged = await row(id);
+      expect(flagged.needsReschedule).toBe(true);
+      expect(flagged.version).toBe(versionBefore + 1);
+      expect(await remindersOf(b, id)).toHaveLength(0);
+      const events = await prisma.realtimeEvent.findMany({
+        where: { tenantId: b.tenantId, requestId: id, type: 'request.updated' },
+      });
+      expect(events.map((e) => e.payload)).toContainEqual({
+        version: versionBefore + 1,
+        cause: 'NEEDS_RESCHEDULE',
+      });
+
+      await sweep().tick(new Date(startsAt));
+      const [notice] = await noticesOf(b, id);
+      expect(notice.nextAttemptAt.getTime()).toBeGreaterThan(
+        new Date(startsAt).getTime(),
+      );
+      // Flagged and unclaimed at scheduledFor: still a normal claimable request.
+      expect((await row(id)).status).toBe('NEW');
+    });
+
+    describe('needsReschedule when the settings change (S19 Q6)', () => {
+      it('flags a closed date or shortened hours on open future scheduled requests, tells nobody, and a reschedule clears it', async () => {
+        const b = await branch();
+        const flaggedC = customerOf();
+        const { id, startsAt } = await bookOk(b, flaggedC);
+        const cancelled = await bookOk(b, customerOf(), {}, 1);
+        await cancel(b, cancelled.id).expect(200);
+        const past = await bookOk(b, customerOf(), {}, 2);
+        await prisma.chatbotRequest.update({
+          where: { id: past.id },
+          data: { scheduledFor: new Date(Date.now() - 60 * MIN) },
+        });
+        const prisma2 = app.get(PrismaService);
+
+        // A closed date elsewhere changes nothing.
+        await changeSettings(b, { closedDates: ['2099-01-01'] });
+        expect(await flagUnbookableSchedules(prisma2, b.tenantId)).toEqual({
+          flagged: 0,
+        });
+
+        await changeSettings(b, {
+          closedDates: [localDate(new Date(startsAt))],
+        });
+        const versionBefore = (await row(id)).version;
+        expect(await flagUnbookableSchedules(prisma2, b.tenantId)).toEqual({
+          flagged: 1,
+        });
+        const after = await row(id);
+        expect(after.needsReschedule).toBe(true);
+        expect(after.version).toBe(versionBefore + 1);
+        expect((await row(cancelled.id)).needsReschedule).toBe(false);
+        expect((await row(past.id)).needsReschedule).toBe(false);
+        // Not told to the customer: no feed item at all, no audit event.
+        expect(
+          await prisma.chatbotFeedItem.count({ where: { requestId: id } }),
+        ).toBe(0);
+        expect(await eventsOf(id, 'RESCHEDULED')).toHaveLength(0);
+        const realtime = await prisma.realtimeEvent.findMany({
+          where: {
+            tenantId: b.tenantId,
+            requestId: id,
+            type: 'request.updated',
+          },
+        });
+        expect(realtime.map((e) => e.payload)).toContainEqual({
+          version: versionBefore + 1,
+          cause: 'NEEDS_RESCHEDULE',
+        });
+        // Idempotent: an already flagged request is not touched again.
+        expect(await flagUnbookableSchedules(prisma2, b.tenantId)).toEqual({
+          flagged: 0,
+        });
+        expect((await row(id)).version).toBe(versionBefore + 1);
+        const inbox = await detail(b, id).expect(200);
+        expect(inbox.body.needsReschedule).toBe(true);
+
+        // The customer reschedules: the flag clears.
+        const target = await firstSlot(b, flaggedC, 0);
+        await staffReschedule(b, id, (await row(id)).version, target).expect(
+          200,
+        );
+        expect((await row(id)).needsReschedule).toBe(false);
+      });
+
+      it('flags when the business hours are shortened so that the booked time is outside them', async () => {
+        const b = await branch();
+        const { id } = await bookOk(b, customerOf());
+        await changeSettings(b, {
+          days: WEEKDAYS.map((day) => ({
+            day,
+            ranges: [{ open: '00:00', close: '00:01' }],
+          })) as unknown as Prisma.InputJsonArray,
+        });
+        expect(
+          await flagUnbookableSchedules(app.get(PrismaService), b.tenantId),
+        ).toEqual({ flagged: 1 });
+        expect((await row(id)).needsReschedule).toBe(true);
+      });
     });
   });
 });

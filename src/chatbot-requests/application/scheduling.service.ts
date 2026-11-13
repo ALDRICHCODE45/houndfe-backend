@@ -173,13 +173,12 @@ export class SchedulingService {
       )
       .digest('hex');
 
-    // The receipt kind is a closed set in the database ('CREATE', 'CANCEL');
-    // a reschedule receipt lives under a prefixed key of kind CREATE, which no
-    // `sourceRequestId` (a UUID) can ever collide with.
-    const receiptKey = `reschedule:${key}`;
+    // A receipt kind of its own (the database CHECK allows 'RESCHEDULE'): the
+    // key is the raw `X-Idempotency-Key`, so it can never collide with a create
+    // or a cancel receipt.
     return this.receipts.transaction(async () => {
-      await this.receipts.lockKey('CREATE', receiptKey);
-      const receipt = await this.receipts.findReceipt('CREATE', receiptKey);
+      await this.receipts.lockKey('RESCHEDULE', key);
+      const receipt = await this.receipts.findReceipt('RESCHEDULE', key);
       if (receipt) {
         if (receipt.commandHash !== hash) {
           throw new ChatbotRequestCommandError('IDEMPOTENCY_CONFLICT', 409);
@@ -205,8 +204,8 @@ export class SchedulingService {
         whatsappWindowClosesAt: result.windowClosesAt.toISOString(),
       };
       await this.receipts.saveReceipt(
-        'CREATE',
-        receiptKey,
+        'RESCHEDULE',
+        key,
         hash,
         result.request.id,
         response,

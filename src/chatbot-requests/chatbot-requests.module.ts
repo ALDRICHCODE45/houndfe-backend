@@ -75,6 +75,8 @@ import {
 import { PrismaLiveConversationStore } from './infrastructure/prisma-live-conversation.store';
 import { LiveSessionSweepScheduler } from './infrastructure/live-session-sweep.scheduler';
 import { LiveSessionSweepStore } from './infrastructure/live-session-sweep.store';
+import { ScheduleSweepScheduler } from './infrastructure/schedule-sweep.scheduler';
+import { ScheduleSweepStore } from './infrastructure/schedule-sweep.store';
 import { BotFeedController } from './presentation/bot-feed.controller';
 import { BotRecoveryController } from './presentation/bot-recovery.controller';
 import { BotRequestsController } from './presentation/bot-requests.controller';
@@ -151,6 +153,9 @@ import { ChatbotRequestRelationsController } from './presentation/chatbot-reques
     PrismaLiveConversationStore,
     LiveSessionSweepStore,
     LiveSessionSweepScheduler,
+    // Unit 14: reminders, "solicitud nueva" at scheduledFor, needsReschedule.
+    ScheduleSweepStore,
+    ScheduleSweepScheduler,
     { provide: FEED_WAKEUP, useExisting: PgFeedWakeup },
     { provide: CHATBOT_FEED_STORE, useClass: PrismaChatbotFeedStore },
     { provide: CHATBOT_RECOVERY_STORE, useClass: PrismaChatbotRecoveryStore },

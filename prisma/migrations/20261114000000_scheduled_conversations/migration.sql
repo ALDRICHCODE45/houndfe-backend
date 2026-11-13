@@ -20,6 +20,11 @@
 -- 5. The realtime trigger now announces RESCHEDULED as 'request.updated' (the
 --    inbox row changes: scheduledFor, needsReschedule). Same function as
 --    20261112050000 plus one WHEN.
+-- 6. The bot receipt kind is a closed set (CHECK of 20261110030000): it now
+--    also allows RESCHEDULE (the bot's reschedule receipt, keyed by the raw
+--    X-Idempotency-Key). Widening cannot fail validation, so the constraint is
+--    added NOT VALID (no table scan under the exclusive lock) and validated
+--    afterwards (SHARE UPDATE EXCLUSIVE only).
 --
 -- Existing rows have no scheduledFor, so nothing is scheduled or indexed by
 -- the new indexes. Safe on a populated database; SET LOCAL lock_timeout bounds
@@ -58,6 +63,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "chatbot_requests_open_scheduled_uq"
 CREATE UNIQUE INDEX IF NOT EXISTS "chatbot_feed_items_scheduled_reminder_uq"
   ON "chatbot_feed_items" ("tenantId", "requestId", (("payload" ->> 'scheduleVersion')))
   WHERE "type" = 'conversation.scheduled_reminder';
+
+ALTER TABLE "chatbot_bot_receipts"
+  DROP CONSTRAINT IF EXISTS "chatbot_bot_receipts_kind_chk",
+  ADD CONSTRAINT "chatbot_bot_receipts_kind_chk"
+    CHECK ("kind" IN ('CREATE', 'CANCEL', 'RESCHEDULE')) NOT VALID;
+ALTER TABLE "chatbot_bot_receipts" VALIDATE CONSTRAINT "chatbot_bot_receipts_kind_chk";
 
 CREATE OR REPLACE FUNCTION "chatbot_request_events_realtime"() RETURNS trigger
 LANGUAGE plpgsql AS $$

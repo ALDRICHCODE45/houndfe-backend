@@ -17,6 +17,8 @@
  *                  recompute runs after the commit and can never undo or hide
  *                  it: if it fails the write still answers 200 with
  *                  `recompute: 'FAILED'` (and an error log), never 500.
+ *                  The same pass flags open scheduled requests whose time is
+ *                  no longer open (`needsReschedule`, unit 14, S19 Q6).
  *   applyToAll     S7: copies hours, closed dates, SLA times (and the receipt
  *                  margin, window warning) and scheduling settings to every
  *                  tenant where the caller holds
@@ -40,6 +42,7 @@ import {
   rowToSettings,
 } from '../../chatbot-requests/infrastructure/chatbot-sla-policy';
 import { recomputeOpenRequests } from '../../chatbot-requests/infrastructure/chatbot-sla-recompute';
+import { flagUnbookableSchedules } from '../../chatbot-requests/infrastructure/scheduled-reschedule-flag';
 import { CaslAbilityFactory } from '../../auth/authorization/casl-ability.factory';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import type { OpeningDay } from '../../shipping/pickup/domain/opening-hours';
@@ -524,6 +527,19 @@ export class ChatbotSettingsService {
   private async recomputeAfterCommit(
     tenantId: string,
   ): Promise<Exclude<RecomputeStatus, 'NOT_NEEDED'>> {
+    // Unit 14 (S19 Q6): open scheduled requests whose time is no longer open
+    // get `needsReschedule`. Its own try: a failure never hides the recompute
+    // and never fails the write; the schedule sweep flags the row anyway when
+    // its reminder falls due.
+    try {
+      await flagUnbookableSchedules(this.prisma, tenantId, {
+        now: this.clock,
+      });
+    } catch (error) {
+      this.logger.error(
+        `[settings] tenant ${tenantId}: settings saved but flagging scheduled requests failed: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+    }
     try {
       const { stale } = await recomputeOpenRequests(this.prisma, tenantId, {
         now: this.clock,

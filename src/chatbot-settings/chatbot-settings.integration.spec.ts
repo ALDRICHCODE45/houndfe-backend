@@ -2108,4 +2108,105 @@ describeIfDb('chatbot attention settings (PostgreSQL)', () => {
       expect(after?.startTimeoutSeconds).toBe(600);
     });
   });
+  describe('needsReschedule on a settings change (unit 14, S19 Q6)', () => {
+    const closedDay = '2026-12-14';
+
+    /** A branch with open hours and two open scheduled requests, one on `closedDay`. */
+    async function scene() {
+      const id = randomUUID();
+      tenants.push(id);
+      await prisma.tenant.create({
+        data: { id, name: 'Sucursal agenda', slug: `cs-${id}` },
+      });
+      await put(id, body(ALWAYS_OPEN(), 0)).expect(200);
+      const scheduled = (iso: string) =>
+        seedRequest(id, {
+          kind: 'CONVERSATION',
+          subtype: 'TALK_TO_HUMAN',
+          status: 'NEW',
+          scheduledFor: new Date(iso),
+          scheduleVersion: 1,
+          scheduleStage: 0,
+          scheduleDueAt: new Date(new Date(iso).getTime() - 10 * 60_000),
+        });
+      return {
+        id,
+        hit: await scheduled(`${closedDay}T15:00:00.000Z`),
+        miss: await scheduled('2026-12-15T15:00:00.000Z'),
+      };
+    }
+    const flagOf = async (requestId: string) =>
+      prisma.chatbotRequest.findUniqueOrThrow({
+        where: { id: requestId },
+        select: { needsReschedule: true, version: true },
+      });
+    const updatedEvents = (tenantId: string, requestId: string) =>
+      prisma.realtimeEvent.findMany({
+        where: { tenantId, requestId, type: 'request.updated' },
+      });
+
+    it('PUT flags the open scheduled requests whose time is now a closed date, announces request.updated and tells the customer nothing', async () => {
+      const { id, hit, miss } = await scene();
+      const before = await flagOf(hit.id);
+      const res = await put(
+        id,
+        body({ ...ALWAYS_OPEN(), closedDates: [closedDay] }, 1),
+      ).expect(200);
+      expect(res.body.recompute).toBe('DONE');
+      expect(await flagOf(hit.id)).toEqual({
+        needsReschedule: true,
+        version: before.version + 1,
+      });
+      expect((await flagOf(miss.id)).needsReschedule).toBe(false);
+      expect(
+        (await updatedEvents(id, hit.id)).map((e) => e.payload),
+      ).toContainEqual({
+        version: before.version + 1,
+        cause: 'NEEDS_RESCHEDULE',
+      });
+      expect(
+        await prisma.chatbotFeedItem.count({ where: { tenantId: id } }),
+      ).toBe(0);
+    });
+
+    it('apply-to-all flags the scheduled requests of the tenants it changes', async () => {
+      const { id, hit, miss } = await scene();
+      const allBranches = await prisma.permission.findUniqueOrThrow({
+        where: {
+          subject_action: {
+            subject: 'ChatbotSettingsAllBranches',
+            action: 'update',
+          },
+        },
+      });
+      const role = await prisma.role.create({
+        data: {
+          tenantId: id,
+          name: 'admin',
+          permissions: { create: [{ permissionId: allBranches.id }] },
+        },
+      });
+      roleIds.push(role.id);
+      const membership = await prisma.tenantMembership.create({
+        data: { userId, tenantId: id, roleId: role.id },
+      });
+      try {
+        const source = (await get(tenantA)).body;
+        await put(
+          tenantA,
+          body({ ...ALWAYS_OPEN(), closedDates: [closedDay] }, source.version),
+        ).expect(200);
+        const res = await applyAll(tenantA).expect(200);
+        expect(
+          res.body.tenantsApplied.find(
+            (t: { tenantId: string }) => t.tenantId === id,
+          ),
+        ).toMatchObject({ recompute: 'DONE' });
+        expect((await flagOf(hit.id)).needsReschedule).toBe(true);
+        expect((await flagOf(miss.id)).needsReschedule).toBe(false);
+      } finally {
+        await prisma.tenantMembership.delete({ where: { id: membership.id } });
+      }
+    });
+  });
 });

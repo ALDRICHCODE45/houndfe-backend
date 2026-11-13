@@ -88,6 +88,7 @@ import { PromotionExpiryScanner } from '../promotions/expiry/promotion-expiry.sc
 import { ReceiptReviewOutboxPoller } from '../receipts/outbox/receipt-review-outbox.poller';
 import { ChatbotSlaSweepScheduler } from '../chatbot-requests/infrastructure/chatbot-sla-sweep.scheduler';
 import { LiveSessionSweepScheduler } from '../chatbot-requests/infrastructure/live-session-sweep.scheduler';
+import { ScheduleSweepScheduler } from '../chatbot-requests/infrastructure/schedule-sweep.scheduler';
 import { ChatbotFeedPurgeScheduler } from '../chatbot-requests/infrastructure/chatbot-feed-purge.scheduler';
 import { RealtimeRetentionScheduler } from '../realtime/infrastructure/realtime-retention.scheduler';
 import { ChatbotRequestNotifyConsumer } from '../notifications/outbox/chatbot-request-notify.consumer';
@@ -116,6 +117,7 @@ const CHATBOT_NOTICE_FUNCTION_ID = NOTICE_EMAIL_FUNCTION_ID;
 const HUMAN_INTERVENTION_INTERVAL_CLASSES = [
   ChatbotSlaSweepScheduler,
   LiveSessionSweepScheduler,
+  ScheduleSweepScheduler,
   ChatbotFeedPurgeScheduler,
   RealtimeRetentionScheduler,
   ChatbotRequestNotifyConsumer,

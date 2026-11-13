@@ -669,6 +669,32 @@ export function buildConversationEndedPayload(input: {
 }
 
 /**
+ * `conversation.scheduled_reminder` (unit 14, S20 6, 7): the schedule sweep,
+ * `REMINDER_LEAD_MINUTES` before `scheduledFor`. `scheduleVersion` is part of
+ * the payload because the unique index of the migration keys on it (one
+ * reminder per request and scheduled time).
+ */
+export function buildScheduledReminderPayload(input: {
+  requestId: string;
+  scheduledFor: Date;
+  scheduleVersion: number;
+  minutesBefore: number;
+  timeZone: string;
+  whatsappWindowClosesAt: Date | null;
+  requiresTemplateAtStart: boolean;
+}): Record<string, unknown> {
+  return {
+    requestId: input.requestId,
+    scheduledFor: input.scheduledFor.toISOString(),
+    scheduleVersion: input.scheduleVersion,
+    minutesBefore: input.minutesBefore,
+    timeZone: input.timeZone,
+    whatsappWindowClosesAt: input.whatsappWindowClosesAt?.toISOString() ?? null,
+    requiresTemplateAtStart: input.requiresTemplateAtStart,
+  };
+}
+
+/**
  * `conversation.rescheduled` (unit 14, S20 6): staff changed the time. The bot
  * tells the customer only when the 24 h window is open, else ACKs `STALE`.
  */

@@ -13,6 +13,7 @@ import type {
   BotIntakeStore,
   DirectDraft,
   IntakeOutcome,
+  ReceiptKind,
 } from '../application/bot-request-intake.service';
 import type { ChatbotRequestRow } from '../application/chatbot-request-commands.service';
 import type { WrappedSubtype } from '../domain/bot-request-envelope';
@@ -93,11 +94,11 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
     return this.tenantPrisma.runInTransaction(work);
   }
 
-  lockKey(kind: 'CREATE' | 'CANCEL', key: string): Promise<void> {
+  lockKey(kind: ReceiptKind, key: string): Promise<void> {
     return lockBotKey(this.tx, this.tenantId, kind, key);
   }
 
-  findReceipt(kind: 'CREATE' | 'CANCEL', idempotencyKey: string) {
+  findReceipt(kind: ReceiptKind, idempotencyKey: string) {
     return this.tx.chatbotBotReceipt.findFirst({
       where: { tenantId: this.tenantId, kind, idempotencyKey },
       select: { commandHash: true, responseSnapshot: true },
@@ -105,7 +106,7 @@ export class PrismaBotIntakeStore implements BotIntakeStore {
   }
 
   async saveReceipt(
-    kind: 'CREATE' | 'CANCEL',
+    kind: ReceiptKind,
     idempotencyKey: string,
     commandHash: string,
     requestId: string | null,
