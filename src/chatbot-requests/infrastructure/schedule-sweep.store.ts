@@ -131,12 +131,16 @@ export class ScheduleSweepStore {
     const last = tail ? { dueAt: tail.dueAt, id: tail.id } : null;
     for (const candidate of candidates) {
       try {
+        // SAFETY: `TenantClient` is the structural subset of the interactive
+        // transaction client (`$queryRaw`, `$executeRaw`) that `handle` and
+        // the write helpers use; every statement names its tenant explicitly.
         const outcome = await this.prisma.$transaction((tx) =>
           this.handle(tx as unknown as TenantClient, candidate, now),
         );
+        // `notices` is an outcome kind of its own: counting `noticed` too
+        // would count every notice twice.
         result[outcome.kind] += 1;
         if (outcome.flagged) result.flagged += 1;
-        if (outcome.noticed) result.notices += 1;
       } catch (error) {
         result.failed += 1;
         this.logger.error(

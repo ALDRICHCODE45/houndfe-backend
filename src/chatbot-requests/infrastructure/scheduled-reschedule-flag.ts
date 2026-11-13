@@ -20,7 +20,10 @@
  * feed item (the customer is not told).
  */
 import { Prisma } from '@prisma/client';
-import { emitRealtimeEvents } from '../../shared/realtime/realtime-event-writes';
+import {
+  REALTIME_CHANNEL,
+  realtimeLockKey,
+} from '../../shared/realtime/realtime-event-writes';
 import { isStartStillOpen } from '../domain/schedule-sweep';
 import { loadSchedulingConfig } from './scheduling-store';
 import type { TxRunner } from './chatbot-sla-policy';
@@ -89,16 +92,25 @@ async function flagBatch(
     WHERE "tenantId" = ${tenantId} AND "id" = ANY(${ids}::text[])
     RETURNING "id", "version"`,
   );
-  // The realtime tenant lock is the last lock of the transaction.
-  await emitRealtimeEvents(
-    tx,
-    updated.map((row) => ({
-      tenantId,
-      userId: null,
-      type: 'request.updated',
-      requestId: row.id,
-      payload: { version: row.version, cause: NEEDS_RESCHEDULE_CAUSE },
-    })),
-  );
+  // The realtime tenant lock is the last lock of the transaction. The events
+  // go in ONE statement (same lock key, same channel and same rows as
+  // `emitRealtimeEvents`): one round trip per flagged row made a batch of 200
+  // cost ~110 ms while holding the request rows.
+  if (updated.length > 0) {
+    const sorted = [...updated].sort((a, b) => (a.id < b.id ? -1 : 1));
+    await tx.$queryRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${realtimeLockKey(tenantId)}, 0))::text`,
+    );
+    await tx.$executeRaw(Prisma.sql`
+      INSERT INTO "realtime_events" ("tenantId", "userId", "type", "requestId", "payload")
+      SELECT ${tenantId}, NULL, 'request.updated', u."id",
+             jsonb_build_object('version', u."version", 'cause', ${NEEDS_RESCHEDULE_CAUSE}::text)
+      FROM unnest(${sorted.map((row) => row.id)}::text[], ${sorted.map((row) => row.version)}::int[])
+        WITH ORDINALITY AS u("id", "version", "n")
+      ORDER BY u."n"`);
+    await tx.$queryRaw(
+      Prisma.sql`SELECT pg_notify(${REALTIME_CHANNEL}, ${tenantId})::text`,
+    );
+  }
   return { flagged: updated.length, lastId };
 }

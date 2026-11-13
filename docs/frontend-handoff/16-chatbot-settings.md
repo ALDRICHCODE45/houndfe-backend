@@ -8,7 +8,7 @@ Shapes in this document come from the controller, DTOs, service and their specs 
 
 **Not in this unit:**
 - The sweep, the 50 % / 80 % / overdue notices and the escalation notices (unit 7c). The deadlines already exist on every request (`claimDeadlineAt`, `resolveDeadlineAt`); nothing marks a request overdue yet.
-- Scheduled conversations (unit 14). `scheduling` and `enabledSubtypes` are **stored only**: saving them changes nothing else yet.
+- ~~Scheduled conversations~~ — done in unit 14 (handoff 21): `scheduling` now drives the bot's slots and bookings and the staff reschedule; see "Unit 14 additions" in section 4. `enabledSubtypes` is still **stored only**.
 - `slaPaused` / `slaResumesAt` on request rows still come back `false` / `null`. Do not build UI on them yet.
 - ~~Template sending~~ — done in unit 11: `POST /chatbot-requests/:id/template` uses `templateName`, `templateLanguageCode` and `templateCostText` (handoff 20, section 3c).
 
@@ -84,7 +84,7 @@ The example shows a saved sucursal. A sucursal with **no row** gets the defaults
 - `windowWarningMinutes` (0 to 1440): how long before the 24 h WhatsApp window closes a request counts as "closing soon". **S11: the inbox filter `windowClosingSoon` and the `windowClosingSoon` count of `/chatbot-requests/counts` use this value** (handoff 14 §16); `0` turns the warning off; a sucursal on the default (120) behaves as before.
 - `templateName`: lowercase letters, digits and `_`, 1 to 512, or `null` (not configured: the send-template command answers `422 TEMPLATE_NOT_CONFIGURED`).
 - `templateCostText`: plain text, 1 to 200 characters. Show it as is in the "Enviar plantilla" confirmation (§12.7).
-- `enabledSubtypes`, `scheduling`: stored only (see above).
+- `enabledSubtypes`: stored only (see above). `scheduling`: live since unit 14 (section 4).
 - `branchOpeningHours`: **read-only**, `{timeZone, days}` of the pickup hours of the **same** sucursal, or `null` when it has none (disable the "Copiar el horario de la sucursal" button). The button only loads these values into the editor; you save with the normal `PUT` (§12.9). It is never sent back usefully: the server ignores it on `PUT`.
 
 ## 4. `PUT /chatbot-settings`
@@ -138,6 +138,14 @@ A write that is saved is **never** answered with a 5xx because of this step. Aft
 | `NOT_NEEDED` | Identical content, nothing was written | nothing |
 
 After a change is saved, the **open** requests (`NEW`, `IN_PROGRESS`) of that sucursal get their `claimDeadlineAt`, `resolveDeadlineAt`, `slaPolicyVersion` and `nextSlaCheckAt` recomputed with the new settings, in the same call, in small batches. **Closed requests are never touched.** The inbox rows show the new deadlines on the next read. The claim deadline of a request that is already `IN_PROGRESS` is history and stays.
+
+**Unit 14 additions (additive, S19 Q6).** The same call, after the commit, also looks at the open **scheduled** requests (`NEW`, not yet claimed, `scheduledFor` in the future): any whose time is **no longer inside the open hours** (a closed date added, hours shortened, a day removed) gets `needsReschedule: true` (`version` + 1, `request.updated` on the stream). Nothing moves and **nobody tells the customer**: staff reschedule it (handoff 21). Details for the screen:
+
+- The `PUT` answer **does not change shape and has no count of flagged requests**; the flags arrive on the stream moments later (and in the next read of the inbox, `counts.needsReschedule`). A failure of this step never fails the write and never changes `recompute` (it is logged, and the schedule sweep flags the row anyway when its reminder falls due, 10 minutes before the time).
+- `apply-to-all-tenants` does the same on every sucursal it changes.
+- Changing `scheduling.slotMinutes` or `maxScheduledPerSlot` **moves nobody**: existing bookings keep their time and seat; the new values apply to the next booking or reschedule. `scheduling.enabled: false` stops new bookings and reschedules (`422 SCHEDULING_DISABLED` on the slots and reschedule routes); existing booked requests stay and are still claimable at their time.
+- A closed date or hours change that **frees** time flags nothing.
+- Suggested warning before saving a closure: "Hay conversaciones agendadas ese día; quedarán marcadas «Por reagendar»" (count them with `GET /chatbot-requests/counts` `scheduled` and the Agendadas tab).
 
 ### Errors
 
@@ -253,7 +261,7 @@ Request rows and details already return `claimDeadlineAt`, `resolveDeadlineAt` (
 - **On creation:** claim = business minutes from creation; resolve likewise. For `TRANSFER_RECEIPT`: the §5.4 receipt rule.
 - **On claim** (`NEW → IN_PROGRESS`): the claim clock stops mattering; the row follows `resolveDeadlineAt` (the resolve clock keeps counting from creation, it is not restarted).
 - **On release** (`IN_PROGRESS → NEW`): the claim clock **restarts** from the release, a fresh window for the next person.
-- **On a settings change:** recomputed as above.
+- **On a settings change:** recomputed as above. A scheduled request's clocks start at `scheduledFor` (handoff 21), and a closed date or shortened hours on its time flags it `needsReschedule` (unit 14 additions in section 4).
 - A request created before the sucursal ever saved settings uses the defaults (`slaPolicyVersion: 0`).
 - Open requests that existed before this unit (backfilled) are counted from their original `createdAt`, so old ones are already past due; they are marked overdue once the sweep exists (unit 7c).
 
