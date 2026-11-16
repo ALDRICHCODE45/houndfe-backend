@@ -4220,6 +4220,8 @@ model ChatbotConversation {
 
   @@unique([tenantId, conversationRef])
   @@unique([tenantId, id])
+  // A receipt request finds its customer's chat by phone key (no ref upload).
+  @@index([tenantId, customerKey])
   @@map("chatbot_conversations")
 }
 

@@ -324,6 +324,7 @@ SELECT count(*) FROM chatbot_requests WHERE "scheduledFor" IS NOT NULL;         
 - Con el bot nuevo: crear una solicitud de prueba por WhatsApp, verla en la bandeja, cancelarla con motivo y confirmar que el bot recibió `request.cancelled` y envió el ACK (`outcome` en `chatbot_feed_items`).
 - Con el bot nuevo (unidad 11), cuando el dueño quiera probarla: tomar una solicitud `TALK_TO_HUMAN` de prueba, ver `STARTING` → `ACTIVE` (el bot manda `session-ack STARTED`), escribir un mensaje y terminarla. Si queda en `STARTING` y a los 120 s se revierte, el bot todavía no tiene los handlers de la unidad 11.
 - Prueba del SSE (1.3) cuando haya una hora tranquila.
+- **Comprobantes sin conversación** (rama `fix/receipt-request-conversation`, L188): las solicitudes `TRANSFER_RECEIPT` creadas antes de ese arreglo quedaron sin `conversationRef` y el panel muestra «Todavía no hay mensajes». Después de desplegarlo, en psql sobre la base del backend: correr el bloque `[dry-run]` de `scripts/ops/link-receipt-request-conversations.sql` (solo lee), y si las filas son las esperadas, `BEGIN;` + bloque `[apply]` + revisar las filas devueltas + `COMMIT;`. Solo liga cuando hay exactamente una conversación del mismo tenant con el teléfono del cliente; correrlo dos veces no cambia nada.
 
 ## 7. Rollback
 

@@ -14,6 +14,8 @@
  */
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
@@ -621,6 +623,141 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
           customerKey: `unknown:${anonymousId}`,
         },
       );
+    });
+
+    it('links a receipt to the customer conversation only when exactly one matches', async () => {
+      const tenantId = await newTenant();
+      const otherTenant = await newTenant();
+      const lastMessage = new Date('2026-11-16T18:26:00.000Z');
+      const conversation = (tenant: string, ref: string, key: string) =>
+        prisma.chatbotConversation.create({
+          data: {
+            tenantId: tenant,
+            conversationRef: ref,
+            customerKey: key,
+            lastCustomerMessageAt: lastMessage,
+          },
+        });
+
+      // Another tenant's chat with the same phone never links.
+      await conversation(otherTenant, 'wa:5215512340001', '525512340001');
+      const alone = await createCustomer(tenantId, '52', '5512340001');
+      const aloneId = await submitReceipt(
+        tenantId,
+        (await createSale(tenantId, alone.id)).id,
+      );
+      expect(await requestOf({ receiptEvidenceId: aloneId })).toMatchObject({
+        customerKey: '525512340001',
+        conversationRef: null,
+        lastCustomerMessageAt: null,
+      });
+
+      // Exactly one conversation of this tenant: linked, window from it.
+      await conversation(tenantId, 'wa:5215512340002', '525512340002');
+      const linked = await createCustomer(tenantId, '52', '5512340002');
+      const linkedId = await submitReceipt(
+        tenantId,
+        (await createSale(tenantId, linked.id)).id,
+      );
+      expect(await requestOf({ receiptEvidenceId: linkedId })).toMatchObject({
+        conversationRef: 'wa:5215512340002',
+        lastCustomerMessageAt: lastMessage,
+        whatsappWindowClosesAt: new Date(
+          lastMessage.getTime() + 24 * 60 * 60 * 1000,
+        ),
+      });
+
+      // Two conversations with the same key: ambiguous, left unlinked.
+      await conversation(tenantId, 'wa:5215512340003', '525512340003');
+      await conversation(tenantId, 'wa:525512340003', '525512340003');
+      const ambiguous = await createCustomer(tenantId, '52', '5512340003');
+      const ambiguousId = await submitReceipt(
+        tenantId,
+        (await createSale(tenantId, ambiguous.id)).id,
+      );
+      expect(await requestOf({ receiptEvidenceId: ambiguousId })).toMatchObject(
+        { conversationRef: null },
+      );
+    });
+
+    it('scripts/ops/link-receipt-request-conversations.sql links old receipt requests by the same rule', async () => {
+      const sql = readFileSync(
+        join(
+          __dirname,
+          '../../scripts/ops/link-receipt-request-conversations.sql',
+        ),
+        'utf8',
+      );
+      const block = (name: string) =>
+        sql.split(`-- [${name}]`)[1].split('-- [')[0].trim().replace(/;$/, '');
+      const tenantId = await newTenant();
+      const otherTenant = await newTenant();
+      const receiptFor = async (phone: string) => {
+        const customer = await createCustomer(tenantId, '52', phone);
+        const sale = await createSale(tenantId, customer.id);
+        return requestOf({
+          receiptEvidenceId: await submitReceipt(tenantId, sale.id),
+        });
+      };
+      // Created before any chat existed: unlinked, as in production.
+      const linkable = await receiptFor('5512350001');
+      const ambiguous = await receiptFor('5512350002');
+      const foreign = await receiptFor('5512350003');
+      const anonymous = await requestOf({
+        receiptEvidenceId: await submitReceipt(
+          tenantId,
+          (await createSale(tenantId, null)).id,
+        ),
+      });
+      const lastMessage = new Date('2026-11-16T18:26:00.000Z');
+      const chat = (tenant: string, ref: string, key: string) =>
+        prisma.chatbotConversation.create({
+          data: {
+            tenantId: tenant,
+            conversationRef: ref,
+            customerKey: key,
+            lastCustomerMessageAt: lastMessage,
+          },
+        });
+      await chat(tenantId, 'wa:5215512350001', '525512350001');
+      await chat(tenantId, 'wa:5215512350002', '525512350002');
+      await chat(tenantId, 'wa:525512350002', '525512350002');
+      await chat(otherTenant, 'wa:5215512350003', '525512350003');
+
+      const ours = new Set(
+        [linkable, ambiguous, foreign, anonymous].map((r) => r.id),
+      );
+      const mine = (rows: { id: string }[]) =>
+        rows.map((r) => r.id).filter((id) => ours.has(id));
+      // Dry run lists only the linkable row and writes nothing.
+      const preview = await prisma.$queryRawUnsafe<{ id: string }[]>(
+        block('dry-run'),
+      );
+      expect(mine(preview)).toEqual([linkable.id]);
+      expect(await requestOf({ id: linkable.id })).toMatchObject({
+        conversationRef: null,
+      });
+
+      const applied = await prisma.$queryRawUnsafe<{ id: string }[]>(
+        block('apply'),
+      );
+      expect(mine(applied)).toEqual([linkable.id]);
+      expect(await requestOf({ id: linkable.id })).toMatchObject({
+        conversationRef: 'wa:5215512350001',
+        lastCustomerMessageAt: lastMessage,
+        whatsappWindowClosesAt: new Date(
+          lastMessage.getTime() + 24 * 60 * 60 * 1000,
+        ),
+      });
+      for (const untouched of [ambiguous, foreign, anonymous]) {
+        expect(await requestOf({ id: untouched.id })).toMatchObject({
+          conversationRef: null,
+        });
+      }
+      // Running it again changes nothing.
+      expect(
+        mine(await prisma.$queryRawUnsafe<{ id: string }[]>(block('apply'))),
+      ).toEqual([]);
     });
   });
 

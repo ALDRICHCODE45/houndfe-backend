@@ -188,6 +188,29 @@ export function findReceiptSale(
   });
 }
 
+/**
+ * The mirrored chat of a receipt's customer. The upload carries no
+ * `conversationRef`, and the staff conversation read, unread counts and live
+ * sessions all key on it, so the request takes the one chat of this tenant
+ * whose `customerKey` (derived from the `wa:` id) is the sale customer's
+ * phone key. None or several: left unlinked rather than guessed.
+ */
+async function customerConversation(
+  tx: TenantClient,
+  tenantId: string,
+  customerKey: string,
+): Promise<{
+  conversationRef: string;
+  lastCustomerMessageAt: Date | null;
+} | null> {
+  const chats = await tx.chatbotConversation.findMany({
+    where: { tenantId, customerKey },
+    select: { conversationRef: true, lastCustomerMessageAt: true },
+    take: 2,
+  });
+  return chats.length === 1 ? chats[0] : null;
+}
+
 /** The customer comes from `Sale.customerId` and that customer's phone. */
 export function receiptWrap(
   receipt: { id: string; saleId: string },
@@ -406,7 +429,25 @@ export class ChatbotRequestWrapper {
       this.tenantPrisma.getTenantId(),
       receipt.saleId,
     );
-    await this.insert(receiptWrap(receipt, sale));
+    const plain = receiptWrap(receipt, sale);
+    const chat = plain.link.customerKey
+      ? await customerConversation(
+          this.tx,
+          this.tenantPrisma.getTenantId(),
+          plain.link.customerKey,
+        )
+      : null;
+    await this.insert(
+      chat
+        ? {
+            ...plain,
+            conversationRef: chat.conversationRef,
+            ...(chat.lastCustomerMessageAt
+              ? { lastCustomerMessageAt: chat.lastCustomerMessageAt }
+              : {}),
+          }
+        : plain,
+    );
   }
 
   /**
