@@ -163,6 +163,7 @@ export class ChatbotApiService {
     const { items } = await this.publicCatalogRepository.findProducts({
       q: input.q.trim(),
       chatbotMgSpacing: true,
+      chatbotTokenSearch: true,
       sort: 'relevance',
       page: 1,
       limit: input.limit ?? 10,

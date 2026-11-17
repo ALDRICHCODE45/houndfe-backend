@@ -721,6 +721,7 @@ describe('ChatbotApiService', () => {
         {
           q: 'royal',
           chatbotMgSpacing: true,
+          chatbotTokenSearch: true,
           sort: 'relevance',
           page: 1,
           limit: 5,
@@ -793,6 +794,7 @@ describe('ChatbotApiService', () => {
         {
           q: 'ibuprofeno de 400 mg',
           chatbotMgSpacing: true,
+          chatbotTokenSearch: true,
           sort: 'relevance',
           page: 1,
           limit: 10,

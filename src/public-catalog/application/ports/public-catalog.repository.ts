@@ -18,6 +18,13 @@ export interface ListProductsParams {
   q?: string;
   /** Internal chatbot opt-in; public callers retain literal full-query search. */
   chatbotMgSpacing?: boolean;
+  /**
+   * Internal chatbot opt-in: tokenize `q` and match each word against product
+   * name, brand, category and variant text (accent/case-insensitive), all
+   * words first, then any word ranked by matched-word count. Public callers
+   * never set it and keep the literal whole-phrase search.
+   */
+  chatbotTokenSearch?: boolean;
   categoryId?: string;
   sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
