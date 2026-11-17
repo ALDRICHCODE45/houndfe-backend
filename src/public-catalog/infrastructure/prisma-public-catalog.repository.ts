@@ -15,6 +15,7 @@ import type {
   ListProductsParams,
   PublicCartCandidate,
   PublicProductDetailProjection,
+  ProductSearchMatch,
   PublicProductListProjection,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
@@ -248,9 +249,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     };
   }
 
-  async findProducts(
-    params: ListProductsParams,
-  ): Promise<{ items: ProductWithIncludes[]; total: number }> {
+  async findProducts(params: ListProductsParams): Promise<{
+    items: ProductWithIncludes[];
+    total: number;
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
+  }> {
     const client = this.tenantPrisma.getClient();
 
     const where: Prisma.ProductWhereInput = {
@@ -352,11 +355,18 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
    * Chatbot token search. Text matching runs in one tenant-scoped SQL query
    * that folds accents with `translate()` (no `unaccent` extension) and checks
    * each word with `strpos` over name + brand + category + non-OFF variant
-   * text (no LIKE wildcards to escape). It only narrows to candidate ids with
-   * a matched-word score; the usual Prisma gates (publication survivorship,
-   * online-catalog flag, category) are then applied to those ids BEFORE the
-   * AND/OR decision, so a gated-out AND match never suppresses the OR
-   * fallback. Cost is one tenant-bounded scan of products, the same order as
+   * text (no LIKE wildcards to escape). It returns, per candidate product and
+   * per token set, which words match. The usual Prisma gates (publication
+   * survivorship, online-catalog flag, category) are then applied to those ids
+   * BEFORE the AND/OR decision, so a gated-out AND match never suppresses the
+   * OR fallback.
+   *
+   * S5 — "effective" words: a word that matches no product that SURVIVED the
+   * gates (so also a word found only in unpublished/hidden products, or only
+   * in another tenant) is ignored when deciding "all". If every word of a set
+   * is ignored the set matches nothing (0 items). "All" = every effective
+   * word; otherwise OR fallback ranked by matched-word count, marked
+   * `partial`. Cost is one tenant-bounded scan of products, the same order as
    * the existing unindexed `ILIKE '%q%'`.
    */
   private async findProductsByTokens(
@@ -364,35 +374,36 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     params: ListProductsParams,
     where: Prisma.ProductWhereInput,
     tokenSets: string[][],
-  ): Promise<{ items: ProductWithIncludes[]; total: number }> {
+  ): Promise<{
+    items: ProductWithIncludes[];
+    total: number;
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
+  }> {
     const tenantId = this.tenantPrisma.getTenantId();
 
-    const matchCount = (tokens: string[]) =>
-      Prisma.join(
-        tokens.map((t) => Prisma.sql`(strpos(h.hay, ${t}) > 0)::int`),
-        ' + ',
-      );
-    const counts = tokenSets.map((tokens, i) => ({
-      column: Prisma.raw(`c${i}`),
-      size: tokens.length,
+    // One boolean[] column per token set: m{i}[j] = token j of set i matches.
+    const columns = tokenSets.map((tokens, i) => ({
+      column: Prisma.raw(`m${i}`),
+      expr: Prisma.sql`ARRAY[${Prisma.join(
+        tokens.map((t) => Prisma.sql`(strpos(h.hay, ${t}) > 0)`),
+        ', ',
+      )}]`,
     }));
-    const candidates = await client.$queryRaw<
-      Array<{ id: string; score: number; allMatch: boolean }>
-    >(Prisma.sql`
-      SELECT p.id,
-             GREATEST(${Prisma.join(
-               counts.map((c) => c.column),
-               ', ',
-             )})::int AS score,
-             (${Prisma.join(
-               counts.map((c) => Prisma.sql`${c.column} = ${c.size}`),
-               ' OR ',
-             )}) AS "allMatch"
+    const anyMatch = Prisma.join(
+      columns.map((c) => Prisma.sql`true = ANY(${c.column})`),
+      ' OR ',
+    );
+    type Candidate = { id: string } & Record<string, unknown>;
+    const candidates = await client.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT p.id, ${Prisma.join(
+        columns.map((c) => c.column),
+        ', ',
+      )}
       FROM products p
       LEFT JOIN brands b ON b.id = p."brandId"
       LEFT JOIN categories c ON c.id = p."categoryId"
       CROSS JOIN LATERAL (
-        SELECT translate(
+        SELECT lower(translate(
                  concat_ws(' ', p.name, b.name, c.name, (
                    SELECT string_agg(concat_ws(' ', v.name, v.option, v.value), ' ')
                    FROM variants v
@@ -401,37 +412,52 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
                      AND v."catalogPublishMode" <> 'OFF'
                  )),
                  ${ACCENT_FROM}, ${ACCENT_TO}
-               ) AS raw
-      ) r
-      CROSS JOIN LATERAL (SELECT lower(r.raw) AS hay) h
+               )) AS hay
+      ) h
       CROSS JOIN LATERAL (SELECT ${Prisma.join(
-        tokenSets.map(
-          (tokens, i) =>
-            Prisma.sql`${matchCount(tokens)} AS ${counts[i].column}`,
-        ),
+        columns.map((c) => Prisma.sql`${c.expr} AS ${c.column}`),
         ', ',
       )}) m
       WHERE p."tenantId" = ${tenantId}
         AND p."includeInOnlineCatalog" = true
         AND p.type = 'PRODUCT'
-        AND GREATEST(${Prisma.join(
-          counts.map((c) => c.column),
-          ', ',
-        )}) > 0
+        AND (${anyMatch})
     `);
 
-    const emptyPage = { items: [] as ProductWithIncludes[], total: 0 };
-    if (candidates.length === 0) return emptyPage;
+    if (candidates.length === 0) return { items: [], total: 0 };
 
-    const scoreById = new Map(candidates.map((c) => [c.id, c]));
+    const byCandidate = new Map(candidates.map((c) => [c.id, c]));
     const gated = await client.product.findMany({
-      where: { ...where, id: { in: [...scoreById.keys()] } },
+      where: { ...where, id: { in: [...byCandidate.keys()] } },
       orderBy: this.resolveOrderBy(params.sort),
       select: { id: true },
     });
-    const survivors = gated.map(({ id }) => scoreById.get(id)!);
-    const allMatches = survivors.filter((c) => c.allMatch);
-    const ranked = (allMatches.length > 0 ? allMatches : survivors)
+    const survivors = gated.map(({ id }) => byCandidate.get(id)!);
+
+    // Effective words per set: those matching at least one surviving product.
+    const effective = tokenSets.map((tokens, i) => {
+      const key = `m${i}`;
+      return tokens.map((_, j) =>
+        survivors.some((c) => (c[key] as boolean[])[j]),
+      );
+    });
+    const scored = survivors.map((c) => {
+      let score = 0;
+      let all = false;
+      tokenSets.forEach((_, i) => {
+        const flags = c[`m${i}`] as boolean[];
+        const used = flags.filter((hit, j) => effective[i][j] && hit).length;
+        const needed = effective[i].filter(Boolean).length;
+        score = Math.max(score, used);
+        if (needed > 0 && used === needed) all = true;
+      });
+      return { id: c.id, score, all };
+    });
+    const matching = scored.filter((c) => c.score > 0);
+    const allMatches = matching.filter((c) => c.all);
+    const chosen = allMatches.length > 0 ? allMatches : matching;
+    const kind: ProductSearchMatch = allMatches.length > 0 ? 'all' : 'partial';
+    const ranked = chosen
       // Array#sort is stable: ties keep the existing (newest-first) order.
       .map((c, index) => ({ c, index }))
       .sort((a, b) => b.c.score - a.c.score || a.index - b.index)
@@ -459,6 +485,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         params.sort,
       ),
       total: ranked.length,
+      matches: new Map(pageIds.map((id) => [id, kind] as const)),
     };
   }
 
@@ -1264,11 +1291,6 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     return product as unknown as ProductDetailWithIncludes;
   }
 
-  /**
-   * F1.WU5b — price filters for one execution. With a threaded resolved
-   * tenant catalog-default ID only that list is selected; without one the
-   * legacy global-default filter is preserved for pre-context callers.
-   */
   /** Shared include shape of the product list read (ProductWithIncludes). */
   private productListInclude(
     priceListWhere: Prisma.PriceListWhereInput,
@@ -1310,6 +1332,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     } satisfies Prisma.ProductInclude;
   }
 
+  /**
+   * F1.WU5b — price filters for one execution. With a threaded resolved
+   * tenant catalog-default ID only that list is selected; without one the
+   * legacy global-default filter is preserved for pre-context callers.
+   */
   private resolvePriceFilters(globalPriceListId?: string): {
     priceListWhere: Prisma.PriceListWhereInput;
     variantPriceWhere: Prisma.VariantPriceWhereInput;

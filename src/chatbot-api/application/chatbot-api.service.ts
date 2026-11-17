@@ -160,7 +160,7 @@ export class ChatbotApiService {
   async searchCatalog(
     input: CatalogSearchInput,
   ): Promise<CatalogItemResponse[]> {
-    const { items } = await this.publicCatalogRepository.findProducts({
+    const { items, matches } = await this.publicCatalogRepository.findProducts({
       q: input.q.trim(),
       chatbotMgSpacing: true,
       chatbotTokenSearch: true,
@@ -170,9 +170,11 @@ export class ChatbotApiService {
     });
 
     const expired = await this.expiredLotQuantities(items);
-    return items.map((product) =>
-      toCatalogItemResponse(product, expired.get(product.id) ?? 0),
-    );
+    return items.map((product) => {
+      const item = toCatalogItemResponse(product, expired.get(product.id) ?? 0);
+      const match = matches?.get(product.id);
+      return match ? { ...item, match } : item;
+    });
   }
 
   async checkStock(productId: string): Promise<StockCheckResponse> {

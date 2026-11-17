@@ -5,6 +5,12 @@ export type ChatbotStockState =
   | 'not_managed';
 
 export interface CatalogItemResponse {
+  /**
+   * Additive and optional. Present only for word-based searches: `all` = the
+   * item matched every effective word of `q`, `partial` = only some. Omitted
+   * when `q` has no searchable words (blank or punctuation only).
+   */
+  match?: 'all' | 'partial';
   productId: string;
   name: string;
   brand: string | null;

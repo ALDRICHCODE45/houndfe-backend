@@ -14,6 +14,8 @@ import type { CatalogStockPresentationValue } from '../../../catalog-settings/do
 import type { PublicEditorialProjectionV2 } from '../../../catalog-editorial/domain/editorial-public-projection-v2';
 import type { PublishedCoverageV2 } from '../../../catalog-editorial/domain/editorial-published-subjects-v2';
 
+export type ProductSearchMatch = 'all' | 'partial';
+
 export interface ListProductsParams {
   q?: string;
   /** Internal chatbot opt-in; public callers retain literal full-query search. */
@@ -166,6 +168,12 @@ export interface IPublicCatalogRepository {
   findProducts(params: ListProductsParams): Promise<{
     items: ProductWithIncludes[];
     total: number;
+    /**
+     * Chatbot token search only: per returned product id, whether it matched
+     * every effective word (`all`) or only some (`partial`). Absent for the
+     * public search and when the token path is not used.
+     */
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
   }>;
 
   findCategoryFacets(params: {

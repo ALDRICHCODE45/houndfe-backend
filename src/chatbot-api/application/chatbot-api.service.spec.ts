@@ -808,6 +808,45 @@ describe('ChatbotApiService', () => {
     });
   });
 
+  it('adds the additive match field per item only when the repository reports matches', async () => {
+    repository.findProducts.mockResolvedValue({
+      items: [
+        makeCatalogProduct({ id: 'prod-a' }),
+        makeCatalogProduct({ id: 'prod-b' }),
+      ],
+      total: 2,
+      matches: new Map([
+        ['prod-a', 'all'],
+        ['prod-b', 'partial'],
+      ]),
+    });
+
+    const result = await service.searchCatalog({ q: 'tiene croquetas' });
+
+    expect(result.map((r) => [r.productId, r.match])).toEqual([
+      ['prod-a', 'all'],
+      ['prod-b', 'partial'],
+    ]);
+    const { match: _match, ...rest } = result[0];
+    expect(rest).toEqual(
+      expect.objectContaining({
+        productId: 'prod-a',
+        name: 'Royal Canin Mini Adult',
+      }),
+    );
+  });
+
+  it('omits the match field when the repository reports no matches (blank q)', async () => {
+    repository.findProducts.mockResolvedValue({
+      items: [makeCatalogProduct()],
+      total: 1,
+    });
+
+    const result = await service.searchCatalog({ q: '   ' });
+
+    expect(result[0]).not.toHaveProperty('match');
+  });
+
   it('returns an empty array when no catalog items match the search', async () => {
     repository.findProducts.mockResolvedValue({ items: [], total: 0 });
 

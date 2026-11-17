@@ -176,6 +176,10 @@ describeIfDb('Chatbot token search (Integration - Real DB)', () => {
 
   const names = (r: { items: Array<{ name: string }> }) =>
     r.items.map((i) => i.name);
+  const matchOf = (
+    r: { items: Array<{ id: string }>; matches?: ReadonlyMap<string, string> },
+    index: number,
+  ) => r.matches?.get(r.items[index].id);
 
   it('S1: "croquetas pedigree" finds both Pedigree products through the OR fallback', async () => {
     await seedProduct('Pedigree Adulto Trozos de Res en Salsa Lata 375 g');
@@ -239,27 +243,134 @@ describeIfDb('Chatbot token search (Integration - Real DB)', () => {
     await seedProduct('Alpha uno', { createdAt: new Date('2026-01-03') });
     await seedProduct('Alpha dos', { createdAt: new Date('2026-01-02') });
     await seedProduct('Alpha beta', { createdAt: new Date('2026-01-01') });
+    await seedProduct('Gamma solo', { createdAt: new Date('2026-01-04') });
     await seedProduct('Unrelated item');
 
-    // "gamma" matches nothing, so AND on all three tokens is empty -> OR.
+    // No product has all three known words -> OR, ranked by matched count.
     const result = await search('alpha beta gamma');
 
-    expect(names(result)).toEqual(['Alpha beta', 'Alpha uno', 'Alpha dos']);
-    expect(result.total).toBe(3);
+    expect(names(result)).toEqual([
+      'Alpha beta',
+      'Gamma solo',
+      'Alpha uno',
+      'Alpha dos',
+    ]);
+    expect(result.total).toBe(4);
+    expect(result.items.map((_, i) => matchOf(result, i))).toEqual([
+      'partial',
+      'partial',
+      'partial',
+      'partial',
+    ]);
   });
 
   it('paginates the ranked OR fallback', async () => {
     await seedProduct('Alpha uno', { createdAt: new Date('2026-01-03') });
     await seedProduct('Alpha dos', { createdAt: new Date('2026-01-02') });
     await seedProduct('Alpha beta', { createdAt: new Date('2026-01-01') });
+    await seedProduct('Gamma solo', { createdAt: new Date('2026-01-04') });
 
-    const page1 = await search('alpha beta gamma', { limit: 2 });
-    const page2 = await search('alpha beta gamma', { limit: 2, page: 2 });
+    const page1 = await search('alpha beta gamma', { limit: 3 });
+    const page2 = await search('alpha beta gamma', { limit: 3, page: 2 });
 
-    expect(names(page1)).toEqual(['Alpha beta', 'Alpha uno']);
+    expect(names(page1)).toEqual(['Alpha beta', 'Gamma solo', 'Alpha uno']);
     expect(names(page2)).toEqual(['Alpha dos']);
-    expect(page1.total).toBe(3);
-    expect(page2.total).toBe(3);
+    expect(page1.total).toBe(4);
+    expect(page2.total).toBe(4);
+  });
+
+  describe('S4/S5 match marker and unknown words', () => {
+    it('S5: "tiene croquetas para cachorro?" returns only the product with both words, marked all', async () => {
+      await seedProduct('Nupec Cachorro Razas Medianas y Grandes');
+      await seedProduct('Croquetas Premium para Perros Adultos');
+      await seedProduct('Croquetas Cachorro Pollo');
+
+      const result = await search('tiene croquetas para cachorro?');
+
+      expect(names(result)).toEqual(['Croquetas Cachorro Pollo']);
+      expect(matchOf(result, 0)).toBe('all');
+      expect(result.total).toBe(1);
+    });
+
+    it('S5: without a both-product returns the two partials marked partial, ranked', async () => {
+      await seedProduct('Nupec Cachorro Razas Medianas y Grandes', {
+        createdAt: new Date('2026-01-01'),
+      });
+      await seedProduct('Croquetas Premium para Perros Adultos', {
+        createdAt: new Date('2026-01-02'),
+      });
+
+      const result = await search('tiene croquetas para cachorro?');
+
+      expect(names(result)).toEqual([
+        'Croquetas Premium para Perros Adultos',
+        'Nupec Cachorro Razas Medianas y Grandes',
+      ]);
+      expect([matchOf(result, 0), matchOf(result, 1)]).toEqual([
+        'partial',
+        'partial',
+      ]);
+    });
+
+    it('S5: a word that only appears in an unpublished product is ignored (judged after the gates)', async () => {
+      await seedProduct('Croquetas Hidden Special', { include: false });
+      await seedProduct('Croquetas Pollo');
+
+      // "special" exists only in the hidden product -> ignored for "all".
+      const result = await search('croquetas special');
+
+      expect(names(result)).toEqual(['Croquetas Pollo']);
+      expect(matchOf(result, 0)).toBe('all');
+    });
+
+    it('S5: a word that only exists in another tenant is ignored', async () => {
+      await seedProduct('Croquetas Pollo');
+      await seedProduct('Zzzunico', { tenant: otherTenantId });
+
+      const result = await search('croquetas zzzunico');
+
+      expect(names(result)).toEqual(['Croquetas Pollo']);
+      expect(matchOf(result, 0)).toBe('all');
+    });
+
+    it('S5: when every word is unknown it returns 0 items, like today', async () => {
+      await seedProduct('Croquetas Pollo');
+
+      const result = await search('tiene zzzqqq');
+
+      expect(result).toEqual({ items: [], total: 0 });
+      expect(result.matches).toBeUndefined();
+    });
+
+    it('marks a single-word match as all', async () => {
+      await seedProduct('Croquetas Pollo');
+
+      expect(matchOf(await search('croquetas'), 0)).toBe('all');
+    });
+
+    it('omits matches for blank and punctuation-only q', async () => {
+      await seedProduct('Bolsa 100% algodon');
+
+      expect((await search('')).matches).toBeUndefined();
+      expect((await search('%')).matches).toBeUndefined();
+    });
+
+    it('public (opt-out) search returns no matches and the same results as before', async () => {
+      await seedProduct('Croquetas Cachorro Pollo');
+      await seedProduct('Croquetas Premium para Perros Adultos');
+
+      const result = await search('croquetas', { flag: false });
+
+      expect(result).not.toHaveProperty('matches');
+      expect(names(result).sort()).toEqual([
+        'Croquetas Cachorro Pollo',
+        'Croquetas Premium para Perros Adultos',
+      ]);
+      expect(await search('tiene croquetas', { flag: false })).toEqual({
+        items: [],
+        total: 0,
+      });
+    });
   });
 
   it('matches variant name text per token', async () => {
@@ -324,7 +435,8 @@ describeIfDb('Chatbot token search (Integration - Real DB)', () => {
     const legacy = await search('Pedigree Adulto Res', { flag: false });
 
     expect(token.items).toHaveLength(1);
-    expect(token).toEqual(legacy);
+    expect(token.items).toEqual(legacy.items);
+    expect(token.total).toBe(legacy.total);
   });
 
   it('public (opt-out) search keeps whole-phrase matching: multi-word q finds nothing', async () => {
