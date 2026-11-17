@@ -1078,8 +1078,36 @@ export function sellableQuantity(quantity: number, expiredLotQuantity: number) {
   return Math.max(quantity - expiredLotQuantity, 0);
 }
 
-function deriveAggregateStock(
-  product: ProductWithIncludes,
+/** Best-first ranking of the stock states of a product's visible variants. */
+const STOCK_STATE_RANK: Record<ChatbotStockState, number> = {
+  available: 2,
+  low_stock: 1,
+  out_of_stock: 0,
+  not_managed: -1,
+};
+
+/**
+ * Product-level stock, shared by `GET /catalog/search` and
+ * `GET /catalog/:productId/stock` so the two cannot drift (T3 / S6).
+ *
+ * - Untracked product: `not_managed`, no quantity.
+ * - Stock-tracked product WITH visible variants: the status is the best one
+ *   among those variants (available > low_stock > out_of_stock) and the
+ *   quantity is the sum of their quantities, each clamped to >= 0. The raw
+ *   `product.quantity` is never reported for such a product.
+ * - Otherwise (no variants): the product's own quantity minus expired lots.
+ *   A `hasVariants` product with no visible variant would also land here, but
+ *   the repository's publication rule never returns one (all-OFF products are
+ *   dropped), so that case is unreachable from the chatbot endpoints.
+ */
+function deriveProductStock(
+  product: {
+    useStock: boolean;
+    hasVariants: boolean;
+    quantity: number;
+    minQuantity: number;
+    variants: ReadonlyArray<{ quantity: number; minQuantity: number }>;
+  },
   expiredLotQuantity: number,
 ): {
   status: ChatbotStockState;
@@ -1097,19 +1125,18 @@ function deriveAggregateStock(
     };
   }
 
-  const states = product.variants.map((variant) =>
-    deriveStockState(product.useStock, variant.quantity, variant.minQuantity),
+  const status = product.variants
+    .map((variant) =>
+      deriveStockState(product.useStock, variant.quantity, variant.minQuantity),
+    )
+    .reduce((best, state) =>
+      STOCK_STATE_RANK[state] > STOCK_STATE_RANK[best] ? state : best,
+    );
+  const quantity = product.variants.reduce(
+    (sum, variant) => sum + Math.max(0, variant.quantity),
+    0,
   );
-
-  if (states.includes('available')) {
-    return { status: 'available', quantity: product.quantity };
-  }
-
-  if (states.includes('low_stock')) {
-    return { status: 'low_stock', quantity: product.quantity };
-  }
-
-  return { status: 'out_of_stock', quantity: product.quantity };
+  return { status, quantity };
 }
 
 function toCatalogItemResponse(
@@ -1128,7 +1155,7 @@ function toCatalogItemResponse(
       promoPriceCents: null,
       promotionEvaluationStatus: 'needs_human_review',
     },
-    stock: deriveAggregateStock(product, expiredLotQuantity),
+    stock: deriveProductStock(product, expiredLotQuantity),
     packageInfo: {
       weightGrams: null,
       dimensions: null,
@@ -1155,20 +1182,10 @@ function toStockCheckResponse(
   product: ProductDetailWithIncludes,
   expiredLotQuantity: number,
 ): StockCheckResponse {
-  const quantity = sellableQuantity(product.quantity, expiredLotQuantity);
   return {
     productId: product.id,
     name: product.name,
-    stock: product.useStock
-      ? {
-          status: deriveStockState(
-            product.useStock,
-            quantity,
-            product.minQuantity,
-          ),
-          quantity,
-        }
-      : { status: 'not_managed', quantity: null },
+    stock: deriveProductStock(product, expiredLotQuantity),
     variants: product.variants.map((variant) => ({
       variantId: variant.id,
       name: variant.name,

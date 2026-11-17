@@ -1196,3 +1196,18 @@ Updated by step. Parts 2 to 4 (this branch `feat/human-intervention-u14`, not me
 - A one-word query matches as `all`.
 
 The bot may still retry word by word when it gets 0 results, as planned; the backend now does an "all words, then any word" search before answering 0.
+
+### Product-level stock of a product with variants (`stock` on search items and `GET /chatbot-api/catalog/:productId/stock`)
+
+One rule, shared by both routes (the same code derives the `stock` object, so they always agree). Field names and shapes are unchanged.
+
+| Product                           | `stock.status`                                                                                      | `stock.quantity`                                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Tracks stock **and has variants** | The best status among its visible (not `OFF`) variants: `available` > `low_stock` > `out_of_stock`. | The **sum** of the visible variants' quantities, each counted as at least 0 (a negative variant adds nothing). |
+| Tracks stock, no variants         | From its own quantity, minus units in expired lots (as before).                                     | Its own sellable quantity (as before).                                                                         |
+| Does not track stock              | `not_managed`                                                                                       | `null`                                                                                                         |
+
+- The product's own raw `quantity` / `minQuantity` is **never** reported for a product with variants (it is not meaningful there). Example: variants with 0, -3, 2 (`low_stock`) and 7 (`available`) report `{ "status": "available", "quantity": 9 }` whatever the product row holds.
+- `GET /catalog/:productId/stock` used to derive the product-level stock from the product's own quantity and ignore its variants; search used the best variant status but the raw product quantity. Both now follow the rule above.
+- The per-variant entries (`variants[].stock`) are unchanged: each variant's own status and quantity.
+- A product whose variants are all `OFF` is not published, so neither route returns it.
