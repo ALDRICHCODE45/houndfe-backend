@@ -150,6 +150,11 @@ export interface SaleDetailResponseDto {
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;
+  /**
+   * quotation-sale-conversion / T1 (S7) — the quotation this sale was
+   * created from. Present ONLY on quote-born sales (omitted otherwise).
+   */
+  quotationId?: string;
   /** Sale-time shipping snapshot with its source status; null without one. */
   shippingAddress: SaleShippingAddressDto | null;
   items: SaleDetailItemDto[];

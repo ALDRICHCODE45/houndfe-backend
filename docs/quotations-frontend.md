@@ -29,10 +29,12 @@
 | `DELETE` | `/quotations/drafts/:id/promotions/:promoId/veto`     | `update:Quotation`   | Re-aceptar promo vetada (opt-in)             |
 | `PATCH`  | `/quotations/drafts/:id/expiry`                       | `update:Quotation`   | Poner/quitar fecha de expiración             |
 | `PATCH`  | `/quotations/drafts/:id/notes`                        | `update:Quotation`   | Persistir notas para el cliente (280 max)    |
-| `PATCH`  | `/quotations/drafts/:id/tax-rate`                     | `update:Quotation`   | Cambiar tasa de IVA (0 = exento)             |
+| `PATCH`  | `/quotations/drafts/:id/tax-rate`                     | `update:Quotation`   | **Deprecado** (`Deprecation: true`) — ver 3.18 |
 | `POST`   | `/quotations/drafts/:id/send`                         | `update:Quotation`   | Enviar cotización por email + marcar SENT    |
 | `POST`   | `/quotations/drafts/:id/cancel`                       | `update:Quotation`   | Cancelar cotización                          |
 | `DELETE` | `/quotations/:id`                                     | `delete:Quotation`   | Eliminar cotización (solo DRAFT/CANCELLED)   |
+| `POST`   | `/quotations/from-sale/:saleId`                       | `create:Quotation` + `delete:Sale` | Venta borrador del POS → cotización DRAFT (la venta se descarta) — ver 3.20 |
+| `POST`   | `/quotations/:id/convert-to-sale`                     | `create:Sale` + `update:Quotation` | Cotización DRAFT/SENT → venta borrador del POS — ver 3.20 |
 
 Todos requieren JWT (Bearer token). El tenant se determina del token automáticamente.
 
@@ -43,15 +45,16 @@ Todos requieren JWT (Bearer token). El tenant se determina del token automática
 ```
 DRAFT ──send()──▶ SENT ──(expiresAt < now)──▶ EXPIRED
   │                  │
-  └──cancel()──▶ CANCELLED
+  ├──cancel()──▶ CANCELLED ◀──cancel()──┘
+  │                  │
+  └─convert-to-sale──┴──▶ CONVERTED_TO_SALE   (saleId = venta borrador creada)
 ```
 
 - **DRAFT**: editable. Se pueden agregar/quitar items, cambiar precios, promos, price list, expiry.
 - **SENT**: solo lectura. El PDF ya fue enviado al cliente. No se puede editar.
-- **EXPIRED**: transición automática (lazy) cuando `expiresAt` ya pasó. Solo lectura.
+- **EXPIRED**: transición automática (lazy) cuando `expiresAt` ya pasó. Solo lectura. Ojo: también un **DRAFT** con `expiresAt` vencido se lee como `effectiveStatus: 'EXPIRED'`.
 - **CANCELLED**: terminal. No se puede reactivar.
-
-**Importante**: La conversión de cotización a venta (`CONVERTED_TO_SALE`) NO está en este slice. Es un follow-up.
+- **CONVERTED_TO_SALE** (nuevo): terminal. La cotización (DRAFT o SENT, no vencida) se convirtió en una venta borrador del POS; `saleId` apunta a esa venta. Solo lectura: no se edita, no se envía, no se cancela (`QUOTATION_ALREADY_CONVERTED`, cancelá la venta) y no se elimina (`QUOTATION_CANNOT_DELETE`). La expiración lazy **nunca** la pasa a `EXPIRED`. El PDF sigue disponible. Si después se borra esa venta borrador en el POS, queda `CONVERTED_TO_SALE` con `saleId: null` y se puede volver a convertir (o cancelar). Detalle completo: [frontend-handoff/23-quotation-sale-conversion.md](frontend-handoff/23-quotation-sale-conversion.md).
 
 ---
 
@@ -108,7 +111,7 @@ Abre una nueva cotización en estado `DRAFT`.
 | ------------ | -------- | ------- | ------------------------------------------ |
 | `page`       | number   | `1`     | Página                                     |
 | `limit`      | number   | `20`    | Items por página                           |
-| `status`     | string   | —       | Filtrar por estado: `DRAFT`,`SENT`,`EXPIRED`,`CANCELLED` |
+| `status`     | string   | —       | Filtrar por estado (CSV, OR): `DRAFT`,`SENT`,`EXPIRED`,`CANCELLED`,`CONVERTED_TO_SALE` |
 | `customerId` | UUID     | —       | Filtrar por cliente                        |
 | `search`     | string   | —       | Búsqueda por nombre de cliente             |
 | `sortBy`     | string   | `createdAt` | Campo de orden                         |
@@ -161,7 +164,7 @@ Igual forma que el item de lista, pero con todos los campos. Aplica lazy `EXPIRE
 
 ### 3.4 `GET /quotations/:id/pdf?format=quotation-a4` — PDF
 
-Renderiza el PDF de la cotización. Funciona en **cualquier estado** (DRAFT, SENT, EXPIRED, CANCELLED) — el vendedor puede previsualizar antes de enviar.
+Renderiza el PDF de la cotización. Funciona en **cualquier estado** (DRAFT, SENT, EXPIRED, CANCELLED, CONVERTED_TO_SALE) — el vendedor puede previsualizar antes de enviar.
 
 **Query params**:
 | Parámetro | Tipo   | Default          | Descripción                                |
@@ -197,7 +200,7 @@ Renderiza el PDF de la cotización. Funciona en **cualquier estado** (DRAFT, SEN
 | Código | Mensaje | Causa |
 |--------|---------|-------|
 | `404` | `Customer not found` | El customerId no existe |
-| `409` | `Quotation is not DRAFT` | Solo se puede editar en estado DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo se puede editar en estado DRAFT |
 | `404` | `Quotation not found` | ID de cotización no existe |
 
 ---
@@ -237,7 +240,7 @@ Asigna un vendedor distinto al usuario autenticado (la persona que trajo al clie
 |--------|---------|-------|
 | `404` | `Quotation not found` | ID de cotización no existe |
 | `404` | `SELLER_NOT_FOUND` | El `sellerUserId` no existe en el tenant |
-| `409` | `Quotation is not DRAFT` | Solo se puede cambiar en estado DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo se puede cambiar en estado DRAFT |
 
 ---
 
@@ -263,7 +266,7 @@ Para **quitar** la lista de precios y volver a la default global:
 | Código | Mensaje | Causa |
 |--------|---------|-------|
 | `404` | `Price list not found` | ID de price list no existe |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 | `404` | `Quotation not found` | ID no existe |
 
 ---
@@ -297,7 +300,7 @@ Para **quitar** la lista de precios y volver a la default global:
 |--------|---------|-------|
 | `400` | `Invalid quantity` | quantity < 1 |
 | `404` | `Product not found` | productId o variantId no existe |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 
 ---
 
@@ -317,7 +320,7 @@ Para **quitar** la lista de precios y volver a la default global:
 |--------|---------|-------|
 | `400` | `Invalid quantity` | quantity < 1 |
 | `404` | `Item not found` | itemId no pertenece a la cotización |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 
 ---
 
@@ -343,7 +346,7 @@ Para **quitar** la lista de precios y volver a la default global:
 |--------|---------|-------|
 | `400` | `unitPriceCents must be >= 0` | Precio negativo |
 | `404` | `Item not found` | itemId no pertenece |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 
 ---
 
@@ -364,7 +367,7 @@ Quita una promo MANUAL previamente aplicada. Idempotente (no falla si ya estaba 
 |--------|---------|-------|
 | `404` | `Promotion not found` | promoId no existe |
 | `400` | `Promotion is not MANUAL` | Solo promos MANUAL se aplican así |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 
 ---
 
@@ -384,7 +387,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 | Código | Mensaje | Causa |
 |--------|---------|-------|
 | `404` | `Promotion not found` | promoId no existe |
-| `409` | `Quotation is not DRAFT` | Solo DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | Solo DRAFT |
 
 ---
 
@@ -433,7 +436,7 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 **Errores**:
 | Código | Código interno | Causa |
 |--------|---------------|-------|
-| `409` | — | La cotización no está en DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | La cotización no está en DRAFT |
 | `422` | `QUOTATION_HAS_NO_ITEMS` | La cotización no tiene productos — no se puede enviar vacía |
 | `422` | `QUOTATION_CUSTOMER_HAS_NO_EMAIL` | La cotización tiene cliente pero no tiene email — no se puede enviar |
 | `404` | — | Cotización no encontrada |
@@ -465,7 +468,8 @@ Re-acepta una promo automática que había sido vetada. La promo vuelve a evalua
 **Errores**:
 | Código | Mensaje | Causa |
 |--------|---------|-------|
-| `409` | — | Ya está cancelada (idempotente, no tira error realmente) |
+| `200` | — | Ya está cancelada: idempotente, devuelve la cotización sin error |
+| `422` | `QUOTATION_ALREADY_CONVERTED` | La cotización ya es una venta (`CONVERTED_TO_SALE` con `saleId`); el body trae `saleId`. Cancelá la venta. |
 | `404` | — | Cotización no encontrada |
 
 ---
@@ -498,50 +502,35 @@ Persiste las notas visibles al cliente en el PDF/email. Se guardan en el backend
 | HTTP | Código | Causa |
 |------|--------|-------|
 | `400` | `NOTES_TOO_LONG` | Más de 280 caracteres |
-| `409` | `QUOTATION_NOT_DRAFT` | No está en DRAFT |
+| `422` | `QUOTATION_NOT_DRAFT` | No está en DRAFT |
 | `404` | — | Cotización no encontrada |
 
 ---
 
-### 3.18 `PATCH /quotations/drafts/:id/tax-rate` — Tasa de IVA
+### 3.18 `PATCH /quotations/drafts/:id/tax-rate` — **DEPRECADO** (IVA por producto)
 
-Cambia la tasa de IVA de la cotización caso por caso (exención de IVA incluida). El `taxCents` se recalcula automáticamente del lado del backend.
+**Regla para el FE: no uses este endpoint ni muestres un selector de tasa de IVA.** El IVA de una cotización ya no es una tasa global: sale de **cada producto** (snapshot por línea). El endpoint sigue existiendo solo por compatibilidad y se va a eliminar.
 
-**Request**:
-```json
-{
-  "taxRate": 0
-}
-```
+Qué hace hoy (código: `quotations.controller.ts` `setTaxRate`, commits `e5c40988` y `e30c8a93`):
 
-**Valores válidos**:
-| taxRate | Significado            |
-|---------|------------------------|
-| `0`     | Exento de IVA          |
-| `0.08`  | IVA 8%                 |
-| `0.16`  | IVA 16% (default)      |
-| `0.21`  | IVA 21%                |
+- Responde con el header **`Deprecation: true`**. Si tu cliente HTTP lo ve, es una llamada a migrar.
+- Solo en `DRAFT`. Guarda la columna legacy `Quotation.taxRate` y **nada más**: no cambia precios, `subtotalCents`, `discountCents`, `totalCents`, `ivaBreakdown[]` ni el renglón de IVA del PDF.
+- La respuesta es el `QuotationResponseDto` completo, que **ya no trae `taxRate` ni `taxCents`** (se quitaron del wire en el mismo cambio).
+- Errores: `400 INVALID_TAX_RATE` (fuera de `[0, 1]`), `422 QUOTATION_NOT_DRAFT`, `404`.
 
-**Response** `200`: `QuotationResponseDto` completo con `taxRate` y `taxCents` actualizados.
+**Cómo funciona el IVA por ítem (lo que el FE debe usar):**
 
-**Reglas**:
-- `taxRate` debe ser un número entre `0` y `1`.
-- Solo funciona en estado `DRAFT`.
-- `taxCents` se calcula como `totalCents * taxRate / (1 + taxRate)` (IVA incluido en precios).
-- Si `taxRate` es `0`, `taxCents` es `0`.
-
-**Errores**:
-| HTTP | Código | Causa |
-|------|--------|-------|
-| `400` | `INVALID_TAX_RATE` | `taxRate` fuera de rango [0, 1] |
-| `409` | `QUOTATION_NOT_DRAFT` | No está en DRAFT |
-| `404` | — | Cotización no encontrada |
+- Los precios son **con IVA incluido**; el total no cambia por el IVA.
+- Al agregar una línea (y cada vez que una línea `PRICE_LIST` se re-precia en `DRAFT`) el backend guarda el snapshot fiscal del **producto padre**: su `ivaRate` (`IVA_16`, `IVA_8`, `IVA_0`, `IVA_EXENTO`) y si `chargeProductTaxes`. Las variantes heredan del padre. Las líneas `CUSTOM` conservan el snapshot que tenían. Una vez `SENT`, el snapshot queda congelado aunque el producto cambie después.
+- `ivaBreakdown: { classification, amountCents }[]` en cada lectura: IVA incluido por clasificación, solo las clasificaciones presentes, en el orden `IVA_16`, `IVA_8`, `IVA_0`, `IVA_EXENTO`, `NOT_TAXABLE` (`NOT_TAXABLE` = producto con `chargeProductTaxes = false`). Puede traer montos `0` (por ejemplo `IVA_0`).
+- `ivaBreakdown: []` cuando la cotización no tiene ítems **o alguna línea no tiene snapshot** (cotizaciones viejas, anteriores a la migración `20260915210500`). En ese caso **no muestres IVA** (no es "IVA $0").
+- IVA total a mostrar = suma de `amountCents`. El PDF muestra exactamente eso en un único renglón "IVA incluido" (sin tasas ni desglose) y lo omite cuando `ivaBreakdown` está vacío.
 
 ---
 
 ### 3.19 `DELETE /quotations/:id` — Eliminar cotización
 
-Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden eliminar — `SENT` y `EXPIRED` son registros permanentes (ya fueron comunicados al cliente).
+Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden eliminar — `SENT`, `EXPIRED` y `CONVERTED_TO_SALE` son registros permanentes (ya fueron comunicados al cliente o originaron una venta).
 
 **Response** `204 No Content` (body vacío).
 
@@ -552,9 +541,19 @@ Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden elimina
 **Errores**:
 | HTTP | Código | Causa |
 |------|--------|-------|
-| `409` | `QUOTATION_CANNOT_DELETE` | La cotización está en `SENT` o `EXPIRED` |
+| `422` | `QUOTATION_CANNOT_DELETE` | La cotización está en `SENT`, `EXPIRED` o `CONVERTED_TO_SALE` |
 | `404` | — | Cotización no encontrada |
 | `403` | — | Sin permiso `delete:Quotation` |
+
+---
+
+### 3.20 Conversión venta ↔ cotización (pestaña "Pedido" del POS)
+
+Contrato completo (bodies, respuestas, errores, ejemplos): [frontend-handoff/23-quotation-sale-conversion.md](frontend-handoff/23-quotation-sale-conversion.md). Resumen:
+
+- `POST /quotations/from-sale/:saleId` (`create:Quotation` + `delete:Sale`, header `Idempotency-Key` obligatorio): crea una cotización `DRAFT` con cliente, vendedor, lista de precios, líneas (precio vigente) y `customerNotes` opcional del body, y **borra** la venta borrador en la misma transacción. Responde `201 { quotation, discardedSaleId, droppedAdjustments }`. `droppedAdjustments` lista lo que una cotización no puede representar (promo de orden, 2x1/avanzadas, promos que ya no aplican).
+- `POST /quotations/:id/convert-to-sale` (`create:Sale` + `update:Quotation`, header `Idempotency-Key` obligatorio): desde `DRAFT` o `SENT` no vencida crea una venta borrador del POS con los **precios y descuentos cotizados** y pasa la cotización a `CONVERTED_TO_SALE` con `saleId`. Responde `201 { quotation, sale }`. Rechazos `422`: `QUOTATION_EXPIRED`, `QUOTATION_CANCELLED`, `QUOTATION_ALREADY_CONVERTED` (+ `saleId`), `QUOTATION_HAS_NO_ITEMS`, `QUOTATION_LINES_UNAVAILABLE` (+ `lines` con el motivo por línea: producto inexistente/no vendible, stock insuficiente).
+- Mismo `Idempotency-Key` + misma petición → misma respuesta (no duplica). Dos conversiones simultáneas de la misma cotización → una sola venta.
 
 ---
 
@@ -579,15 +578,20 @@ Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden elimina
   } | null;
   globalPriceListId: string | null;     // ID de la lista de precios activa
   priceListExplicitlySet: boolean;      // true si el cajero eligió la lista manualmente
-  status: 'DRAFT' | 'SENT' | 'EXPIRED' | 'CANCELLED';
+  status: 'DRAFT' | 'SENT' | 'EXPIRED' | 'CANCELLED' | 'CONVERTED_TO_SALE';
+  effectiveStatus: 'DRAFT' | 'SENT' | 'EXPIRED' | 'CANCELLED' | 'CONVERTED_TO_SALE';
+                                       // status con la expiración lazy aplicada — usalo para el badge
   expiresAt: string | null;            // ISO 8601 o null
   cancelReason: 'CUSTOMER_REQUEST' | 'PRICE_OBJECTION' | 'EXPIRED' | 'OTHER' | null;
   canceledAt: string | null;           // ISO 8601
   subtotalCents: number;               // subtotal en centavos (sin descuentos)
   discountCents: number;               // descuento total aplicado en centavos
-  taxRate: number;                     // tasa de IVA (0 = exento, 0.16 = 16%)
-  taxCents: number;                    // monto de IVA en centavos
   totalCents: number;                  // total final = subtotal - discount (IVA incluido)
+  ivaBreakdown: {                      // IVA incluido por clasificación (ver 3.18). [] = no mostrar IVA
+    classification: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO' | 'NOT_TAXABLE';
+    amountCents: number;
+  }[];
+  // taxRate / taxCents YA NO existen en la respuesta (IVA por ítem, ver 3.18)
   manuallyEnded: boolean;              // interno — siempre false para cotizaciones
   items: QuotationItemResponseDto[];
   appliedPromotions: {                 // promos aplicadas (manuales + automáticas)
@@ -598,10 +602,14 @@ Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden elimina
   vetoedPromotionIds: string[];        // IDs de promos vetadas
   optedInManualPromotionIds: string[]; // IDs de promos MANUAL aplicadas
   customerNotes: string | null;        // notas para el cliente (max 280 chars)
+  saleId: string | null;               // venta borrador creada (solo CONVERTED_TO_SALE; null si se descartó)
+  convertedAt: string | null;          // ISO 8601, cuándo se convirtió
   createdAt: string;                   // ISO 8601
   updatedAt: string;                   // ISO 8601
 }
 ```
+
+La venta borrador creada desde una cotización trae `quotationId` en sus lecturas (`GET /sales/drafts`, respuestas de mutaciones del borrador y `GET /sales/:id`). En ventas que no vienen de una cotización la clave **no aparece**.
 
 ### `QuotationItemResponseDto`
 
@@ -757,18 +765,22 @@ const stockQty = p.hasVariants && p.variantStockTotal != null
 
 ## 8. Errores comunes — tabla de referencia rápida
 
+> **Corrección (2026-11-18):** `QUOTATION_NOT_DRAFT` y `QUOTATION_CANNOT_DELETE` se responden con **HTTP 422**, no 409: son `BusinessRuleViolationError` sin mapeo propio en `DomainExceptionFilter` (que solo manda a 409 los códigos `SALE_NOT_DRAFT`, `IDEMPOTENCY_KEY_*`, etc.). Las tablas de 3.x ya están corregidas. Siempre decidí por el campo `error` del body, no por el status.
+
 | HTTP | Código interno              | Significado                                      | Acción recomendada                        |
 | ---- | --------------------------- | ------------------------------------------------ | ----------------------------------------- |
 | 400  | `INVALID_FORMAT`            | Formato de PDF no soportado                      | Solo usar `quotation-a4`                  |
 | 400  | `Invalid quantity`          | Cantidad < 1                                     | Validar antes de enviar                   |
-| 400  | `INVALID_TAX_RATE`          | `taxRate` fuera de rango [0, 1]                  | Validar con slider/select de tasas        |
+| 400  | `INVALID_TAX_RATE`          | `taxRate` fuera de rango [0, 1] (endpoint deprecado) | No usar `PATCH tax-rate` (ver 3.18)    |
 | 400  | `NOTES_TOO_LONG`            | Notas superan los 280 caracteres                 | Mostrar contador 0/280 y bloquear envío   |
 | 400  | `PROMOTION_IS_NOT_MANUAL`   | PUT manual-promotions con promo AUTOMATIC        | Usar endpoints de veto para AUTOMATIC     |
 | 401  | —                           | Token expirado o inválido                        | Redirigir a login                         |
 | 403  | —                           | Sin permiso (`read:Quotation`, etc.)             | Ocultar botones sin permiso               |
 | 404  | —                           | ID no existe o no pertenece al tenant            | Mostrar "No encontrado"                   |
-| 409  | `Quotation is not DRAFT`    | Intentando editar una cotización ya enviada/cancelada | Deshabilitar edición si status ≠ DRAFT |
-| 409  | `QUOTATION_CANNOT_DELETE`   | Intentando eliminar una cotización SENT/EXPIRED  | Ocultar botón eliminar si no es DRAFT/CANCELLED |
+| 422  | `QUOTATION_NOT_DRAFT`       | Intentando editar/enviar una cotización que no está en DRAFT (incluye `CONVERTED_TO_SALE`) | Deshabilitar edición si status ≠ DRAFT |
+| 422  | `QUOTATION_CANNOT_DELETE`   | Intentando eliminar una cotización SENT/EXPIRED/CONVERTED_TO_SALE | Ocultar botón eliminar si no es DRAFT/CANCELLED |
+| 422  | `QUOTATION_EXPIRED` / `QUOTATION_CANCELLED` / `QUOTATION_ALREADY_CONVERTED` / `QUOTATION_LINES_UNAVAILABLE` | Conversión a venta rechazada (ver 3.20) | Ver handoff 23 |
+| 409  | `IDEMPOTENCY_KEY_CONFLICT`  | Mismo `Idempotency-Key` con otra petición (conversiones) | Generar una key nueva por acción |
 | 422  | `QUOTATION_HAS_NO_ITEMS`    | Intentando enviar cotización sin productos       | Validar items.length > 0 antes de enviar  |
 | 422  | `QUOTATION_CUSTOMER_HAS_NO_EMAIL` | Cliente sin email al intentar enviar       | Pedir email antes de enviar               |
 | 500  | `PDF_GENERATION_FAILED`     | Error al generar el PDF                          | Reintentar, reportar si persiste          |
@@ -785,6 +797,8 @@ const stockQty = p.hasVariants && p.variantStockTotal != null
 | Editar (items, etc) | `update:Quotation`      |
 | Eliminar cotización | `delete:Quotation`      |
 | Ver PDF             | `read:Quotation`        |
+| Venta borrador → cotización (`POST /quotations/from-sale/:saleId`) | `create:Quotation` **y** `delete:Sale` |
+| Cotización → venta borrador (`POST /quotations/:id/convert-to-sale`) | `create:Sale` **y** `update:Quotation` |
 
 Si un usuario no tiene `update:Quotation`, ocultá todos los botones de edición/items/promos/send/cancel en DRAFT. Si no tiene `create:Quotation`, ocultá "Crear cotización" del menú del cliente. Si no tiene `delete:Quotation`, ocultá el botón de eliminar.
 
@@ -795,6 +809,7 @@ Si un usuario no tiene `update:Quotation`, ocultá todos los botones de edición
 - **Migración**: El schema de cotizaciones es nuevo (5 tablas + 4 enums) + 2 columnas nuevas (`customerNotes`, `taxRate`). No afecta tablas existentes. `prisma migrate deploy` es seguro en prod.
 - **Tenant isolation**: Todas las queries pasan por `TenantPrismaService`. Un ID de otro tenant devuelve 404, no 403.
 - **Engine widening**: `PosEvalInput` ahora acepta `context?: 'SALE' | 'QUOTATION'`. Las ventas existentes no se ven afectadas (default `'SALE'`).
-- **IVA configurable**: El `taxRate` default es `0.16`. Se puede cambiar por cotización vía `PATCH /tax-rate`. A futuro se integrará el IVA por producto (`Product.ivaRate`: IVA_16/IVA_8/IVA_0/IVA_EXENTO).
+- **IVA por producto (ya integrado)**: cada línea guarda el snapshot fiscal del producto (`ivaRate` + `chargeProductTaxes`, migración `20260915210500`) y la respuesta expone `ivaBreakdown[]`. La columna legacy `taxRate` y `PATCH /tax-rate` están deprecados (`Deprecation: true`) y no influyen en nada visible (ver 3.18).
+- **Conversión a venta (migración `20261118000000`)**: nuevo valor `CONVERTED_TO_SALE` en el enum y columnas `quotations.convertedSaleId` (única, FK a `sales` con `ON DELETE SET NULL`) y `convertedAt`. Aditiva; los estados y lecturas existentes no cambian.
 - **No stock checks**: La cotización no valida stock. Para badges de stock, `GET /products/:id` incluye `variantStockTotal` (fix aplicado).
 - **PDF streaming**: El PDF se streamea directo al response, no se bufferea en memoria (para items ≤50). Para el envío por email, se renderiza en memoria como Buffer.

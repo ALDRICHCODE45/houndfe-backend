@@ -567,6 +567,8 @@ export class PrismaSaleRepository implements ISaleRepository {
           where: { tenantId },
         },
         appliedPromotion: { where: { tenantId } },
+        // quotation-sale-conversion / T1 — provenance link (S7).
+        sourceQuotation: { select: { id: true } },
       },
     });
 
@@ -661,6 +663,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       optedInManualPromotionIds: (
         (persistedSale.promotionOptIns as Array<{ promotionId: string }>) ?? []
       ).map((o) => o.promotionId),
+      sourceQuotationId: persistedSale.sourceQuotation?.id ?? null,
     });
   }
 
@@ -694,6 +697,8 @@ export class PrismaSaleRepository implements ISaleRepository {
           where: { tenantId },
         },
         appliedPromotion: { where: { tenantId } },
+        // quotation-sale-conversion / T1 — provenance link (S7).
+        sourceQuotation: { select: { id: true } },
       },
     });
 
@@ -780,6 +785,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       optedInManualPromotionIds: (
         (saleData.promotionOptIns as Array<{ promotionId: string }>) ?? []
       ).map((o) => o.promotionId),
+      sourceQuotationId: saleData.sourceQuotation?.id ?? null,
     });
 
     return {
@@ -845,6 +851,8 @@ export class PrismaSaleRepository implements ISaleRepository {
         // every draft the user owns surfaces its opt-in state.
         promotionOptIns: { select: { promotionId: true }, where: { tenantId } },
         appliedPromotion: { where: { tenantId } },
+        // quotation-sale-conversion / T1 — provenance link (S7).
+        sourceQuotation: { select: { id: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -936,6 +944,9 @@ export class PrismaSaleRepository implements ISaleRepository {
             promotionId: string;
           }>) ?? []
         ).map((o) => o.promotionId),
+        sourceQuotationId:
+          ((saleData as any).sourceQuotation as { id: string } | null)?.id ??
+          null,
       }),
     );
   }
@@ -2120,6 +2131,8 @@ export class PrismaSaleRepository implements ISaleRepository {
     const sale = await prisma.sale.findFirst({
       where: { id, tenantId, status: { in: ['CONFIRMED', 'CANCELED'] } },
       include: {
+        // quotation-sale-conversion / T1 — provenance link (S7).
+        sourceQuotation: { select: { id: true } },
         customer: { select: { id: true, firstName: true, lastName: true } },
         user: { select: { id: true, name: true } },
         seller: { select: { id: true, name: true } },
@@ -2233,6 +2246,9 @@ export class PrismaSaleRepository implements ISaleRepository {
         : null,
       cashier: sale.user,
       seller: sale.seller,
+      // quotation-sale-conversion / T1 — present only for sales created
+      // from a quotation (keeps every other detail byte-identical).
+      ...(sale.sourceQuotation ? { quotationId: sale.sourceQuotation.id } : {}),
       shippingAddress: toSaleShippingAddressView(sale, tenantId),
       items: sale.items.map((item) => {
         // Column-derived BXGY discriminator (design.md Decision 6). Same

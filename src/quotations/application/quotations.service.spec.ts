@@ -1357,7 +1357,10 @@ describe('QuotationsService — WU2', () => {
       // the display name, not the raw UUID.
       const prisma = makeTenantPrisma({
         user: {
-          findUnique: jest.fn(async () => ({ id: SELLER, name: 'Berlín Pérez' })),
+          findUnique: jest.fn(async () => ({
+            id: SELLER,
+            name: 'Berlín Pérez',
+          })),
         },
         customer: {
           findUnique: jest.fn(async () => ({
@@ -2329,5 +2332,56 @@ describe('QuotationsService — WU2', () => {
       expect(sumBases).toBe(9900);
       expect(sumIva).toBe(result.totalCents - sumBases);
     });
+  });
+});
+
+// ── quotation-sale-conversion / T1 follow-up — send vs conversion race ──
+describe('QuotationsService.send — a quotation converted mid-send is never emailed', () => {
+  it('re-reads the status right before emailing and rejects with QUOTATION_NOT_DRAFT without calling the mailer or saving', async () => {
+    const item = {
+      id: 'item-1',
+      quotationId: 'q-1',
+      productId: 'prod-1',
+      variantId: null,
+      productName: 'Camisa',
+      variantName: null,
+      quantity: 1,
+      unitPriceCents: 5000,
+      unitPriceCurrency: 'MXN',
+    };
+    const draft = makeQuotation({ items: [item], customerId: 'cust-1' });
+    const converted = makeQuotation({
+      id: draft.id,
+      items: [item],
+      customerId: 'cust-1',
+      status: 'CONVERTED_TO_SALE',
+      convertedSaleId: 'sale-1',
+    });
+    const repo = makeRepo({
+      // First read: still DRAFT. A conversion commits while the PDF renders.
+      findById: jest
+        .fn()
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValue(converted),
+      save: jest.fn(async (q) => q),
+    });
+    const mailer = makeMailer();
+    const prisma = makeTenantPrisma({
+      customer: {
+        findUnique: jest.fn(async () => ({
+          id: 'cust-1',
+          firstName: 'Maria',
+          lastName: null,
+          email: 'maria@example.com',
+        })),
+      },
+    });
+    const service = buildService(repo, prisma, undefined, undefined, mailer);
+
+    await expect(service.send(draft.id)).rejects.toMatchObject({
+      code: 'QUOTATION_NOT_DRAFT',
+    });
+    expect(mailer.send).not.toHaveBeenCalled();
+    expect(repo.save).not.toHaveBeenCalled();
   });
 });

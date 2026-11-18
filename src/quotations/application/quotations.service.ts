@@ -620,7 +620,13 @@ export class QuotationsService {
     if (!quotation) {
       throw new QuotationNotFoundError(id);
     }
-    if (quotation.status === 'SENT' || quotation.status === 'EXPIRED') {
+    if (
+      quotation.status === 'SENT' ||
+      quotation.status === 'EXPIRED' ||
+      // quotation-sale-conversion / T1 — a converted quotation is the
+      // permanent source record of its sale.
+      quotation.status === 'CONVERTED_TO_SALE'
+    ) {
       throw new BusinessRuleViolationError(
         `Quotation is in ${quotation.status} status; only DRAFT and CANCELLED can be deleted`,
         'QUOTATION_CANNOT_DELETE',
@@ -953,6 +959,20 @@ export class QuotationsService {
     // Resend failure — we wrap the throw in a 502-mappable
     // ServiceUnavailableException so the FE can branch on the
     // HTTP status code without parsing the upstream error string.
+    // quotation-sale-conversion / T1 — the checks above ran on an
+    // unlocked read and the PDF render takes time: a conversion (or a
+    // cancel) may have committed meanwhile. Re-read the committed status
+    // right before the outbound email so a converted quotation never
+    // reaches the customer's inbox. The SENT write below is additionally
+    // guarded by the repository CAS (a converted row rejects the save).
+    const current = await this.quotationRepo.findById(id);
+    if (!current) {
+      throw new QuotationNotFoundError(id);
+    }
+    if (current.status !== 'DRAFT') {
+      throw new QuotationNotDraftError(current.status);
+    }
+
     let sentTo: string | null = null;
     if (sendEmail && customer?.email) {
       try {
@@ -1057,6 +1077,30 @@ export class QuotationsService {
         },
       ],
     };
+  }
+
+  /**
+   * quotation-sale-conversion / T1 — run the standard DRAFT recompute
+   * (reprice → promotions → per-line IVA snapshot) on a quotation built
+   * from a POS draft sale, BEFORE it is persisted. Exactly the pipeline
+   * every draft mutation uses, so the converted quotation is
+   * indistinguishable from one assembled through the item endpoints.
+   */
+  async recomputeConvertedDraft(draft: Quotation): Promise<void> {
+    if (draft.status !== 'DRAFT') {
+      throw new QuotationNotDraftError(draft.status);
+    }
+    await this.recomputePricingAndPromotions(draft);
+  }
+
+  /**
+   * quotation-sale-conversion / T1 — public wire mapping (customer +
+   * seller enrichment, lazy `effectiveStatus`) for the conversion
+   * service, identical to `findOne`'s response shape.
+   */
+  async toWireResponse(quotation: Quotation): Promise<QuotationResponseDto> {
+    const customer = await this.loadCustomerForWire(quotation.customerId);
+    return this.toResponse(quotation, customer);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1527,9 +1571,7 @@ export class QuotationsService {
    * Reads from the same tenant-scoped Prisma client the rest of the
    * service uses, so the cross-tenant guard is implicit.
    */
-  private async loadCustomerForWire(
-    customerId: string | null,
-  ): Promise<{
+  private async loadCustomerForWire(customerId: string | null): Promise<{
     id: string;
     firstName: string;
     lastName: string | null;
@@ -1558,9 +1600,7 @@ export class QuotationsService {
    * table by id and returns `name` when found, falling back to the
    * raw id so an email never renders an empty Vendedor row.
    */
-  private async loadSellerNameForWire(
-    sellerUserId: string,
-  ): Promise<string> {
+  private async loadSellerNameForWire(sellerUserId: string): Promise<string> {
     const prisma = this.tenantPrisma.getClient();
     const row = await prisma.user.findUnique({
       where: { id: sellerUserId },

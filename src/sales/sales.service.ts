@@ -15,6 +15,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
+import type { SaleItemProps } from './domain/sale-item.entity';
 import type { ShippingAddressSnapshot } from './domain/shipping-address-snapshot';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
@@ -1495,6 +1496,52 @@ export class SalesService {
   }
 
   /**
+   * quotation-sale-conversion / T1 (S4/S5) — open a POS DRAFT sale that is
+   * pre-filled from a quotation. Called by `QuotationSaleConversionService`
+   * INSIDE its ambient transaction (the save joins it), after the caller
+   * validated every line (catalog + stock) and locked the quotation row.
+   *
+   * The lines arrive already mapped to the quoted prices: sticky `custom`
+   * prices and, where the quotation had a discount, a MANUAL discount with
+   * the exact quoted cents. The standard recompute still runs so the draft
+   * preview equals what charge will compute: sticky / manual lines are
+   * never repriced or stripped, while automatic promotions that are active
+   * NOW may only ADD savings on lines without a quoted discount (vetoes
+   * copied from the quotation stay vetoed).
+   */
+  async openDraftFromQuotation(input: {
+    userId: string;
+    customerId: string | null;
+    sellerUserId: string | null;
+    globalPriceListId: string | null;
+    priceListExplicitlySet: boolean;
+    vetoedPromotionIds: ReadonlyArray<string>;
+    lines: ReadonlyArray<Omit<SaleItemProps, 'id' | 'saleId'>>;
+  }): Promise<Sale> {
+    const saleId = randomUUID();
+    const sale = Sale.create({ id: saleId, userId: input.userId });
+    if (input.customerId) {
+      sale.assignCustomer(input.customerId);
+    }
+    if (input.sellerUserId) {
+      sale.assignSeller(input.sellerUserId);
+    }
+    sale.setGlobalPriceList(
+      input.globalPriceListId,
+      input.priceListExplicitlySet,
+    );
+    for (const promotionId of input.vetoedPromotionIds) {
+      sale.addVetoedPromotion(promotionId);
+    }
+    for (const line of input.lines) {
+      sale.addItem({ ...line, id: randomUUID(), saleId });
+    }
+
+    await this.recomputePricingAndPromotions(sale);
+    return this.saleRepo.save(sale);
+  }
+
+  /**
    * Get all draft sales for a user.
    */
   async getUserDrafts(userId: string) {
@@ -1885,6 +1932,10 @@ export class SalesService {
       customer: sale.customer,
       cashier: sale.cashier,
       seller: sale.seller,
+      // quotation-sale-conversion / T1 (S7) — only on quote-born sales.
+      ...('quotationId' in sale && typeof sale.quotationId === 'string'
+        ? { quotationId: sale.quotationId }
+        : {}),
       shippingAddress: sale.shippingAddress ?? null,
       items: sale.items,
       // Custom Payment Methods (custom-payment-methods / WU2 — D10):

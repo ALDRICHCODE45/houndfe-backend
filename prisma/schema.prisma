@@ -244,11 +244,15 @@ enum PaymentMethodCategory {
 // Quotation lifecycle states. Distinct from Sale (which uses
 // DRAFT/CONFIRMED/CANCELED) because a quotation is a pre-sale pricing
 // document — it goes DRAFT → SENT → EXPIRED/CANCELLED, never CONFIRMED.
+// CONVERTED_TO_SALE (quotation-sale-conversion / T1) — terminal: a DRAFT or
+// SENT quotation became a POS DRAFT sale; `Quotation.convertedSaleId` links
+// it. Appended last so every existing row and default keeps its value.
 enum QuotationStatus {
   DRAFT
   SENT
   EXPIRED
   CANCELLED
+  CONVERTED_TO_SALE
 }
 
 // Reason captured when a quotation is cancelled. Mirrors SaleCancelReason
@@ -1534,6 +1538,9 @@ model Sale {
   promotionVetoes    SalePromotionVeto[]
   promotionOptIns    SalePromotionOptIn[]
   promotionUsages    PromotionUsage[]
+  // quotation-sale-conversion / T1 — back-relation of
+  // `Quotation.convertedSaleId` (the quotation this draft sale came from).
+  sourceQuotation    Quotation?            @relation("QuotationConvertedSale")
       // delivery-routes / WU1 — back-relation for DeliveryRouteStop.sale.
       // onDelete: Restrict on the FK side (design ADR-2) so a Sale cannot be
       // hard-deleted while referenced by any route stop.
@@ -2430,12 +2437,21 @@ model Quotation {
   manuallyEnded          Boolean                @default(false)
   customerNotes          String?                @db.VarChar(280)
   taxRate                Float                  @default(0.16)
+  // quotation-sale-conversion / T1 — the POS DRAFT sale created from this
+  // quotation. Unique: one quotation ↔ at most one sale. The status flip to
+  // CONVERTED_TO_SALE and this link are written in ONE row update (CAS), so
+  // the quotation row is the single concurrency anchor. SetNull: discarding
+  // the draft sale leaves the quotation CONVERTED_TO_SALE with a null link,
+  // which the conversion treats as convertible again.
+  convertedSaleId        String?                @unique
+  convertedAt            DateTime?
   tenantId               String
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
   // Relations
   tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  convertedSale   Sale?                     @relation("QuotationConvertedSale", fields: [convertedSaleId], references: [id], onDelete: SetNull)
   seller          User                      @relation("QuotationSeller", fields: [sellerUserId], references: [id], onDelete: Restrict)
   customer        Customer?                 @relation(fields: [customerId], references: [id], onDelete: SetNull)
   globalPriceList GlobalPriceList?          @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)

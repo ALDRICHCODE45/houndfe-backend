@@ -116,6 +116,12 @@ export interface SaleFromPersistenceProps {
    * choice against an unrelated customer change.
    */
   priceListExplicitlySet?: boolean;
+  /**
+   * quotation-sale-conversion / T1 — id of the quotation this draft was
+   * created from (back-relation of `Quotation.convertedSaleId`). Optional
+   * so every existing `fromPersistence` call site stays unchanged.
+   */
+  sourceQuotationId?: string | null;
 }
 
 /**
@@ -163,6 +169,9 @@ export class Sale {
   private _globalPriceListId: string | null;
   private _priceListExplicitlySet: boolean;
   private _deliveryStatus: SaleDeliveryStatus;
+  // quotation-sale-conversion / T1 — read-only provenance, hydrated by the
+  // repository read paths that load the `sourceQuotation` back-relation.
+  private _sourceQuotationId: string | null = null;
 
   private constructor(
     public readonly id: string,
@@ -246,7 +255,7 @@ export class Sale {
       SaleItem.fromPersistence(itemData),
     );
 
-    return new Sale(
+    const sale = new Sale(
       props.id,
       props.userId,
       props.status,
@@ -283,6 +292,13 @@ export class Sale {
       props.priceListExplicitlySet ?? false,
       props.shippingAddressSnapshot ?? null,
     );
+    sale._sourceQuotationId = props.sourceQuotationId ?? null;
+    return sale;
+  }
+
+  /** quotation-sale-conversion / T1 — the quotation this sale came from. */
+  get sourceQuotationId(): string | null {
+    return this._sourceQuotationId;
   }
 
   confirm(input: ConfirmSaleInput): Sale {
@@ -1042,6 +1058,12 @@ export class Sale {
      * `assignCustomer` and carries no FE-contract meaning.
      */
     globalPriceListId?: string | null;
+    /**
+     * quotation-sale-conversion / T1 (S7) — present ONLY when the sale was
+     * created from a quotation (absent otherwise, so every existing
+     * response keeps its exact shape).
+     */
+    quotationId?: string;
   } {
     const base = {
       id: this.id,
@@ -1070,6 +1092,9 @@ export class Sale {
       // WU1 — exposed on ALL surfaces (draft, confirmed, canceled). The
       // binding is set on DRAFT and travels forward with the sale.
       globalPriceListId: this._globalPriceListId,
+      ...(this._sourceQuotationId !== null
+        ? { quotationId: this._sourceQuotationId }
+        : {}),
     };
     // For DRAFT sales, surface live preview totals on the response. The
     // persisted `totalCents` is 0 for drafts (subtotalCents / discountCents /

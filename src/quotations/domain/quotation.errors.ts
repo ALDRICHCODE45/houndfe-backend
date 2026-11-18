@@ -85,3 +85,104 @@ export class QuotationSellerNotFoundError extends BusinessRuleViolationError {
     super('SELLER_NOT_FOUND', 'SELLER_NOT_FOUND');
   }
 }
+
+// ── quotation-sale-conversion / T1 ──────────────────────────────────
+//
+// Every conversion rejection is a `BusinessRuleViolationError` with a
+// stable `code`. None of the codes below has a dedicated mapping in the
+// shared `DomainExceptionFilter`, so they surface as HTTP 422 with the
+// `details` payload spread into the response body (D7).
+
+/** Quotation is EXPIRED (persisted, or lazily past `expiresAt`). */
+export class QuotationExpiredError extends BusinessRuleViolationError {
+  constructor(id: string) {
+    super(
+      `Quotation ${id} is expired; renew it before converting`,
+      'QUOTATION_EXPIRED',
+    );
+  }
+}
+
+/** Quotation is CANCELLED (terminal). */
+export class QuotationCancelledError extends BusinessRuleViolationError {
+  constructor(id: string) {
+    super(`Quotation ${id} is cancelled`, 'QUOTATION_CANCELLED');
+  }
+}
+
+/**
+ * Quotation already became a sale. `details.saleId` carries the existing
+ * sale so the caller can open it instead of converting again.
+ */
+export class QuotationAlreadyConvertedError extends BusinessRuleViolationError {
+  constructor(id: string, saleId: string | null) {
+    super(
+      `Quotation ${id} was already converted to a sale`,
+      'QUOTATION_ALREADY_CONVERTED',
+      { saleId },
+    );
+  }
+}
+
+/** Why a single line cannot be carried into a draft sale. */
+export type ConversionLineProblemReason =
+  | 'PRODUCT_NOT_FOUND'
+  | 'VARIANT_NOT_FOUND'
+  | 'PRODUCT_NOT_SELLABLE'
+  | 'INSUFFICIENT_STOCK';
+
+export interface ConversionLineProblem {
+  /** Quotation item id (quotation → sale) or sale item id (sale → quotation). */
+  lineId: string;
+  productId: string;
+  variantId: string | null;
+  productName: string;
+  variantName: string | null;
+  reason: ConversionLineProblemReason;
+  requestedQuantity: number;
+  /** Sellable stock when `reason === 'INSUFFICIENT_STOCK'`, else null. */
+  availableQuantity: number | null;
+}
+
+/** One or more quotation lines cannot become sale lines (S5). */
+export class QuotationLinesUnavailableError extends BusinessRuleViolationError {
+  constructor(lines: ConversionLineProblem[]) {
+    super(
+      `${lines.length} quotation line(s) cannot be converted to a sale`,
+      'QUOTATION_LINES_UNAVAILABLE',
+      { lines },
+    );
+  }
+}
+
+/** One or more sale lines cannot be priced on a quotation. */
+export class SaleLinesUnavailableError extends BusinessRuleViolationError {
+  constructor(lines: ConversionLineProblem[]) {
+    super(
+      `${lines.length} sale line(s) cannot be copied to a quotation`,
+      'SALE_LINES_UNAVAILABLE',
+      { lines },
+    );
+  }
+}
+
+/**
+ * The POS draft sale cannot be discarded into a quotation (S3). Codes:
+ *   - `SALE_HAS_NO_ITEMS`        — nothing to quote.
+ *   - `SALE_HAS_PAYMENTS`        — payments / refunds / receipt evidence exist.
+ *   - `SALE_HAS_STOCK_MOVEMENTS` — inventory was already touched.
+ *   - `SALE_NOT_DISCARDABLE`     — other dependents (delivery route stop,
+ *                                  promotion capacity usage).
+ */
+export class SaleNotDiscardableError extends BusinessRuleViolationError {
+  constructor(
+    code:
+      | 'SALE_HAS_NO_ITEMS'
+      | 'SALE_HAS_PAYMENTS'
+      | 'SALE_HAS_STOCK_MOVEMENTS'
+      | 'SALE_NOT_DISCARDABLE',
+    saleId: string,
+  ) {
+    super(`Sale ${saleId} cannot be converted to a quotation: ${code}`, code);
+  }
+}

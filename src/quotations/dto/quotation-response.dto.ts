@@ -10,7 +10,7 @@
  *
  * Status semantics:
  *   - `status`            — the PERSISTED status (DRAFT | SENT | EXPIRED
- *                            | CANCELLED).
+ *                            | CANCELLED | CONVERTED_TO_SALE).
  *   - `effectiveStatus`   — the lazy-resolved status. For SENT drafts
  *                            whose `expiresAt` is in the past this is
  *                            'EXPIRED'; identical to `status` otherwise.
@@ -123,7 +123,12 @@ export class QuotationResponseDto {
    * The email is required for the `send()` flow (a missing email is
    * rejected with 422 `QUOTATION_CUSTOMER_HAS_NO_EMAIL`).
    */
-  customer: { id: string; firstName: string; lastName: string | null; email: string | null } | null;
+  customer: {
+    id: string;
+    firstName: string;
+    lastName: string | null;
+    email: string | null;
+  } | null;
   /**
    * Seller identity snapshot (id + display name) on the wire. Mirrors
    * `customer` so the FE can render the Vendedor chip / PDF header
@@ -132,6 +137,15 @@ export class QuotationResponseDto {
    * effectively always populated — kept nullable for forward-compat.
    */
   seller: { id: string; name: string } | null;
+  /**
+   * quotation-sale-conversion / T1 (S7) — the POS DRAFT sale this
+   * quotation became (`status === 'CONVERTED_TO_SALE'`). Null on every
+   * other quotation, and on a converted quotation whose draft sale was
+   * later discarded (it can then be converted again).
+   */
+  saleId: string | null;
+  /** When the conversion happened. Null unless converted. */
+  convertedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
