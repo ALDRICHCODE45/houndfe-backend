@@ -10119,6 +10119,66 @@ describe('SalesService', () => {
       const saved = saleRepo.saveDraftItems.mock.calls.at(-1)?.[0] as Sale;
       expect(saved.optedInManualPromotionIds).toContain('promo-m-1');
     });
+
+    // order-promo-base-net-of-manual (S2) — the engine input carries the
+    // whole-line manual discount so the ORDER base is net of it.
+    it('S2: buildPosEvalInput passes the whole-line manual discount (manualDiscountCents) and 0 on lines without one', async () => {
+      const saleId = 'sale-s2-manual-base';
+      const sale = Sale.create({ id: saleId, userId: 'user-1' });
+      sale.addItem({
+        id: 'item-manual',
+        saleId,
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'P1',
+        variantName: null,
+        quantity: 2,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      sale.applyItemDiscount('item-manual', {
+        type: 'amount',
+        amountCents: 150,
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-other',
+        productName: 'Other',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 500,
+        imageUrl: null,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      posEvaluateUseCase.evaluate.mockResolvedValue({
+        lines: [],
+        order: null,
+        availableManualPromotions: [],
+        targetableManualPromotionIds: [],
+      });
+
+      await service.addItem(saleId, 'user-1', {
+        productId: 'prod-other',
+        variantId: null,
+        quantity: 1,
+      });
+
+      const input = posEvaluateUseCase.evaluate.mock.calls[0][0];
+      const manual = input.lines.find((l) => l.itemId === 'item-manual');
+      const plain = input.lines.find((l) => l.itemId !== 'item-manual');
+      expect(manual).toMatchObject({
+        effectiveUnitPriceCents: 1000,
+        hasManualDiscount: true,
+        manualDiscountCents: 300,
+      });
+      expect(plain).toMatchObject({
+        hasManualDiscount: false,
+        manualDiscountCents: 0,
+      });
+    });
   });
 
   // ============================================================================

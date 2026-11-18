@@ -9,8 +9,10 @@
  *   - converted sale opens at the quoted 620.10 exactly (order promotion
  *     suppressed); re-enabling the order promotion must give 558.09, not
  *     551.20 (order discount computed on the gross 689.00).
- *   - a normal sale with a cashier MANUAL line discount keeps today's
- *     behavior (the order promotion is computed on the gross base).
+ *   - order-promo-base-net-of-manual (S2): a normal sale with a cashier
+ *     MANUAL line discount computes the order promotion on the subtotal
+ *     net of that manual discount too (558.09, no longer 551.20), and an
+ *     order-promotion minimum purchase is checked against that net base.
  *
  * Every test owns a fresh tenant (no truncation of shared rows).
  */
@@ -40,7 +42,8 @@ const ITEM_CENTS = 68_900;
 const LINE_DISCOUNT_CENTS = 6_890; // 10% of 689.00
 const QUOTED_TOTAL = ITEM_CENTS - LINE_DISCOUNT_CENTS; // 620.10
 const NORMAL_TOTAL_WITH_BOTH = 55_809; // 620.10 − 62.01
-const MANUAL_LINE_GROSS_ORDER_TOTAL = 55_120; // 620.10 − 68.90 (today)
+// S2 — 689.00 − 68.90 (manual 10%) = 620.10; − 62.01 (order 10%) = 558.09.
+const MANUAL_LINE_NET_ORDER_TOTAL = 55_809;
 
 describeDb(
   'Converted sale: order promotion base after the quoted line promotion (PostgreSQL, real engine)',
@@ -112,7 +115,7 @@ describeDb(
       await db.$disconnect();
     });
 
-    async function fixture() {
+    async function fixture(options: { orderMinPurchaseCents?: number } = {}) {
       const tenantId = randomUUID();
       const cashierId = randomUUID();
       ownedTenants.push(tenantId);
@@ -163,13 +166,14 @@ describeDb(
           method: 'AUTOMATIC',
           discountType: 'PERCENTAGE',
           discountValue: 10,
+          minPurchaseAmountCents: options.orderMinPurchaseCents ?? null,
         },
       });
       const run = <T>(work: () => Promise<T>): Promise<T> =>
         cls.runWith({ tenantId, userId: cashierId, isSuperAdmin: false }, work);
 
-      /** POS draft with the item at a cashier price of $689.00, no discount. */
-      const draftSale = async () => {
+      /** POS draft with `lines` × the item at a cashier price of $689.00, no discount. */
+      const draftSale = async (lines = 1) => {
         const saleId = randomUUID();
         await db.sale.create({
           data: {
@@ -178,17 +182,15 @@ describeDb(
             userId: cashierId,
             status: 'DRAFT',
             items: {
-              create: [
-                {
-                  tenantId,
-                  productId: product.id,
-                  productName: product.name,
-                  quantity: 1,
-                  unitPriceCents: ITEM_CENTS,
-                  priceSource: 'CUSTOM',
-                  customPriceCents: ITEM_CENTS,
-                },
-              ],
+              create: Array.from({ length: lines }, () => ({
+                tenantId,
+                productId: product.id,
+                productName: product.name,
+                quantity: 1,
+                unitPriceCents: ITEM_CENTS,
+                priceSource: 'CUSTOM' as const,
+                customPriceCents: ITEM_CENTS,
+              })),
             },
           },
         });
@@ -249,12 +251,13 @@ describeDb(
       expect(reEnabled.totalCents).toBe(NORMAL_TOTAL_WITH_BOTH);
     });
 
-    it('normal sale with a cashier MANUAL 10% line discount + order promotion keeps today behavior (order base is the gross subtotal)', async () => {
-      const f = await fixture();
-      const saleId = await f.draftSale();
-      const draft = await f.run(() => saleRepo.findById(saleId));
-      const itemId = draft!.items[0].id;
-      await f.run(() =>
+    /** Applies a cashier MANUAL 10% discount to `itemId`. */
+    const manualTenPercent = (
+      f: Awaited<ReturnType<typeof fixture>>,
+      saleId: string,
+      itemId: string,
+    ) =>
+      f.run(() =>
         sales.applyItemDiscount(
           saleId,
           itemId,
@@ -262,6 +265,13 @@ describeDb(
           f.cashierId,
         ),
       );
+
+    it('S2 — normal sale with a cashier MANUAL 10% line discount + order promotion 10% totals 558.09 (order base net of the manual discount)', async () => {
+      const f = await fixture();
+      const saleId = await f.draftSale();
+      const draft = await f.run(() => saleRepo.findById(saleId));
+      const itemId = draft!.items[0].id;
+      await manualTenPercent(f, saleId, itemId);
       const sale = await f.run(() =>
         sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
       );
@@ -270,7 +280,47 @@ describeDb(
         unitPriceCents: QUOTED_TOTAL,
         promotionId: null,
       });
-      expect(sale.totalCents).toBe(MANUAL_LINE_GROSS_ORDER_TOTAL);
+      expect(sale.totalCents).toBe(MANUAL_LINE_NET_ORDER_TOTAL);
+      const reread = await f.run(() => saleRepo.findById(saleId));
+      expect(reread?.appliedOrderPromotion?.discountAmountCents).toBe(6_201);
+    });
+
+    it('S2 — an order-promotion minimum just above the subtotal net of the manual discount no longer applies', async () => {
+      // Gross 689.00 >= 650.00, but net of the manual 10% it is 620.10.
+      const f = await fixture({ orderMinPurchaseCents: 65_000 });
+      const saleId = await f.draftSale();
+      const draft = await f.run(() => saleRepo.findById(saleId));
+      await manualTenPercent(f, saleId, draft!.items[0].id);
+      const sale = await f.run(() =>
+        sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
+      );
+      expect(sale.totalCents).toBe(QUOTED_TOTAL);
+      const reread = await f.run(() => saleRepo.findById(saleId));
+      expect(reread?.appliedOrderPromotion).toBeNull();
+    });
+
+    it('S2 — a manual-discount line + a line-promotion line + order promotion: order base net of both', async () => {
+      const f = await fixture();
+      const saleId = await f.draftSale(2);
+      const draft = await f.run(() => saleRepo.findById(saleId));
+      const [manualItem, promoItem] = draft!.items;
+      await manualTenPercent(f, saleId, manualItem.id);
+      const sale = await f.run(() =>
+        sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
+      );
+      expect(sale.items.find((i) => i.id === manualItem.id)).toMatchObject({
+        unitPriceCents: QUOTED_TOTAL,
+        promotionId: null,
+      });
+      expect(sale.items.find((i) => i.id === promoItem.id)).toMatchObject({
+        unitPriceCents: QUOTED_TOTAL,
+        promotionId: f.linePromotionId,
+      });
+      // 620.10 + 620.10 = 1240.20; 10% = 124.02; total 1116.18
+      // (the old gross-of-manual base 1309.10 gave 130.91 → 1109.29).
+      expect(sale.totalCents).toBe(111_618);
+      const reread = await f.run(() => saleRepo.findById(saleId));
+      expect(reread?.appliedOrderPromotion?.discountAmountCents).toBe(12_402);
     });
   },
 );

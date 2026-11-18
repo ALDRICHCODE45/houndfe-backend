@@ -686,6 +686,8 @@ export class SalesService {
    *         `resolvePriceListGlobalIds` map.
    *       `hasManualDiscount = item.discountType !== null
    *         && item.promotionId === null`  ← auto-promo skips this line.
+   *       `manualDiscountCents` = whole-line manual reduction ← the ORDER
+   *         promotion base is net of it (order-promo-base-net-of-manual).
    *  4. Call the engine (`posEvaluatePromotions.evaluate(input)`).
    *  5. Apply each engine `lines[]` result via `item.applyDiscount({...,
    *     promotionId})` or `applyBuyXGetYReward({...,rewardKind})`. Engine
@@ -1102,13 +1104,16 @@ export class SalesService {
       customerId: sale.customerId,
       lines: sale.items.map((item) => {
         const resolved = productCategoryBrandMap.get(item.productId);
+        const effectiveUnitPriceCents =
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
+        const hasManualDiscount =
+          item.discountType !== null && item.promotionId === null;
         return {
           itemId: item.id,
           productId: item.productId,
           variantId: item.variantId,
           quantity: item.quantity,
-          effectiveUnitPriceCents:
-            item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
+          effectiveUnitPriceCents,
           appliedPriceListId: item.appliedPriceListId,
           appliedGlobalPriceListId:
             item.appliedPriceListId != null
@@ -1122,8 +1127,17 @@ export class SalesService {
           // "no match" semantics the spec demands.
           categoryId: resolved?.categoryId ?? null,
           brandId: resolved?.brandId ?? null,
-          hasManualDiscount:
-            item.discountType !== null && item.promotionId === null,
+          hasManualDiscount,
+          // order-promo-base-net-of-manual (S2) — the ORDER promotion base
+          // is net of manual line discounts (per-unit manual discounts bake
+          // the reduction into `unitPriceCents`; a global manual discount is
+          // stored as a manual discount on each line, so it is covered too).
+          manualDiscountCents: hasManualDiscount
+            ? Math.max(
+                0,
+                (effectiveUnitPriceCents - item.unitPriceCents) * item.quantity,
+              )
+            : 0,
         };
       }),
       vetoedPromotionIds: sale.vetoedPromotionIds,

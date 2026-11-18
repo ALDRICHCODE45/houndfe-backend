@@ -46,6 +46,10 @@ Two kinds of promotions, driven by each promotion's `method` field:
 3. **The seller's manual free-form discount wins.** If a line already has a manual
    free-form discount (the existing per-line discount feature), the automatic promo
    does **not** touch that line. Show the manual discount as-is.
+   An order-level promotion is still computed on the price **after** that manual
+   discount (and after every line promotion), and its minimum purchase is checked
+   against the subtotal net of manual discounts. Example: $689.00 with a 10% manual
+   discount + a 10% order promotion = $620.10 − $62.01 = $558.09.
 4. **Removing an auto-promo is per-draft and sticky.** When the seller removes an
    auto-applied promo (veto), it stays off for that draft even as the cart changes.
    It only comes back if the seller explicitly re-applies it.

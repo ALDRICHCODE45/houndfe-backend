@@ -55,6 +55,16 @@ export interface PosEvalLine {
   brandId: string | null;
   /** True when the seller applied a free-form manual discount — auto promo skips. */
   hasManualDiscount: boolean;
+  /**
+   * order-promo-base-net-of-manual (S2) — whole-line cents of the seller's
+   * free-form manual discount (`(effectiveUnitPriceCents − net unit price)
+   * × quantity`). Read ONLY when `hasManualDiscount` is true; omitted or
+   * `0` means no manual reduction. The ORDER_DISCOUNT base and its
+   * `minPurchaseAmountCents` gate are computed net of it, so an order
+   * promotion applies on the price the customer actually pays after every
+   * line discount (engine promotions AND manual).
+   */
+  manualDiscountCents?: number;
 }
 
 export interface PosEvalInput {
