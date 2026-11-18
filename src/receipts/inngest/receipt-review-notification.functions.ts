@@ -99,6 +99,7 @@ export function buildReceiptReviewNotificationFunctions(
           extractedAmountCents: payload.extractedAmountCents,
           debtCents: payload.debtCents,
           mismatchFlagged: payload.mismatchFlagged,
+          destinationMismatch: payload.destinationCheck === 'mismatch',
           appBaseUrl: input.appBaseUrl,
         }) as ReactElement,
       );

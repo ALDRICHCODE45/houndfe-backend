@@ -1320,6 +1320,8 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         },
         extracted: { amountCents: 5_000 },
         mismatch: { kind: 'AMOUNT' },
+        // Rows without a persisted destination check read as 'unknown'.
+        destinationCheck: 'unknown',
         resolution: null,
       });
       expect(detail.body.zoneImpact).toBeUndefined();
@@ -1354,6 +1356,34 @@ describeIfDb('chatbot request staff reads (PostgreSQL)', () => {
         file: null,
         extracted: null,
         mismatch: null,
+        destinationCheck: 'unknown',
+      });
+    });
+
+    it('TRANSFER_RECEIPT: exposes the destinationCheck persisted at upload and the extracted destination fields', async () => {
+      const receipt = await receiptRequest({
+        extracted: {
+          amountCents: 25_000,
+          destinationBank: 'BBVA MEXICO',
+          destinationName: 'Abril Alejandra Vazquez Ramos',
+          destinationAccountLast4: '9616',
+        },
+        mismatch: {
+          debtCents: 15_000,
+          extractedDiffCents: 10_000,
+          flagged: true,
+          destinationCheck: 'mismatch',
+        },
+      });
+      const detail = await get(`/chatbot-requests/${receipt.id}`);
+      expect(detail.body.decision).toMatchObject({
+        destinationCheck: 'mismatch',
+        extracted: {
+          destinationBank: 'BBVA MEXICO',
+          destinationName: 'Abril Alejandra Vazquez Ramos',
+          destinationAccountLast4: '9616',
+        },
+        mismatch: { flagged: true, destinationCheck: 'mismatch' },
       });
     });
 

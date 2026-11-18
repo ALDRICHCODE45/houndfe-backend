@@ -165,6 +165,27 @@ describe('receipt-review-requested-email Inngest function', () => {
     expect(mail.html).not.toContain('No coincide con el saldo');
   });
 
+  it('warns about the destination only when destinationCheck is mismatch (S5)', async () => {
+    const warning =
+      'El destinatario del comprobante no coincide con la cuenta del negocio';
+    const mismatch = setup();
+    await mismatch.run(
+      payload({ mismatchFlagged: false, destinationCheck: 'mismatch' }),
+    );
+    const flagged = mismatch.send.mock.calls[0][0].html;
+    expect(flagged).toContain(warning);
+    expect(flagged).not.toContain('No coincide con el saldo');
+
+    for (const check of ['match', 'unknown', undefined] as const) {
+      const other = setup();
+      await other.run(payload({ destinationCheck: check }));
+      const html = other.send.mock.calls[0][0].html;
+      expect(html).not.toContain(warning);
+      // The amount warning is independent of the destination check.
+      expect(html).toContain('No coincide con el saldo');
+    }
+  });
+
   it.each([
     [
       'master-disabled',

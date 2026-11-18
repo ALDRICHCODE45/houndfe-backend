@@ -17,6 +17,7 @@ import {
 } from '../domain/sale.repository';
 import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { readDestinationCheck } from '../../receipts/domain/receipt-destination-check';
 import type { ConfirmReceiptDto } from './dto/confirm-receipt.dto';
 import type { RejectReceiptDto } from './dto/reject-receipt.dto';
 import type {
@@ -336,6 +337,7 @@ function mapQueueItem(receipt: ReceiptReviewRecord): ReceiptReviewQueueItemDto {
     file: mapFile(receipt),
     extracted: receipt.extracted,
     mismatch: receipt.mismatch,
+    destinationCheck: readDestinationCheck(receipt.mismatch),
     createdAt: receipt.createdAt,
   };
 }

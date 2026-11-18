@@ -7,6 +7,12 @@ export type ReceiptExtracted = {
   reference?: string;
   bank?: string;
   confidence?: number;
+  /** Destination (N18): shown to staff only; the bank never decides. */
+  destinationBank?: string;
+  destinationName?: string;
+  /** Last 4 digits of the destination CLABE/account/card, as printed. */
+  destinationAccountLast4?: string;
+  originName?: string;
 };
 
 export type ReceiptUploadFields = {
@@ -28,10 +34,25 @@ const ALLOWED_EXTRACTED = new Set([
   'reference',
   'bank',
   'confidence',
+  'destinationBank',
+  'destinationName',
+  'destinationAccountLast4',
+  'originName',
 ]);
 const EXTRACTED_MAX_CHARS = 4096;
 const REFERENCE_MAX_CHARS = 120;
 const BANK_MAX_CHARS = 80;
+const NAME_MAX_CHARS = 120;
+/** Max length per free-text extracted key (`date` is checked as ISO). */
+const EXTRACTED_TEXT_MAX: Record<string, number> = {
+  date: REFERENCE_MAX_CHARS,
+  reference: REFERENCE_MAX_CHARS,
+  bank: BANK_MAX_CHARS,
+  destinationBank: BANK_MAX_CHARS,
+  destinationName: NAME_MAX_CHARS,
+  originName: NAME_MAX_CHARS,
+};
+const LAST4 = /^\d{4}$/;
 // Date-only or full ISO-8601 timestamp; `Date.parse` alone accepts too much.
 const ISO_DATE =
   /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
@@ -91,22 +112,32 @@ function parseExtracted(source: string): ReceiptExtracted {
         invalidExtracted('extracted.confidence must be a number in [0, 1]');
       }
       extracted.confidence = value;
+    } else if (key === 'destinationAccountLast4') {
+      const trimmed = typeof value === 'string' ? value.trim() : '';
+      if (!LAST4.test(trimmed)) {
+        invalidExtracted(
+          'extracted.destinationAccountLast4 must be a string of exactly 4 digits',
+        );
+      }
+      extracted.destinationAccountLast4 = trimmed;
     } else {
-      const max = key === 'bank' ? BANK_MAX_CHARS : REFERENCE_MAX_CHARS;
+      const max = EXTRACTED_TEXT_MAX[key];
       const trimmed = typeof value === 'string' ? value.trim() : '';
       if (trimmed.length === 0 || trimmed.length > max) {
         invalidExtracted(`extracted.${key} must be a non-empty string`);
       }
-      if (key === 'date') {
-        if (!isIsoDate(trimmed)) {
-          invalidExtracted('extracted.date must be an ISO-8601 date');
-        }
-        extracted.date = trimmed;
-      } else if (key === 'bank') {
-        extracted.bank = trimmed;
-      } else {
-        extracted.reference = trimmed;
+      if (key === 'date' && !isIsoDate(trimmed)) {
+        invalidExtracted('extracted.date must be an ISO-8601 date');
       }
+      extracted[
+        key as
+          | 'date'
+          | 'reference'
+          | 'bank'
+          | 'destinationBank'
+          | 'destinationName'
+          | 'originName'
+      ] = trimmed;
     }
   }
   return extracted;

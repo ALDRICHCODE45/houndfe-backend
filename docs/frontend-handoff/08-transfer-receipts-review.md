@@ -79,8 +79,9 @@ Legacy receipts (attached by URL before this change) keep their real `mediaUrl`,
 | `extracted` | object \| `null` | Chatbot vision prefill: `{ amountCents?, date?, reference?, bank?, confidence? }` (every key optional; `confidence` 0..1). A hint, never a decision. |
 | `mismatch` | object \| `null` | `{ debtCents, declaredDiffCents?, extractedDiffCents?, flagged }`, computed at upload against the sale debt **at that moment**. Diff = amount − debt (negative = partial, positive = overpaid). A diff is present only when that amount exists. `null` for receipts older than this change. |
 | `createdAt` | ISO date | Upload time. |
+| `destinationCheck` | `"match"` \| `"mismatch"` \| `"unknown"` | N18, added later: whether the receipt destination is an active business account. See [22-receipt-destination-check.md](22-receipt-destination-check.md). |
 
-UI suggestion: prefill the confirm amount with `extracted.amountCents`, else the declared amount (when `declaredAmountProvided`), else the debt. Show a warning when `mismatch.flagged`. The confirm body is unchanged: the reviewer still types the real amount.
+UI suggestion: prefill the confirm amount with `extracted.amountCents`, else the declared amount (when `declaredAmountProvided`), else the debt. Show a warning when `mismatch.flagged`. Show the destination warning when `destinationCheck` is `"mismatch"`. The confirm body is unchanged: the reviewer still types the real amount.
 
 ## 4. `GET /sales/receipts/pending` — tenant-wide worklist (new)
 

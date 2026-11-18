@@ -7,8 +7,19 @@ import {
   assertReceiptFile,
   type ReceiptMimeType,
 } from '../domain/receipt-file';
-import { parseReceiptUploadFields } from '../domain/receipt-fields';
-import { computeReceiptMismatch } from '../domain/receipt-mismatch';
+import {
+  parseReceiptUploadFields,
+  type ReceiptExtracted,
+} from '../domain/receipt-fields';
+import {
+  computeReceiptMismatch,
+  type ReceiptMismatch,
+} from '../domain/receipt-mismatch';
+import {
+  computeDestinationCheck,
+  hasDestinationEvidence,
+  readDestinationCheck,
+} from '../domain/receipt-destination-check';
 import {
   RECEIPT_PREVIEW_RASTERIZER,
   RECEIPT_STORAGE,
@@ -53,6 +64,10 @@ const EXTENSIONS: Record<ReceiptMimeType, string> = {
 type PayableSale = {
   debtCents: number;
   folio: string | null;
+};
+
+type ReceiptCreateData = Prisma.ReceiptEvidenceUncheckedCreateInput & {
+  tenantId: string;
 };
 
 type StoredReceipt = {
@@ -224,9 +239,13 @@ export class ReceiptUploadService {
    * Inserts the receipt and, when the tenant enabled RECEIPT_REVIEW_REQUESTED,
    * the staff-email outbox row in the same transaction. A unique violation
    * rolls both back, so a lost concurrent race never emails twice.
+   *
+   * When the extraction carries a destination last4 or name, the destination
+   * check (N18) is computed here, once, against the tenant's active payment
+   * accounts read in the same transaction, and stored in `mismatch`.
    */
   private createWithReviewRequest(
-    data: Prisma.ReceiptEvidenceUncheckedCreateInput & {
+    input: Prisma.ReceiptEvidenceUncheckedCreateInput & {
       id: string;
       tenantId: string;
     },
@@ -234,6 +253,7 @@ export class ReceiptUploadService {
   ) {
     return this.tenantPrisma.runInTransaction(async () => {
       const prisma = this.tenantPrisma.getClient();
+      const data = await this.withDestinationCheck(input);
       const row = await prisma.receiptEvidence.create({ data });
       await this.wrapper?.wrapReceipt({ id: row.id, saleId: data.saleId });
 
@@ -243,7 +263,7 @@ export class ReceiptUploadService {
         config.enabledActions.includes('RECEIPT_REVIEW_REQUESTED')
       ) {
         const extracted = data.extracted as { amountCents?: number } | null;
-        const mismatch = data.mismatch as { flagged?: boolean } | null;
+        const mismatch = data.mismatch as ReceiptMismatch | null;
         const payload: ReceiptReviewRequestedPayload = {
           tenantId: data.tenantId,
           receiptId: row.id,
@@ -253,6 +273,7 @@ export class ReceiptUploadService {
           extractedAmountCents: extracted?.amountCents ?? null,
           debtCents: sale.debtCents,
           mismatchFlagged: mismatch?.flagged ?? false,
+          destinationCheck: readDestinationCheck(mismatch),
           mimeType: data.mimeType ?? null,
         };
         await this.outboxWriter.publish(
@@ -266,6 +287,30 @@ export class ReceiptUploadService {
       }
       return row;
     });
+  }
+
+  /** Adds `mismatch.destinationCheck` only when there is evidence to check. */
+  private async withDestinationCheck<T extends ReceiptCreateData>(
+    data: T,
+  ): Promise<T> {
+    const extracted =
+      data.extracted && typeof data.extracted === 'object'
+        ? (data.extracted as ReceiptExtracted)
+        : null;
+    const mismatch = data.mismatch as ReceiptMismatch | undefined;
+    if (!mismatch || !hasDestinationEvidence(extracted)) return data;
+    const accounts = await this.tenantPrisma
+      .getClient()
+      .paymentDetail.findMany({
+        where: { tenantId: data.tenantId, isActive: true },
+        select: { beneficiary: true, clabe: true, accountNumber: true },
+      });
+    const destinationCheck = computeDestinationCheck({
+      destinationAccountLast4: extracted?.destinationAccountLast4,
+      destinationName: extracted?.destinationName,
+      accounts,
+    });
+    return { ...data, mismatch: { ...mismatch, destinationCheck } };
   }
 
   private findByKey(

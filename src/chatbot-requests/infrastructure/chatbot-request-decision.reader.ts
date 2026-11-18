@@ -5,6 +5,7 @@
  * the staff-visible `resolution` goes is decided by the service (it comes from
  * the request row, the same for every subtype).
  */
+import { readDestinationCheck } from '../../receipts/domain/receipt-destination-check';
 import type { ZoneImpactView } from '../application/chatbot-request-commands.service';
 import type { ChatbotRequestSubtype } from '../domain/chatbot-request.commands';
 import { readZoneImpact, type TenantClient } from './chatbot-request-writes';
@@ -146,6 +147,8 @@ export async function readDecision(
           : null,
         extracted: receipt.extracted ?? null,
         mismatch: receipt.mismatch ?? null,
+        // N18 additive key, persisted at upload; older rows read 'unknown'.
+        destinationCheck: readDestinationCheck(receipt.mismatch),
       },
       zoneImpact: null,
     };

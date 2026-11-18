@@ -49,6 +49,8 @@ export interface ReceiptReviewRequestedEmailProps {
   extractedAmountCents: number | null;
   debtCents: number;
   mismatchFlagged: boolean;
+  /** N18: the receipt destination is not an active business account. */
+  destinationMismatch?: boolean;
   appBaseUrl?: string;
 }
 
@@ -90,6 +92,7 @@ export function ReceiptReviewRequestedEmail({
   extractedAmountCents,
   debtCents,
   mismatchFlagged,
+  destinationMismatch = false,
   appBaseUrl,
 }: ReceiptReviewRequestedEmailProps) {
   const subject = composeSubject(saleFolio);
@@ -198,6 +201,19 @@ export function ReceiptReviewRequestedEmail({
                 >
                   No coincide con el saldo: verifica el monto antes de
                   confirmar.
+                </Text>
+              ) : null}
+              {destinationMismatch ? (
+                <Text
+                  style={{
+                    color: BRAND.alert,
+                    fontSize: '14px',
+                    fontWeight: 700,
+                    margin: mismatchFlagged ? '8px 0 0' : 0,
+                  }}
+                >
+                  ⚠ El destinatario del comprobante no coincide con la cuenta
+                  del negocio: verifica que el pago llegó antes de confirmar.
                 </Text>
               ) : null}
             </Section>
