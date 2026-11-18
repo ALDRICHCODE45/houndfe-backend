@@ -575,13 +575,17 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     //    promotion discounts AND (order-promo-base-net-of-manual, S2) the
     //    seller's manual line discounts. The two never overlap — engine
     //    line passes skip `hasManualDiscount` lines.
+    //    T2 — WHOLE-line cents: per-unit results (PRODUCT_DISCOUNT) are
+    //    multiplied by quantity; BXGY / ADVANCED already carry the
+    //    whole-line reward. (`computeAppliedDiscountCents` alone is
+    //    per-unit for PRODUCT_DISCOUNT and under-netted qty > 1 lines.)
     const lineDiscountByItemId = new Map<string, number>();
     for (const result of lineResults) {
       const line = input.lines.find((l) => l.itemId === result.itemId);
       if (!line) continue;
       lineDiscountByItemId.set(
         result.itemId,
-        this.computeAppliedDiscountCents(line, result),
+        this.existingLineResultTotalCents(line, result),
       );
     }
     const postLineSubtotalCents = input.lines.reduce(
@@ -1673,10 +1677,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
   }
 
   /**
-   * Compute the per-line discount the entity-side `applyDiscount`
-   * would produce given the emitted result. Used to compute the
-   * post-line-discount subtotal feeding ORDER_DISCOUNT best-wins.
-   * Matches the math used in `pickBestPerLine`.
+   * Compute the discount the entity-side `applyDiscount` would produce
+   * given the emitted result: PER-UNIT for PRODUCT_DISCOUNT, whole-line
+   * for BXGY / ADVANCED. Callers needing whole-line cents (e.g. the
+   * ORDER_DISCOUNT post-line subtotal) go through
+   * `existingLineResultTotalCents`, which multiplies the per-unit case
+   * by quantity. Matches the math used in `pickBestPerLine`.
    *
    * WU3 (buy-x-get-y) — discriminated `PosEvalLineResult`: when the
    * winning result is BXGY (kind === 'buy-x-get-y'), the LINE-TOTAL

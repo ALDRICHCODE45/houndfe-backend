@@ -172,8 +172,8 @@ describeDb(
       const run = <T>(work: () => Promise<T>): Promise<T> =>
         cls.runWith({ tenantId, userId: cashierId, isSuperAdmin: false }, work);
 
-      /** POS draft with `lines` × the item at a cashier price of $689.00, no discount. */
-      const draftSale = async (lines = 1) => {
+      /** POS draft with `lines` × (`quantity` of) the item at a cashier price of $689.00, no discount. */
+      const draftSale = async (lines = 1, quantity = 1) => {
         const saleId = randomUUID();
         await db.sale.create({
           data: {
@@ -186,7 +186,7 @@ describeDb(
                 tenantId,
                 productId: product.id,
                 productName: product.name,
-                quantity: 1,
+                quantity,
                 unitPriceCents: ITEM_CENTS,
                 priceSource: 'CUSTOM' as const,
                 customPriceCents: ITEM_CENTS,
@@ -321,6 +321,62 @@ describeDb(
       expect(sale.totalCents).toBe(111_618);
       const reread = await f.run(() => saleRepo.findById(saleId));
       expect(reread?.appliedOrderPromotion?.discountAmountCents).toBe(12_402);
+    });
+
+    // T2 — quantity > 1: the line promotion is subtracted from the order
+    // base for the WHOLE line (per-unit discount × quantity), not once.
+    it.each([
+      // qty, order discount, total
+      [2, 12_402, 111_618], // FE dev: 2 × 620.10 = 1240.20 → 124.02 (not 130.91)
+      [3, 18_603, 167_427], // 3 × 620.10 = 1860.30 → 186.03
+    ])(
+      'T2 — normal sale, qty %i: line promotion 10% + order promotion 10% → order discount %i, total %i',
+      async (quantity, orderDiscount, total) => {
+        const f = await fixture();
+        const saleId = await f.draftSale(1, quantity);
+        const sale = await f.run(() =>
+          sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
+        );
+        expect(sale.items[0]).toMatchObject({
+          quantity,
+          unitPriceCents: QUOTED_TOTAL,
+          promotionId: f.linePromotionId,
+        });
+        expect(sale.totalCents).toBe(total);
+        const reread = await f.run(() => saleRepo.findById(saleId));
+        expect(reread?.appliedOrderPromotion?.discountAmountCents).toBe(
+          orderDiscount,
+        );
+      },
+    );
+
+    it('T2 — manual 10% line discount with qty 2 + order promotion 10% → order discount 124.02, total 1116.18', async () => {
+      const f = await fixture();
+      const saleId = await f.draftSale(1, 2);
+      const draft = await f.run(() => saleRepo.findById(saleId));
+      await manualTenPercent(f, saleId, draft!.items[0].id);
+      const sale = await f.run(() =>
+        sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
+      );
+      expect(sale.items[0]).toMatchObject({
+        quantity: 2,
+        unitPriceCents: QUOTED_TOTAL,
+        promotionId: null,
+      });
+      expect(sale.totalCents).toBe(111_618);
+      const reread = await f.run(() => saleRepo.findById(saleId));
+      expect(reread?.appliedOrderPromotion?.discountAmountCents).toBe(12_402);
+    });
+
+    it('T2 — minimum purchase with qty 2 is checked on the whole line (2 × 689.00 net of manual = 1240.20)', async () => {
+      const f = await fixture({ orderMinPurchaseCents: 124_020 });
+      const saleId = await f.draftSale(1, 2);
+      const draft = await f.run(() => saleRepo.findById(saleId));
+      await manualTenPercent(f, saleId, draft!.items[0].id);
+      const sale = await f.run(() =>
+        sales.applyManualPromotion(saleId, f.cashierId, f.orderPromotionId),
+      );
+      expect(sale.totalCents).toBe(111_618);
     });
   },
 );
