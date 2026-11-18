@@ -1197,6 +1197,10 @@ Updated by step. Parts 2 to 4 (this branch `feat/human-intervention-u14`, not me
 
 The bot may still retry word by word when it gets 0 results, as planned; the backend now does an "all words, then any word" search before answering 0.
 
+### The `category` field (search items and `GET /chatbot-api/catalog/:productId/stock`)
+
+Each search item and the stock response carry `category: { id: string; name: string } | null`: the product's category as the POS shows it (Admin -> Categoría, e.g. "Alimento para aves", "Premios y snacks", "Arena para gato"). Categories are flat (no parent/child), so there is no `path`. `null` when the product has no category. Additive: no existing field changed. The category name is already part of the word search text, so "alimento para aves" matches a product in the "Alimento para aves" category even when its own name does not say "alimento" (e.g. "Alpiste"), with the same `all`/`partial` ranking.
+
 ### Product-level stock of a product with variants (`stock` on search items and `GET /chatbot-api/catalog/:productId/stock`)
 
 One rule, shared by both routes (the same code derives the `stock` object, so they always agree). Field names and shapes are unchanged.

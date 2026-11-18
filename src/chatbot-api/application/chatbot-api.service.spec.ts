@@ -733,6 +733,7 @@ describe('ChatbotApiService', () => {
         productId: 'prod-1',
         name: 'Royal Canin Mini Adult',
         brand: 'Royal Canin',
+        category: { id: 'cat-1', name: 'Food' },
         imageUrl: 'https://cdn.example.com/main.jpg',
         description: 'Dry food for small dogs',
         price: {
@@ -869,6 +870,7 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('prod-1')).resolves.toEqual({
       productId: 'prod-1',
       name: 'Royal Canin Mini Adult',
+      category: { id: 'cat-1', name: 'Food' },
       stock: { status: 'out_of_stock', quantity: 0 },
       variants: [],
     });
@@ -897,6 +899,7 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('prod-1')).resolves.toEqual({
       productId: 'prod-1',
       name: 'Royal Canin Mini Adult',
+      category: { id: 'cat-1', name: 'Food' },
       stock: { status: 'not_managed', quantity: null },
       variants: [
         {
@@ -1033,6 +1036,7 @@ describe('ChatbotApiService', () => {
       await expect(service.checkStock('prod-1')).resolves.toEqual({
         productId: 'prod-1',
         name: 'Royal Canin Mini Adult',
+        category: { id: 'cat-1', name: 'Food' },
         stock: { status: 'out_of_stock', quantity: 0 },
         variants: [],
       });
@@ -1283,6 +1287,55 @@ describe('ChatbotApiService', () => {
 
       expect(item.stock).toEqual({ status: 'not_managed', quantity: null });
       expect(checked.stock).toEqual({ status: 'not_managed', quantity: null });
+    });
+  });
+
+  describe('product category on search and stock (T4 / S7)', () => {
+    it('returns the POS category as { id, name } on both endpoints', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            category: { id: 'cat-aves', name: 'Alimento para aves' },
+          }),
+        ],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          category: { id: 'cat-aves', name: 'Alimento para aves' },
+        }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'alpiste' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.category).toEqual({
+        id: 'cat-aves',
+        name: 'Alimento para aves',
+      });
+      expect(checked.category).toEqual({
+        id: 'cat-aves',
+        name: 'Alimento para aves',
+      });
+      // Existing fields are untouched.
+      expect(item.brand).toBe('Royal Canin');
+      expect(item.name).toBe('Royal Canin Mini Adult');
+    });
+
+    it('returns category null when the product has none', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [makeCatalogProduct({ category: null })],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({ category: null }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.category).toBeNull();
+      expect(checked.category).toBeNull();
     });
   });
 

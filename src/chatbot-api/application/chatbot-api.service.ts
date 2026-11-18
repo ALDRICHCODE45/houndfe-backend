@@ -1139,6 +1139,12 @@ function deriveProductStock(
   return { status, quantity };
 }
 
+function toCategory(
+  category: { id: string; name: string } | null | undefined,
+): { id: string; name: string } | null {
+  return category ? { id: category.id, name: category.name } : null;
+}
+
 function toCatalogItemResponse(
   product: ProductWithIncludes,
   expiredLotQuantity: number,
@@ -1147,6 +1153,7 @@ function toCatalogItemResponse(
     productId: product.id,
     name: product.name,
     brand: product.brand?.name ?? null,
+    category: toCategory(product.category),
     imageUrl: product.images[0]?.url ?? null,
     description: product.description,
     price: {
@@ -1185,6 +1192,7 @@ function toStockCheckResponse(
   return {
     productId: product.id,
     name: product.name,
+    category: toCategory(product.category),
     stock: deriveProductStock(product, expiredLotQuantity),
     variants: product.variants.map((variant) => ({
       variantId: variant.id,

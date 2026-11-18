@@ -4,6 +4,15 @@ export type ChatbotStockState =
   | 'out_of_stock'
   | 'not_managed';
 
+/**
+ * The product's POS category (Admin -> Categoría). Categories are flat, so
+ * there is no parent path. Additive; null when the product has none.
+ */
+export interface ChatbotProductCategory {
+  id: string;
+  name: string;
+}
+
 export interface CatalogItemResponse {
   /**
    * Additive and optional. Present only for word-based searches: `all` = the
@@ -14,6 +23,7 @@ export interface CatalogItemResponse {
   productId: string;
   name: string;
   brand: string | null;
+  category: ChatbotProductCategory | null;
   imageUrl: string | null;
   description: string | null;
   price: {
