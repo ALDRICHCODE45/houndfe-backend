@@ -14,11 +14,13 @@ roots and never touches the dev database).
 ## Commands
 
 ```bash
-# Offline unit checks for the guards (no DB, no server):
-npx jest --config jest.config.js --roots test/cash-live
+# Offline unit checks for the guards (no DB, no server). Includes
+# dotenv-isolation.spec.ts, which spawns child `node -r ts-node/register`
+# probes under a minimal env that only IMPORT the harness graph:
+pnpm exec jest --config jest.config.js --roots test/cash-live
 
 # Type-check the harness (offline):
-npx tsc --noEmit -p test/tsconfig.json
+pnpm exec tsc --noEmit -p test/tsconfig.json
 
 # Live run (parent-authorized only; disposable DB must exist) with a
 # MINIMAL environment — external credentials are denied (see guards):
@@ -37,6 +39,37 @@ TS_NODE_TRANSPILE_ONLY=1 node -r ts-node/register -r tsconfig-paths/register \
 The harness NEVER loads `.env`. Every required value comes from the run
 environment or is generated locally.
 
+## Dotenv isolation and startup order (S5)
+
+Prisma 6's GENERATED client (`.prisma/client/index.js`, reached via
+`src/shared/prisma/prisma.service` -> `@prisma/client`) runs dotenv on the
+repository `.env` at MODULE LOAD (`warnEnvConflicts`) and again in the
+`PrismaClient` constructor (`relativeEnvPaths`). Before this fix, merely
+importing the harness graph copied repository variables (e.g.
+`RESEND_API_KEY`) into `process.env`, so the credential guard refused to
+start. The guard was NOT weakened; the loader is stopped instead:
+
+1. `server.ts` statically imports ONLY `node:crypto`, `./disposable-env`,
+   `./live-config`, `./dotenv-isolation` (+ type-only imports). The
+   credential guard and the disposable-DB guard run first.
+2. `loadHarnessGraph()` (`dotenv-isolation.ts`) then installs a narrow
+   CommonJS loader hook that affects ONLY the
+   `@prisma/client/runtime/library.js` requires issued by the generated
+   client's `index.js`: `warnEnvConflicts` becomes a no-op and
+   `getPrismaClient` receives the config without `relativeEnvPaths` /
+   `injectableEdgeEnv` (same effect as the repo's `__internal.configOverride`
+   pattern, applied to every PrismaClient the graph builds). Only then is
+   the Nest + Prisma graph imported dynamically.
+3. Fail closed: the hook refuses if the generated client was already
+   loaded, `loadHarnessGraph` refuses if the interception did not happen
+   (e.g. a Prisma upgrade changed the generated shape), and the credential
+   guard is re-run right after the import as a tripwire.
+
+No production code is changed. `dotenv-isolation.spec.ts` proves, under a
+minimal env with the repository dotenv file present, that the harness path
+never touches a `.env*` file and adds no variable (RESEND_API_KEY stays
+undefined), with a control showing the unblocked import does probe it.
+
 ## Fail-closed environment guards
 
 The server refuses to start unless ALL of the following hold:
@@ -53,7 +86,8 @@ The server refuses to start unless ALL of the following hold:
 - NO external-service credential is inherited (`RESEND_API_KEY`,
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
   `INNGEST_EVENT_API_KEY`, `INNGEST_SIGNING_KEY`) — checked BEFORE the
-  Nest module graph compiles; rerun with a minimal env (`env -i`);
+  Nest/Prisma module graph is imported, and re-checked right after the
+  import; rerun with a minimal env (`env -i`);
 - `CASH_LIVE_FRONTEND_ORIGIN` (optional, default
   `http://127.0.0.1:4189`) parses as a loopback http(s) origin with an
   explicit numeric port — it is the single CORS allowlist entry;
