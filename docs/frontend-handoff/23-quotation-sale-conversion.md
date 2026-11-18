@@ -1,6 +1,6 @@
 # POS "Pedido" tab — quotation ↔ sale conversion
 
-**Status:** T1 (specs S1–S7) merged to `main`, deploy pending. T2 (S8: exact quoted total at opening, `suppressedPromotions`; plus `saleStatus` on quotation reads) on branch `fix/quotation-conversion-exact-price`, **not merged, not pushed, not deployed**; no migration. Task: `odd/tasks/quotation-sale-conversion.md`. Migration `20261118000000_quotation_sale_conversion` (T1) must be deployed first.
+**Status:** T1 (specs S1–S7) merged to `main`, deploy pending. T2 (S8: exact quoted total at opening, `suppressedPromotions`; plus `saleStatus` on quotation reads) on branch `fix/quotation-conversion-exact-price`, **not merged, not pushed, not deployed**; no migration. T3 (S8, defect D2: a quoted promotion line discount is kept as that promotion when it still applies exactly, so a re-enabled order promotion uses the net subtotal) on branch `fix/converted-sale-order-promo-base`, **not merged, not pushed, not deployed**; no migration. Task: `odd/tasks/quotation-sale-conversion.md`. Migration `20261118000000_quotation_sale_conversion` (T1) must be deployed first.
 
 Shapes come from the code and its specs: `src/quotations/controllers/quotation-sale-conversion.controller.ts`, `src/quotations/application/quotation-sale-conversion.service.ts`, `src/quotations/domain/quotation-sale-conversion.mapper.ts`, `quotation-sale-conversion.integration.spec.ts` (real PostgreSQL). Nothing was sent to the dev API.
 
@@ -145,7 +145,7 @@ Response `201`:
         "priceSource": "custom", "customPriceCents": 10000,
         "prePriceCentsBeforeDiscount": 10000,
         "discountType": "amount", "discountValue": 500, "discountAmountCents": 500,
-        "discountTitle": "Promo test", "promotionId": null,
+        "discountTitle": "Promo test", "promotionId": "7c1e…",
         "…": "rest of the POS draft item"
       }
     ],
@@ -165,9 +165,11 @@ After `201`: open the POS with `sale.id` (it is already one of the cashier's dra
 
 ### Pricing rule (S5: "precio cotizado si está vigente")
 
-- Every line keeps the **quoted** unit price and the **quoted** discount, to the cent, whatever the catalog says today. Lines are created as sticky custom prices; a quoted discount becomes a manual line discount titled with the promotion name (or `"Descuento cotizado"` if the promotion no longer exists). Changing the quantity later keeps the per-unit price and discount.
+- Every line keeps the **quoted** unit price and the **quoted** discount, to the cent, whatever the catalog says today. Lines are created as sticky custom prices. A quoted discount that came from a promotion is handled in one of two ways (T3):
+  - If today the same promotion gives **exactly** the quoted discount on that line (and on no other line of the sale), the line keeps it as that **promotion** (`promotionId` = the promotion, `discountTitle` = its name). It then behaves like on any normal sale: an order-level promotion re-enabled later is computed on the subtotal **after** this line discount (e.g. $689.00 − 10% = $620.10, then Buen Fin 10% −$62.01 → $558.09), and removing it is `DELETE /sales/drafts/:id/promotions/:promotionId`. Changing the quantity re-evaluates it like on any draft.
+  - Otherwise (the promotion changed, ended, no longer exists, or would also hit another line), the quoted discount becomes a **manual** line discount (`promotionId: null`) titled with the promotion name (or `"Descuento cotizado"` if the promotion no longer exists). Changing the quantity later keeps the per-unit price and discount. Like any manual line discount on a normal sale, an order-level promotion applied later is computed on the line's price **before** that manual discount.
 - Nothing is repriced: there is **no "price changed" rejection**. A quotation past its `expiresAt` cannot be converted at all (`QUOTATION_EXPIRED`): the seller renews it (new quotation) to get current prices.
-- **Exact by default (S8: "Exacto por defecto, se ajusta después").** At opening, the sale total equals the quotation total to the cent, per line and in total. No new promotion is applied: every automatic promotion that would apply today (on a line or at order level) is added to the sale's per-draft **veto set** and returned in `suppressedPromotions`. Vetoes from the quotation are copied too (they are not listed in `suppressedPromotions`). Lines with a quoted discount are never touched.
+- **Exact by default (S8: "Exacto por defecto, se ajusta después").** At opening, the sale total equals the quotation total to the cent, per line and in total. No new promotion is applied: every automatic promotion that would apply today (on a line or at order level) is added to the sale's per-draft **veto set** and returned in `suppressedPromotions`. Vetoes from the quotation are copied too (they are not listed in `suppressedPromotions`). A promotion kept on its quoted line (see above) is not vetoed and not listed; lines with a quoted discount open at that discount to the cent.
 - The opened sale is a normal POS draft: afterwards the cashier can lower or raise prices and apply discounts or promotions line by line with the **existing** draft routes (no new routes):
 
 | Cashier action | Route (all `update:Sale`, owner cashier, `DRAFT` only) | Effect |

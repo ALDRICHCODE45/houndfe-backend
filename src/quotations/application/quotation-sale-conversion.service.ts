@@ -321,15 +321,20 @@ export class QuotationSaleConversionService {
         vetoedPromotionIds: quotation.vetoedPromotionIds,
         lines: quotation.items.map((item) => {
           const facts = catalog.byLineId.get(item.id)!;
-          return mapQuotationLineToSaleLine(item, {
-            productName: facts.productName,
-            variantName: facts.variantName,
-            imageUrl: facts.imageUrl,
-            promotionTitle: item.promotionId
-              ? (titles.get(item.promotionId) ?? null)
-              : null,
-            now,
-          });
+          return {
+            ...mapQuotationLineToSaleLine(item, {
+              productName: facts.productName,
+              variantName: facts.variantName,
+              imageUrl: facts.imageUrl,
+              promotionTitle: item.promotionId
+                ? (titles.get(item.promotionId) ?? null)
+                : null,
+              now,
+            }),
+            // T3 (D2) — kept as this promotion's line application when
+            // the sale engine reproduces the quoted discount exactly.
+            quotedPromotionId: item.promotionId,
+          };
         }),
       });
 

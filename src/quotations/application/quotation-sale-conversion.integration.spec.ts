@@ -610,12 +610,14 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
         const byProduct = new Map(
           result.sale.items.map((i) => [i.productId, i]),
         );
+        // T3 (D2) — the engine reproduces the quoted promotion exactly, so
+        // the line keeps it as a promotion application (not manual).
         expect(byProduct.get(f.promoted.id)).toMatchObject({
           quantity: 2,
           unitPriceCents: 10_000 - PROMO_DISCOUNT_CENTS,
           discountAmountCents: PROMO_DISCOUNT_CENTS,
           discountTitle: 'Promo test',
-          promotionId: null,
+          promotionId: promoId,
         });
         expect(byProduct.get(f.plain.id)).toMatchObject({
           quantity: 1,
@@ -937,6 +939,80 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
         conversion.convertToSale(quotationId, f.cashierId, 'key-s8'),
       );
       expect(replay).toEqual(result);
+    });
+
+    it('T3: a quoted promotion discount the engine no longer reproduces stays a MANUAL quoted discount at the exact quoted total', async () => {
+      const f = await fixture();
+      const QUOTED_DISCOUNT = 300; // today the promotion gives 500
+      const quotedTotal = 2 * (10_000 - QUOTED_DISCOUNT);
+      const quotationId = await quotation(
+        f,
+        {
+          subtotalCents: 2 * 10_000,
+          discountCents: 2 * QUOTED_DISCOUNT,
+          totalCents: quotedTotal,
+        },
+        [
+          {
+            productId: f.promoted.id,
+            productName: 'Jeans',
+            quantity: 2,
+            unitPriceCents: 10_000 - QUOTED_DISCOUNT,
+            priceSource: 'PRICE_LIST',
+            discountType: 'amount',
+            discountValue: QUOTED_DISCOUNT,
+            discountAmountCents: QUOTED_DISCOUNT,
+            promotionId: promoId,
+          },
+        ],
+      );
+
+      const result = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'k-t3'),
+      );
+
+      expect(result.sale.totalCents).toBe(quotedTotal);
+      expect(result.sale.items).toEqual([
+        expect.objectContaining({
+          productId: f.promoted.id,
+          unitPriceCents: 10_000 - QUOTED_DISCOUNT,
+          discountAmountCents: QUOTED_DISCOUNT,
+          discountTitle: 'Promo test',
+          promotionId: null,
+        }),
+      ]);
+      // The manual line blocks the promotion: nothing to suppress.
+      expect(result.suppressedPromotions).toEqual([]);
+      const reread = await f.run(() => saleRepo.findById(result.sale.id));
+      expect(reread?.toResponse().totalCents).toBe(quotedTotal);
+    });
+
+    it('T3: a kept quoted promotion that would also hit a line quoted without it falls back to MANUAL and is suppressed', async () => {
+      const f = await fixture();
+      // Today the promotion also targets the plain line, quoted without it.
+      promoProductIds = new Set([f.promoted.id, f.plain.id]);
+      const quotedTotal = 2 * (10_000 - PROMO_DISCOUNT_CENTS) + 12_345;
+      const quotationId = await quotation(f);
+
+      const result = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'k-t3b'),
+      );
+
+      expect(result.sale.totalCents).toBe(quotedTotal);
+      const byProduct = new Map(result.sale.items.map((i) => [i.productId, i]));
+      expect(byProduct.get(f.promoted.id)).toMatchObject({
+        unitPriceCents: 10_000 - PROMO_DISCOUNT_CENTS,
+        discountAmountCents: PROMO_DISCOUNT_CENTS,
+        promotionId: null,
+      });
+      expect(byProduct.get(f.plain.id)).toMatchObject({
+        unitPriceCents: 12_345,
+        discountAmountCents: null,
+        promotionId: null,
+      });
+      expect(result.suppressedPromotions).toEqual([
+        { promotionId: promoId, title: 'Promo test' },
+      ]);
     });
 
     it('reports nothing when no promotion applies today', async () => {

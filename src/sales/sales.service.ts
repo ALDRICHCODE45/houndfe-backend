@@ -108,7 +108,12 @@ import {
   type CashPaymentMethod,
   type ICashLedger,
 } from '../cash-register/cash-ledger.port';
-import { promotionsToVetoForExactOpening } from './domain/quotation-opening-promotions';
+import {
+  keptQuotedPromotionMismatches,
+  promotionsToVetoForExactOpening,
+  withoutQuotedDiscount,
+  type KeptQuotedPromotionLine,
+} from './domain/quotation-opening-promotions';
 
 /**
  * S8 — upper bound on veto rounds when opening a sale from a quotation.
@@ -1521,6 +1526,15 @@ export class SalesService {
    * what charge computes. The cashier adjusts afterwards with the existing
    * draft routes (re-enable: `POST /sales/drafts/:id/manual-promotions/
    * :promotionId`, which clears the veto).
+   *
+   * T3 (S8, defect D2) — a quoted line discount whose `quotedPromotionId`
+   * the engine still reproduces EXACTLY on that line is kept as that
+   * promotion's application (not vetoed, not manual), so a later ORDER
+   * promotion is computed on the subtotal net of it, like a normal sale.
+   * Any kept promotion that does not reproduce the quote (changed value,
+   * ended, lands on another line, ...) falls back to the T2 manual quoted
+   * discount; the opened total must equal the all-manual quoted total or
+   * every line falls back. Each retry shrinks the kept set, so it ends.
    */
   async openDraftFromQuotation(input: {
     userId: string;
@@ -1529,42 +1543,107 @@ export class SalesService {
     globalPriceListId: string | null;
     priceListExplicitlySet: boolean;
     vetoedPromotionIds: ReadonlyArray<string>;
-    lines: ReadonlyArray<Omit<SaleItemProps, 'id' | 'saleId'>>;
+    lines: ReadonlyArray<
+      Omit<SaleItemProps, 'id' | 'saleId'> & {
+        /** Promotion the quoted line discount came from, when any. */
+        quotedPromotionId?: string | null;
+      }
+    >;
   }): Promise<Sale> {
     const saleId = randomUUID();
-    const sale = Sale.create({ id: saleId, userId: input.userId });
-    if (input.customerId) {
-      sale.assignCustomer(input.customerId);
-    }
-    if (input.sellerUserId) {
-      sale.assignSeller(input.sellerUserId);
-    }
-    sale.setGlobalPriceList(
-      input.globalPriceListId,
-      input.priceListExplicitlySet,
+    const lines = input.lines.map(({ quotedPromotionId, ...props }) => ({
+      id: randomUUID(),
+      props,
+      quotedPromotionId: quotedPromotionId ?? null,
+    }));
+    const keptLines: KeptQuotedPromotionLine[] = lines.flatMap((line) =>
+      line.quotedPromotionId !== null &&
+      (line.props.discountAmountCents ?? 0) > 0 &&
+      !input.vetoedPromotionIds.includes(line.quotedPromotionId)
+        ? [
+            {
+              itemId: line.id,
+              promotionId: line.quotedPromotionId,
+              unitPriceCents: line.props.unitPriceCents,
+              discountAmountCents: line.props.discountAmountCents!,
+            },
+          ]
+        : [],
     );
-    for (const promotionId of input.vetoedPromotionIds) {
-      sale.addVetoedPromotion(promotionId);
-    }
-    for (const line of input.lines) {
-      sale.addItem({ ...line, id: randomUUID(), saleId });
-    }
+    const kept = new Set(keptLines.map((line) => line.promotionId));
 
-    // Bounded: each round vetoes at least one new id or stops.
-    for (let round = 0; round < MAX_EXACT_OPENING_ROUNDS; round++) {
-      const applied = await this.evaluatePromotionsForSale(sale);
-      const toVeto = promotionsToVetoForExactOpening(
-        applied,
-        sale.vetoedPromotionIds,
+    const build = (keep: ReadonlySet<string>): Sale => {
+      const sale = Sale.create({ id: saleId, userId: input.userId });
+      if (input.customerId) {
+        sale.assignCustomer(input.customerId);
+      }
+      if (input.sellerUserId) {
+        sale.assignSeller(input.sellerUserId);
+      }
+      sale.setGlobalPriceList(
+        input.globalPriceListId,
+        input.priceListExplicitlySet,
       );
-      if (toVeto.length === 0) break;
-      for (const promotionId of toVeto) {
+      for (const promotionId of input.vetoedPromotionIds) {
         sale.addVetoedPromotion(promotionId);
       }
-    }
+      for (const line of lines) {
+        const keepLine =
+          line.quotedPromotionId !== null &&
+          keep.has(line.quotedPromotionId) &&
+          keptLines.some((k) => k.itemId === line.id);
+        sale.addItem({
+          ...(keepLine ? withoutQuotedDiscount(line.props) : line.props),
+          id: line.id,
+          saleId,
+        });
+      }
+      return sale;
+    };
 
-    await this.recomputePricingAndPromotions(sale);
-    return this.saleRepo.save(sale);
+    // The all-manual build (T2 lines, no promotions) IS the quote.
+    const exactTotalCents = build(new Set()).previewTotals().totalCents;
+
+    for (;;) {
+      const sale = build(kept);
+      // Bounded: each round vetoes at least one new id or stops.
+      for (let round = 0; round < MAX_EXACT_OPENING_ROUNDS; round++) {
+        const applied = await this.evaluatePromotionsForSale(sale);
+        const toVeto = promotionsToVetoForExactOpening(
+          applied,
+          sale.vetoedPromotionIds,
+          kept,
+        );
+        if (toVeto.length === 0) break;
+        for (const promotionId of toVeto) {
+          sale.addVetoedPromotion(promotionId);
+        }
+      }
+
+      await this.recomputePricingAndPromotions(sale);
+      if (kept.size === 0) return this.saleRepo.save(sale);
+
+      const mismatched = keptQuotedPromotionMismatches(
+        sale.items.map((item) => ({
+          id: item.id,
+          promotionId: item.promotionId,
+          unitPriceCents: item.unitPriceCents,
+          discountAmountCents: item.discountAmountCents,
+          isReward: item.isBuyXGetYReward(),
+        })),
+        keptLines,
+        kept,
+      );
+      if (mismatched.length > 0) {
+        for (const id of mismatched) kept.delete(id);
+        continue;
+      }
+      if (sale.previewTotals().totalCents !== exactTotalCents) {
+        kept.clear();
+        continue;
+      }
+      return this.saleRepo.save(sale);
+    }
   }
 
   /**
