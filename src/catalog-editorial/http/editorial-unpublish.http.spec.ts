@@ -24,10 +24,74 @@ const unpublish = jest.fn();
 const db = {
   $transaction: jest.fn(),
   user: { findUnique: jest.fn() },
+  role: { findFirst: jest.fn() },
   tenantMembership: { findMany: jest.fn() },
   product: { findFirst: jest.fn() },
 };
 let tenant: string | null;
+let superAdminClaim: boolean;
+
+type StoredRole = {
+  id: string;
+  tenantId: string | null;
+  isSystem: boolean;
+  name: string;
+  memberUserIds: string[];
+  permissions: { subject: string; action: string }[];
+};
+let roles: StoredRole[];
+// Evaluates the exact persisted global-administrator predicate against
+// stored roles; an unknown predicate shape fails the test loudly.
+function findGlobalRole(args: {
+  where: {
+    tenantId: null;
+    tenantMemberships: { some: { userId: string } };
+    OR: Array<
+      | { isSystem: boolean; name: string }
+      | {
+          permissions: {
+            some: { permission: { subject: string; action: string } };
+          };
+        }
+    >;
+  };
+  select: { id: true };
+}) {
+  const { where } = args;
+  if (where.tenantId !== null || !Array.isArray(where.OR))
+    throw new Error('unexpected global role predicate');
+  const role = roles.find(
+    (r) =>
+      r.tenantId === null &&
+      r.memberUserIds.includes(where.tenantMemberships.some.userId) &&
+      where.OR.some((branch) =>
+        'permissions' in branch
+          ? r.permissions.some(
+              (p) =>
+                p.subject === branch.permissions.some.permission.subject &&
+                p.action === branch.permissions.some.permission.action,
+            )
+          : r.isSystem === branch.isSystem && r.name === branch.name,
+      ),
+  );
+  return Promise.resolve(role ? { id: role.id } : null);
+}
+const superAdminRole = (members: string[]): StoredRole => ({
+  id: 'system-super-admin',
+  tenantId: null,
+  isSystem: true,
+  name: 'Super Admin',
+  memberUserIds: members,
+  permissions: [{ subject: 'all', action: 'manage' }],
+});
+const globalManageAllRole = (members: string[]): StoredRole => ({
+  id: 'global-editors',
+  tenantId: null,
+  isSystem: false,
+  name: 'Global Editors',
+  memberUserIds: members,
+  permissions: [{ subject: 'all', action: 'manage' }],
+});
 const kept = {
   revision: 4,
   basePublishedRevision: 3,
@@ -70,7 +134,11 @@ describe('POST /products/:productId/editorial/published/unpublish', () => {
           const req = context.switchToHttp().getRequest<Request>();
           if (req.headers.authorization !== 'Bearer synthetic')
             throw new UnauthorizedException();
-          req.user = { userId: actorId, tenantId: tenant, isSuperAdmin: false };
+          req.user = {
+            userId: actorId,
+            tenantId: tenant,
+            isSuperAdmin: superAdminClaim,
+          };
           return true;
         },
       })
@@ -93,6 +161,9 @@ describe('POST /products/:productId/editorial/published/unpublish', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     tenant = tenantId;
+    superAdminClaim = false;
+    roles = [];
+    db.role.findFirst.mockImplementation(findGlobalRole);
     db.user.findUnique.mockResolvedValue({ isActive: true });
     db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
     grant('read', 'publish');
@@ -244,5 +315,114 @@ describe('POST /products/:productId/editorial/published/unpublish', () => {
   ] as const)('maps the writer failure %s', async (error, status) => {
     unpublish.mockRejectedValueOnce(new Error(error));
     await rejected(send(), status, status === 500 ? 'INTERNAL_ERROR' : error);
+  });
+  describe('global mode (positive)', () => {
+    const productTenant = '44444444-4444-4444-8444-444444444444';
+    const expectGlobalUnpublish = async () => {
+      const response = await send().set('x-tenant-id', 'foreign');
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        contractVersion: 2,
+        vocabularyRevision: revision,
+        state: { cycle: 2, draft: kept, published: null },
+      });
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.headers['editorial-contract-version']).toBe('2');
+      expect(response.headers['editorial-vocabulary-revision']).toBe(revision);
+      // Tenant comes from the persisted Product, never from the request.
+      expect(db.product.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { id: productId },
+        select: { id: true, tenantId: true },
+      });
+      expect(unpublish).toHaveBeenCalledWith(
+        { actorId, tenantId: productTenant, productId },
+        'key',
+        {
+          receiptVersion: 2,
+          contractVersion: 2,
+          vocabularyRevision: revision,
+          careConfirmation: null,
+          body,
+        },
+      );
+    };
+    beforeEach(() => {
+      tenant = null;
+      superAdminClaim = true;
+      // No membership in the Product's tenant: authority is the global role.
+      db.tenantMembership.findMany.mockResolvedValue([]);
+      db.product.findFirst.mockResolvedValue({
+        id: productId,
+        tenantId: productTenant,
+      });
+    });
+
+    it('global Super Admin (system role, tenantId null) unpublishes any tenant Product', async () => {
+      roles = [superAdminRole([actorId])];
+      await expectGlobalUnpublish();
+    });
+
+    it('global manage:all role (tenantId null) unpublishes any tenant Product', async () => {
+      roles = [globalManageAllRole([actorId])];
+      await expectGlobalUnpublish();
+    });
+
+    it('Super Admin with a selected tenant unpublishes within that tenant only', async () => {
+      roles = [superAdminRole([actorId])];
+      tenant = tenantId;
+      db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
+      expect((await send()).status).toBe(200);
+      expect(db.product.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { id: productId, tenantId },
+        select: { id: true, tenantId: true },
+      });
+      expect(unpublish).toHaveBeenCalledWith(
+        { actorId, tenantId, productId },
+        'key',
+        expect.anything(),
+      );
+    });
+
+    it('tenant role with manage:all unpublishes in its tenant (no exact publish grant)', async () => {
+      tenant = tenantId;
+      superAdminClaim = false;
+      db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
+      db.tenantMembership.findMany.mockResolvedValue([
+        {
+          userId: actorId,
+          tenantId,
+          role: {
+            permissions: [{ permission: { subject: 'all', action: 'manage' } }],
+          },
+        },
+      ]);
+      expect((await send()).status).toBe(200);
+      expect(unpublish).toHaveBeenCalledWith(
+        { actorId, tenantId, productId },
+        'key',
+        expect.anything(),
+      );
+    });
+
+    it.each([
+      [
+        'a non-system "Super Admin" lookalike',
+        () => [
+          { ...superAdminRole([actorId]), isSystem: false, permissions: [] },
+        ],
+      ],
+      [
+        'a global role without membership',
+        () => [superAdminRole(['someone-else'])],
+      ],
+      [
+        'a tenant-scoped manage:all role',
+        () => [{ ...globalManageAllRole([actorId]), tenantId }],
+      ],
+    ])('rejects %s before the writer', async (_, stored) => {
+      roles = stored();
+      await rejected(send(), 403, 'FORBIDDEN');
+      expect(unpublish).not.toHaveBeenCalled();
+    });
   });
 });

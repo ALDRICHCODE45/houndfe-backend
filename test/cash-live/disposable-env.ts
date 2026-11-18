@@ -34,9 +34,39 @@ export const DEFAULT_FIXTURE_PATH = '.tmp/cash-live/fixture.json';
 /** Default frontend origin (loopback, explicit port). */
 export const DEFAULT_FRONTEND_ORIGIN = 'http://127.0.0.1:4189';
 
+/**
+ * Harness-specific disposable-database target. cash-live uses the default
+ * profile below; sibling harnesses (e.g. test/editorial-live) pass their own
+ * frozen profile. A profile can only ADD forbidden ports — 5432/5433
+ * (`FORBIDDEN_DB_PORTS`) are always rejected for every profile.
+ */
+export interface DisposableDatabaseProfile {
+  /** Opt-in env flag name that must be exactly "1". */
+  flagName: string;
+  /** Harness URL env name that must equal DATABASE_URL. */
+  urlEnvName: string;
+  /** Required database user. */
+  user: string;
+  /** Required database name. */
+  database: string;
+  /** Ports rejected IN ADDITION to `FORBIDDEN_DB_PORTS`. */
+  additionalForbiddenPorts: readonly string[];
+}
+
+/** cash-live's own target (the default — behavior unchanged). */
+export const CASH_LIVE_DATABASE_PROFILE: DisposableDatabaseProfile =
+  Object.freeze({
+    flagName: DISPOSABLE_FLAG,
+    urlEnvName: 'CASH_LIVE_DATABASE_URL',
+    user: DISPOSABLE_DB_USER,
+    database: DISPOSABLE_DB_NAME,
+    additionalForbiddenPorts: Object.freeze([]) as readonly string[],
+  });
+
 export interface DisposableDatabaseInput {
   disposableFlag?: string;
   databaseUrl?: string;
+  /** The harness-specific URL (`profile.urlEnvName`; cash-live: CASH_LIVE_DATABASE_URL). */
   cashLiveDatabaseUrl?: string;
 }
 
@@ -56,10 +86,17 @@ function failure(reasons: string[]): GuardFailure {
 }
 
 /** Numeric, non-empty port that is not a shared dev/integration port. */
-function checkDatabasePort(port: string, reasons: string[]): void {
+function checkDatabasePort(
+  port: string,
+  profile: DisposableDatabaseProfile,
+  reasons: string[],
+): void {
   if (!port || !/^\d+$/.test(port)) {
     reasons.push('DATABASE_URL must include an explicit numeric port');
-  } else if (FORBIDDEN_DB_PORTS.has(port)) {
+  } else if (
+    FORBIDDEN_DB_PORTS.has(port) ||
+    profile.additionalForbiddenPorts.includes(port)
+  ) {
     reasons.push(
       `DATABASE_URL port ${port} is forbidden (shared dev/integration port)`,
     );
@@ -67,7 +104,11 @@ function checkDatabasePort(port: string, reasons: string[]): void {
 }
 
 /** Scheme/host/user/database component checks against the fixed target. */
-function checkDatabaseComponents(url: URL, reasons: string[]): void {
+function checkDatabaseComponents(
+  url: URL,
+  profile: DisposableDatabaseProfile,
+  reasons: string[],
+): void {
   if (url.protocol !== 'postgresql:') {
     reasons.push(
       `DATABASE_URL protocol must be "postgresql:" (got "${url.protocol}")`,
@@ -78,15 +119,15 @@ function checkDatabaseComponents(url: URL, reasons: string[]): void {
       `DATABASE_URL host must be "127.0.0.1" (got "${url.hostname}")`,
     );
   }
-  if (decodeURIComponent(url.username) !== DISPOSABLE_DB_USER) {
+  if (decodeURIComponent(url.username) !== profile.user) {
     reasons.push(
-      `DATABASE_URL user must be "${DISPOSABLE_DB_USER}" (got a different user)`,
+      `DATABASE_URL user must be "${profile.user}" (got a different user)`,
     );
   }
   const databaseName = decodeURIComponent(url.pathname.replace(/^\//, ''));
-  if (databaseName !== DISPOSABLE_DB_NAME) {
+  if (databaseName !== profile.database) {
     reasons.push(
-      `DATABASE_URL database must be "${DISPOSABLE_DB_NAME}" (got a different database)`,
+      `DATABASE_URL database must be "${profile.database}" (got a different database)`,
     );
   }
   // Prisma reads connection options (host/socket/schema/ssl overrides) from
@@ -105,12 +146,13 @@ function checkDatabaseComponents(url: URL, reasons: string[]): void {
 /** Presence + equality of the two URL env vars; returns them when present. */
 function checkUrlEnvPair(
   input: DisposableDatabaseInput,
+  profile: DisposableDatabaseProfile,
   reasons: string[],
 ): string[] | null {
   const missing: string[] = [];
   if (!input.databaseUrl) missing.push('DATABASE_URL is unset');
   if (!input.cashLiveDatabaseUrl)
-    missing.push('CASH_LIVE_DATABASE_URL is unset');
+    missing.push(`${profile.urlEnvName} is unset`);
   if (missing.length > 0) {
     reasons.push(...missing);
     return null;
@@ -119,7 +161,7 @@ function checkUrlEnvPair(
   const cashLiveUrl = input.cashLiveDatabaseUrl as string;
   if (databaseUrl !== cashLiveUrl) {
     reasons.push(
-      'DATABASE_URL and CASH_LIVE_DATABASE_URL must be the identical URL',
+      `DATABASE_URL and ${profile.urlEnvName} must be the identical URL`,
     );
   }
   return [databaseUrl, cashLiveUrl];
@@ -133,21 +175,24 @@ function checkUrlEnvPair(
  *     `cash_proof`, database `cash_closing_proof_test`;
  *   - the port must be present and must NOT be 5432/5433 (the shared dev
  *     and integration-test ports).
+ * Another harness passes its own `profile` (flag/URL env names, user,
+ * database, extra forbidden ports); 5432/5433 stay forbidden regardless.
  */
 export function checkDisposableDatabaseUrl(
   input: DisposableDatabaseInput,
+  profile: DisposableDatabaseProfile = CASH_LIVE_DATABASE_PROFILE,
 ): GuardResult {
   const reasons: string[] = [];
 
   if (input.disposableFlag !== DISPOSABLE_FLAG_VALUE) {
     reasons.push(
-      `${DISPOSABLE_FLAG} must be exactly "${DISPOSABLE_FLAG_VALUE}" (got ${
+      `${profile.flagName} must be exactly "${DISPOSABLE_FLAG_VALUE}" (got ${
         input.disposableFlag === undefined ? 'unset' : 'a different value'
       })`,
     );
   }
 
-  const urls = checkUrlEnvPair(input, reasons);
+  const urls = checkUrlEnvPair(input, profile, reasons);
   if (urls === null) return failure(reasons);
 
   let parsed: URL;
@@ -158,8 +203,8 @@ export function checkDisposableDatabaseUrl(
     return failure(reasons);
   }
 
-  checkDatabaseComponents(parsed, reasons);
-  checkDatabasePort(parsed.port, reasons);
+  checkDatabaseComponents(parsed, profile, reasons);
+  checkDatabasePort(parsed.port, profile, reasons);
 
   return reasons.length === 0 ? { ok: true } : failure(reasons);
 }
@@ -204,22 +249,23 @@ export function checkDeniedExternalEnv(env: NodeJS.ProcessEnv): GuardResult {
  * on anything else. This is the single CORS allowlist input for the
  * harness server.
  */
-export function validateLoopbackHttpOrigin(raw: string): string {
+export function validateLoopbackHttpOrigin(
+  raw: string,
+  envName = 'CASH_LIVE_FRONTEND_ORIGIN',
+): string {
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error('CASH_LIVE_FRONTEND_ORIGIN is not a valid URL — rejected');
+    throw new Error(`${envName} is not a valid URL — rejected`);
   }
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(
-      'CASH_LIVE_FRONTEND_ORIGIN must use http: or https: — rejected',
-    );
+    throw new Error(`${envName} must use http: or https: — rejected`);
   }
   if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
     throw new Error(
-      'CASH_LIVE_FRONTEND_ORIGIN must be a loopback host (127.0.0.1 or [::1]) — rejected',
+      `${envName} must be a loopback host (127.0.0.1 or [::1]) — rejected`,
     );
   }
   const port = parsed.port;
@@ -230,7 +276,7 @@ export function validateLoopbackHttpOrigin(raw: string): string {
     Number(port) > 65535
   ) {
     throw new Error(
-      'CASH_LIVE_FRONTEND_ORIGIN must include an explicit numeric port — rejected',
+      `${envName} must include an explicit numeric port — rejected`,
     );
   }
   return parsed.origin;
@@ -244,11 +290,13 @@ export function validateLoopbackHttpOrigin(raw: string): string {
 export function resolveFixturePathWithinRoot(
   rawPath: string | undefined,
   rootDir: string,
+  options: { defaultPath: string; envName: string } = {
+    defaultPath: DEFAULT_FIXTURE_PATH,
+    envName: 'CASH_LIVE_FIXTURE_PATH',
+  },
 ): string {
   const raw =
-    rawPath && rawPath.trim().length > 0
-      ? rawPath.trim()
-      : DEFAULT_FIXTURE_PATH;
+    rawPath && rawPath.trim().length > 0 ? rawPath.trim() : options.defaultPath;
   const root = path.resolve(rootDir);
   const resolved = path.resolve(root, raw);
 
@@ -259,7 +307,7 @@ export function resolveFixturePathWithinRoot(
     path.isAbsolute(relative)
   ) {
     throw new Error(
-      'CASH_LIVE_FIXTURE_PATH must stay inside the repository root — rejected',
+      `${options.envName} must stay inside the repository root — rejected`,
     );
   }
   return resolved;

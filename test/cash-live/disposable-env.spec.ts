@@ -126,7 +126,10 @@ describe('checkDisposableDatabaseUrl', () => {
 
   it('reports a parse failure (not a mismatch) for identical invalid URLs', () => {
     const result = checkDisposableDatabaseUrl(
-      guardInput({ databaseUrl: 'not-a-url', cashLiveDatabaseUrl: 'not-a-url' }),
+      guardInput({
+        databaseUrl: 'not-a-url',
+        cashLiveDatabaseUrl: 'not-a-url',
+      }),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -233,5 +236,44 @@ describe('resolveFixturePathWithinRoot', () => {
     ).toThrow();
     expect(() => resolveFixturePathWithinRoot('/etc/passwd', root)).toThrow();
     expect(() => resolveFixturePathWithinRoot('.', root)).toThrow();
+  });
+});
+
+describe('checkDisposableDatabaseUrl profiles (shared with sibling harnesses)', () => {
+  const profile = {
+    flagName: 'OTHER_LIVE_DISPOSABLE',
+    urlEnvName: 'OTHER_LIVE_DATABASE_URL',
+    user: 'other_user',
+    database: 'other_db',
+    additionalForbiddenPorts: [] as string[],
+  };
+  const url = (port: string) =>
+    `postgresql://other_user:pw@127.0.0.1:${port}/other_db`;
+
+  it('a profile can never re-allow the shared 5432/5433 ports', () => {
+    for (const port of ['5432', '5433']) {
+      const result = checkDisposableDatabaseUrl(
+        {
+          disposableFlag: '1',
+          databaseUrl: url(port),
+          cashLiveDatabaseUrl: url(port),
+        },
+        profile,
+      );
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it('the default profile is cash-live (another profile target is rejected)', () => {
+    const result = checkDisposableDatabaseUrl({
+      disposableFlag: '1',
+      databaseUrl: url('5544'),
+      cashLiveDatabaseUrl: url('5544'),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reasons.join('\n')).toContain(DISPOSABLE_DB_USER);
+      expect(result.reasons.join('\n')).toContain(DISPOSABLE_DB_NAME);
+    }
   });
 });

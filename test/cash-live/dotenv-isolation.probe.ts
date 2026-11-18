@@ -22,67 +22,12 @@
  *
  * Run only through `dotenv-isolation.spec.ts`.
  */
-import fs = require('node:fs');
-import path = require('node:path');
+import { installEnvFileRecorder } from './env-file-recorder';
 
 const mode = process.argv[2];
 const denyEnvFiles = mode === 'control' || mode === 'preloaded';
-let envFileTouched = false;
-
-function isEnvFile(target: unknown): boolean {
-  if (typeof target !== 'string' && !(target instanceof URL)) return false;
-  return path.basename(String(target)).startsWith('.env');
-}
-
-const originalExistsSync = fs.existsSync;
-const originalReadFileSync = fs.readFileSync;
-const originalOpenSync = fs.openSync;
-
-function denied(): never {
-  const error = new Error('probe: .env access denied') as NodeJS.ErrnoException;
-  error.code = 'ENOENT';
-  throw error;
-}
-
-(fs as { existsSync: typeof fs.existsSync }).existsSync = ((target) => {
-  if (isEnvFile(target)) {
-    envFileTouched = true;
-    if (denyEnvFiles) return false;
-  }
-  return originalExistsSync(target);
-}) as typeof fs.existsSync;
-
-(fs as { readFileSync: unknown }).readFileSync = function readFileSync(
-  this: unknown,
-  target: unknown,
-  ...rest: unknown[]
-) {
-  if (isEnvFile(target)) {
-    envFileTouched = true;
-    if (denyEnvFiles) denied();
-  }
-  return (originalReadFileSync as (...a: unknown[]) => unknown).call(
-    this,
-    target,
-    ...rest,
-  );
-};
-
-(fs as { openSync: unknown }).openSync = function openSync(
-  this: unknown,
-  target: unknown,
-  ...rest: unknown[]
-) {
-  if (isEnvFile(target)) {
-    envFileTouched = true;
-    if (denyEnvFiles) denied();
-  }
-  return (originalOpenSync as (...a: unknown[]) => unknown).call(
-    this,
-    target,
-    ...rest,
-  );
-};
+// Installed before ANY dynamic import of the Nest/Prisma graph below.
+const recorder = installEnvFileRecorder({ deny: denyEnvFiles });
 
 async function run(): Promise<Record<string, unknown>> {
   const keysBefore = new Set(Object.keys(process.env));
@@ -94,9 +39,8 @@ async function run(): Promise<Record<string, unknown>> {
     await import('./live-harness');
   } else if (mode === 'preloaded') {
     await import('@prisma/client');
-    const { loadHarnessGraph, PRISMA_ALREADY_LOADED_MESSAGE } = await import(
-      './dotenv-isolation'
-    );
+    const { loadHarnessGraph, PRISMA_ALREADY_LOADED_MESSAGE } =
+      await import('./dotenv-isolation');
     refusedAsAlreadyLoaded = false;
     try {
       await loadHarnessGraph();
@@ -114,7 +58,7 @@ async function run(): Promise<Record<string, unknown>> {
   ).length;
   return {
     mode,
-    envFileTouched,
+    envFileTouched: recorder.touched(),
     keysAdded,
     resendApiKey: typeof process.env.RESEND_API_KEY,
     refusedAsAlreadyLoaded,

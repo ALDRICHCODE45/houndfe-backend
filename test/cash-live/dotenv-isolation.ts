@@ -117,18 +117,33 @@ export function installPrismaDotenvBlock(): BlockState {
 }
 
 /**
+ * Install the block, run `load` (which dynamically imports a harness's
+ * heavy Nest + Prisma graph), then verify that BOTH interceptions really
+ * happened. Shared by every disposable harness (cash-live, editorial-live)
+ * so the fail-closed rule lives in one place. Throws FIXED messages only.
+ */
+export async function loadWithPrismaDotenvBlock<T>(
+  load: () => Promise<T>,
+): Promise<T> {
+  const block = installPrismaDotenvBlock();
+  const graph = await load();
+  if (!block.warnEnvConflictsBlocked || !block.getPrismaClientWrapped) {
+    throw new Error(PRISMA_BLOCK_NOT_APPLIED_MESSAGE);
+  }
+  return graph;
+}
+
+/**
  * Install the block, then import the heavy harness graph (Nest + Prisma).
  * Throws a FIXED message when the block cannot be guaranteed.
  */
 export async function loadHarnessGraph() {
-  const block = installPrismaDotenvBlock();
-  const liveHarness = await import('./live-harness');
-  const seed = await import('./seed');
-  const resumeStartup = await import('./resume-startup');
-  const fixture = await import('./fixture');
-  const { Logger } = await import('@nestjs/common');
-  if (!block.warnEnvConflictsBlocked || !block.getPrismaClientWrapped) {
-    throw new Error(PRISMA_BLOCK_NOT_APPLIED_MESSAGE);
-  }
-  return { liveHarness, seed, resumeStartup, fixture, Logger };
+  return loadWithPrismaDotenvBlock(async () => {
+    const liveHarness = await import('./live-harness');
+    const seed = await import('./seed');
+    const resumeStartup = await import('./resume-startup');
+    const fixture = await import('./fixture');
+    const { Logger } = await import('@nestjs/common');
+    return { liveHarness, seed, resumeStartup, fixture, Logger };
+  });
 }
