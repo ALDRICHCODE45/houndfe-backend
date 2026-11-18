@@ -86,7 +86,8 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from './domain/sale.repository';
-import { SaleStockService } from './sale-stock.service';
+import { SaleStockService, type SaleStockActor } from './sale-stock.service';
+import { SYSTEM_ACTOR_ID } from '../shared/tenant/tenant-runner.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
@@ -224,6 +225,28 @@ type CancelSaleResult = {
   }>;
   canceledAt: string;
 };
+
+function restockedItemsOf(sale: Sale): CancelSaleResult['restockedItems'] {
+  return sale.items.map((item) => ({
+    productId: item.productId,
+    variantId: item.variantId,
+    quantity: item.quantity,
+  }));
+}
+
+function buildCancelResult(
+  canceledSale: Sale,
+  refundedCents: number,
+): CancelSaleResult {
+  return {
+    saleId: canceledSale.id,
+    status: 'CANCELED',
+    refundedCents,
+    restockedItems: restockedItemsOf(canceledSale),
+    canceledAt:
+      canceledSale.canceledAt?.toISOString() ?? new Date().toISOString(),
+  };
+}
 
 type CancelSaleRefundSource = {
   paymentId: string;
@@ -3498,7 +3521,6 @@ export class SalesService {
     }
 
     return this.saleRepo.runInTransaction(async () => {
-      const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
 
       // Tenant isolation: findByIdForUpdate queries within the tenant-scoped
@@ -3514,26 +3536,8 @@ export class SalesService {
         );
       }
 
-      const restockedItems = sale.items.map((item) => ({
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-      }));
-
-      const buildResult = (
-        canceledSale: Sale,
-        refundedCents: number,
-      ): CancelSaleResult => ({
-        saleId: canceledSale.id,
-        status: 'CANCELED',
-        refundedCents,
-        restockedItems,
-        canceledAt:
-          canceledSale.canceledAt?.toISOString() ?? new Date().toISOString(),
-      });
-
       if (sale.status === 'CANCELED') {
-        const replayPayload = buildResult(
+        const replayPayload = buildCancelResult(
           sale,
           sale.paymentStatus === 'CREDIT' || sale.paidCents === 0
             ? 0
@@ -3549,67 +3553,14 @@ export class SalesService {
         return replayPayload;
       }
 
-      const { sale: canceledSale, refundedCents } = sale.cancel(dto.reason, {
+      const payload = await this.applyCancellation(sale, {
         actorId,
-      });
-
-      // O1 — restore exactly what the journal consumed. A sale confirmed
-      // before the journal went live is restored from its lines through the
-      // journal too; a replayed cancellation restores nothing twice.
-      await this.requireSaleStock().reverse({
-        saleId,
-        actor: {
+        reason: dto.reason,
+        stockActor: {
           kind: options.origin === 'bot' ? 'bot' : 'user',
           userId: actorId,
         },
-        lines: restockedItems,
-        confirmedAt: sale.confirmedAt,
       });
-
-      const detail =
-        refundedCents === 0
-          ? null
-          : await this.saleRepo.findOneWithRelations(saleId);
-      const refunds =
-        refundedCents === 0
-          ? []
-          : buildCancellationRefunds(
-              (detail?.payments ?? []).map((payment) => ({
-                paymentId: payment.paymentId,
-                method: payment.method,
-                amountCents: payment.amountCents,
-              })),
-              refundedCents,
-              dto.reason,
-            );
-
-      await this.saleRepo.persistCancellation(canceledSale, refunds);
-
-      // pca-2d2 — return every capacity unit this sale claimed, in the same
-      // ambient transaction, regardless of the monetary refund amount. A
-      // restore rejection must reject the cancellation before the outbox and
-      // the idempotency-success stamp, so the typed error is not caught here.
-      await this.promotionUsageRepo.restoreForSale(saleId);
-
-      const payload = buildResult(canceledSale, refundedCents);
-
-      await this.outboxWriter.publish(
-        this.tenantPrisma.getClient(),
-        tenantId,
-        'Sale',
-        saleId,
-        'sale.canceled',
-        {
-          saleId,
-          tenantId,
-          actorId,
-          folio: canceledSale.folio ?? 'N/A',
-          reason: dto.reason,
-          refundedCents,
-          restockedItems,
-          canceledAt: payload.canceledAt,
-        },
-      );
 
       await this.saleRepo.markCancellationIdempotencySucceeded(
         idempotency.token,
@@ -3619,6 +3570,118 @@ export class SalesService {
 
       return payload;
     });
+  }
+
+  /**
+   * pay-in-store-pickup / T2 (S2) — the hold sweep's cancellation of an
+   * expired, unpaid pay-in-store sale: reason HOLD_EXPIRED, actor the system.
+   *
+   * Exactly the internals of `cancelSale` (stock reversed through the
+   * journal, promotion usage restored, `sale.canceled` outbox row) WITHOUT its
+   * up-front idempotency acquire: the caller already holds the sale row
+   * (`FOR UPDATE SKIP LOCKED`) inside its ambient transaction and re-checked
+   * the hold version and stage under that lock, and the `holdStage` it writes
+   * in the same transaction is the idempotency. Eligibility (CONFIRMED,
+   * CREDIT, nothing paid, no pending receipt) is the caller's decision under
+   * the same lock. Never called outside a transaction.
+   */
+  async expireHeldSale(saleId: string): Promise<CancelSaleResult> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(
+        'expireHeldSale must run inside the hold sweep transaction',
+      );
+    }
+    // Re-entrant: the sweep's transaction already holds this row lock.
+    const sale = await this.saleRepo.findByIdForUpdate(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+    return this.applyCancellation(sale, {
+      actorId: SYSTEM_ACTOR_ID,
+      reason: 'HOLD_EXPIRED',
+      stockActor: { kind: 'system', userId: SYSTEM_ACTOR_ID },
+    });
+  }
+
+  /**
+   * The cancellation itself, on a sale locked by the caller's ambient
+   * transaction: domain transition, exact stock reversal, refunds, promotion
+   * capacity restore and the `sale.canceled` outbox row. Shared by
+   * `cancelSale` (behind its idempotency row) and `expireHeldSale`.
+   */
+  private async applyCancellation(
+    sale: Sale,
+    input: {
+      actorId: string;
+      reason: SaleCancelReason;
+      stockActor: SaleStockActor;
+    },
+  ): Promise<CancelSaleResult> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const saleId = sale.id;
+    const { actorId, reason } = input;
+    const restockedItems = restockedItemsOf(sale);
+
+    const { sale: canceledSale, refundedCents } = sale.cancel(reason, {
+      actorId,
+    });
+
+    // O1 — restore exactly what the journal consumed. A sale confirmed
+    // before the journal went live is restored from its lines through the
+    // journal too; a replayed cancellation restores nothing twice.
+    await this.requireSaleStock().reverse({
+      saleId,
+      actor: input.stockActor,
+      lines: restockedItems,
+      confirmedAt: sale.confirmedAt,
+    });
+
+    const detail =
+      refundedCents === 0
+        ? null
+        : await this.saleRepo.findOneWithRelations(saleId);
+    const refunds =
+      refundedCents === 0
+        ? []
+        : buildCancellationRefunds(
+            (detail?.payments ?? []).map((payment) => ({
+              paymentId: payment.paymentId,
+              method: payment.method,
+              amountCents: payment.amountCents,
+            })),
+            refundedCents,
+            reason,
+          );
+
+    await this.saleRepo.persistCancellation(canceledSale, refunds);
+
+    // pca-2d2 — return every capacity unit this sale claimed, in the same
+    // ambient transaction, regardless of the monetary refund amount. A
+    // restore rejection must reject the cancellation before the outbox and
+    // the idempotency-success stamp, so the typed error is not caught here.
+    await this.promotionUsageRepo.restoreForSale(saleId);
+
+    const payload = buildCancelResult(canceledSale, refundedCents);
+
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      tenantId,
+      'Sale',
+      saleId,
+      'sale.canceled',
+      {
+        saleId,
+        tenantId,
+        actorId,
+        folio: canceledSale.folio ?? 'N/A',
+        reason,
+        refundedCents,
+        restockedItems,
+        canceledAt: payload.canceledAt,
+      },
+    );
+
+    return payload;
   }
 
   /** Read-only quote: no transaction, persistence, capacity claim or stock effects. */

@@ -27,6 +27,9 @@ import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
+import { SaleHoldSweepScheduler } from './sale-hold-sweep.scheduler';
+import { SaleHoldSweepStore } from './sale-hold-sweep.store';
+import { TenantModule } from '../shared/tenant/tenant.module';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { SaleCommentsModule } from './comments/sale-comments.module';
 import { ReceiptReviewController } from './review/receipt-review.controller';
@@ -57,6 +60,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     AdminPaymentMethodModule,
     CashRegisterModule,
     ChatbotRequestWrapperModule,
+    TenantModule,
   ],
   controllers: [
     SalesController,
@@ -70,6 +74,9 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
   providers: [
     SalesService,
     SaleHoldService,
+    // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
+    SaleHoldSweepStore,
+    SaleHoldSweepScheduler,
     SaleStockService,
     {
       provide: SALE_REPOSITORY,

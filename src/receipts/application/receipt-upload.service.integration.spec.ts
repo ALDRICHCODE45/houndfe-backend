@@ -34,17 +34,21 @@ class FakeStorage implements ReceiptStoragePort {
   readonly deleted: string[] = [];
   failNext = false;
   failDeletes = false;
+  /** Runs once before the next put (a concurrent writer committing). */
+  beforeNextPut: (() => Promise<unknown>) | null = null;
 
-  putPrivate(input: { key: string; bytes: Buffer; mimeType: string }) {
+  async putPrivate(input: { key: string; bytes: Buffer; mimeType: string }) {
+    const before = this.beforeNextPut;
+    this.beforeNextPut = null;
+    if (before) await before();
     if (this.failNext) {
       this.failNext = false;
-      return Promise.reject(new Error('spaces down'));
+      throw new Error('spaces down');
     }
     this.objects.set(input.key, {
       bytes: input.bytes,
       mimeType: input.mimeType,
     });
-    return Promise.resolve();
   }
 
   delete(key: string) {
@@ -548,6 +552,86 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
       ),
     ).toBe('RECEIPT_STORAGE_FAILED');
     expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+  });
+
+  describe('race with the pay-in-store hold sweep (pay-in-store-pickup / T2, S4)', () => {
+    /** What the sweep's expiry writes on the sale (cancel HOLD_EXPIRED). */
+    const sweepCancels = (saleId: string) =>
+      prisma.sale.update({
+        where: { id: saleId },
+        data: {
+          status: 'CANCELED',
+          cancelReason: 'HOLD_EXPIRED',
+          canceledAt: new Date(),
+          canceledByUserId: 'system',
+          debtCents: 0,
+        },
+      });
+
+    it('sweep cancels after the unlocked check: the upload is rejected and no receipt row is written', async () => {
+      const saleId = await createSale();
+      // The sweep commits its cancel between the upload's first (unlocked)
+      // sale check and its insert: here, while the original is being stored.
+      storage.beforeNextPut = () => sweepCancels(saleId);
+      expect(
+        await rejection(
+          service.upload({
+            saleId,
+            idempotencyKey: `wamid-${randomUUID()}`,
+            file: PNG_BYTES,
+            fields: {},
+          }),
+        ),
+      ).toBe('SALE_NOT_PAYABLE');
+      expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+      // The stored original of the rejected upload is not left behind.
+      expect(
+        [...storage.objects.keys()].some((key) => key.includes(saleId)),
+      ).toBe(false);
+    });
+
+    it('waits for a sweep holding the sale row and re-checks under the lock (legacy attachment)', async () => {
+      const saleId = await createSale();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const sweep = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT id FROM sales WHERE id = ${saleId} FOR UPDATE`;
+          locked();
+          await released;
+          await tx.sale.update({
+            where: { id: saleId },
+            data: {
+              status: 'CANCELED',
+              cancelReason: 'HOLD_EXPIRED',
+              canceledAt: new Date(),
+              debtCents: 0,
+            },
+          });
+        },
+        { timeout: 30_000 },
+      );
+      await isLocked;
+      const upload = rejection(
+        inRequest(() =>
+          service.attachLegacyUrl({
+            saleId,
+            mediaUrl: 'https://example.com/late.jpg',
+            declaredAmountCents: null,
+            declaredDate: null,
+            declaredReference: null,
+          }),
+        ),
+      );
+      // Give the upload time to pass its unlocked check and block on the row.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      release();
+      await sweep;
+      expect(await upload).toBe('SALE_NOT_PAYABLE');
+      expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+    });
   });
 
   it('keeps legacy mediaUrl attachments working with the same sale checks', async () => {

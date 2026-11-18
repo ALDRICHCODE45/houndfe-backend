@@ -21,6 +21,7 @@ describe('toNotificationView (S10)', () => {
       title: 'Nueva solicitud',
       body: 'Pregunta sin respuesta · S-000123',
       requestId: 'r-1',
+      saleId: null,
       createdAt: '2026-11-12T10:00:00.000Z',
       readAt: null,
       folio: 'S-000123',
@@ -204,5 +205,51 @@ describe('toNotificationView (S10)', () => {
       toNotificationView(row({ readAt: new Date('2026-11-12T11:00:00.000Z') }))
         .readAt,
     ).toBe('2026-11-12T11:00:00.000Z');
+  });
+
+  describe('sale notice (pay-in-store-pickup / T2)', () => {
+    it('a SALE_HOLD_REVIEW row names the sale, its folio and the reason; no request fields', () => {
+      expect(
+        toNotificationView(
+          row({
+            type: 'SALE_HOLD_REVIEW',
+            requestId: null,
+            requestStatus: null,
+            payload: {
+              saleId: 's-1',
+              saleFolio: 'V-000042',
+              reason: 'RECEIPT_PENDING',
+            },
+          }),
+        ),
+      ).toEqual({
+        id: 'n-1',
+        type: 'SALE_HOLD_REVIEW',
+        title: 'Apartado vencido: revisa la venta',
+        body: 'Venta V-000042 · Comprobante pendiente de revisar',
+        requestId: null,
+        saleId: 's-1',
+        createdAt: '2026-11-12T10:00:00.000Z',
+        readAt: null,
+        folio: 'V-000042',
+        subtype: null,
+        cause: null,
+        reason: null,
+        requestOpen: null,
+        level: null,
+      });
+    });
+
+    it('reads an odd payload with nulls instead of failing', () => {
+      const view = toNotificationView(
+        row({ type: 'SALE_HOLD_REVIEW', requestId: null, payload: null }),
+      );
+      expect(view).toMatchObject({
+        saleId: null,
+        folio: null,
+        body: '',
+        title: 'Apartado vencido: revisa la venta',
+      });
+    });
   });
 });

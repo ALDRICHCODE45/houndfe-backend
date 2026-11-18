@@ -20,6 +20,11 @@ import {
   UNANSWERED_LEVELS,
   type UnansweredLevel,
 } from './chatbot-request-notice';
+import {
+  SALE_HOLD_REVIEW_NOTICE,
+  saleHoldReviewText,
+  type SaleHoldReviewPayload,
+} from './sale-hold-notice';
 
 export interface NotificationView {
   id: string;
@@ -27,9 +32,17 @@ export interface NotificationView {
   title: string;
   body: string;
   requestId: string | null;
+  /**
+   * pay-in-store-pickup / T2: the sale a sale notice (`SALE_HOLD_REVIEW`)
+   * points at; `null` for every request notice.
+   */
+  saleId: string | null;
   createdAt: string;
   readAt: string | null;
-  /** `S-000123`, as the inbox shows it; `null` on a row without one. */
+  /**
+   * `S-000123`, as the inbox shows it; the sale folio as stored for a sale
+   * notice; `null` on a row without one.
+   */
   folio: string | null;
   /** The request subtype (`UNKNOWN_QUESTION`, `RESTOCK`, …), not its label. */
   subtype: string | null;
@@ -65,6 +78,7 @@ function payloadOf(value: unknown): Partial<NoticePayload> | null {
 }
 
 export function toNotificationView(row: NotificationViewRow): NotificationView {
+  if (row.type === SALE_HOLD_REVIEW_NOTICE) return toSaleNoticeView(row);
   const payload = payloadOf(row.payload);
   const reason = (NOTICE_REASONS as readonly unknown[]).includes(
     payload?.reason,
@@ -76,6 +90,7 @@ export function toNotificationView(row: NotificationViewRow): NotificationView {
     type: row.type,
     ...noticeText(row.type, payload),
     requestId: row.requestId,
+    saleId: null,
     createdAt: row.createdAt.toISOString(),
     readAt: row.readAt?.toISOString() ?? null,
     folio:
@@ -92,5 +107,26 @@ export function toNotificationView(row: NotificationViewRow): NotificationView {
       (UNANSWERED_LEVELS as readonly unknown[]).includes(payload?.level)
         ? (payload?.level as UnansweredLevel)
         : null,
+  };
+}
+
+/** A sale notice: no request fields, the sale and its folio from the payload. */
+function toSaleNoticeView(row: NotificationViewRow): NotificationView {
+  const payload = (payloadOf(row.payload) ??
+    {}) as unknown as Partial<SaleHoldReviewPayload>;
+  return {
+    id: row.id,
+    type: row.type,
+    ...saleHoldReviewText(payload),
+    requestId: null,
+    saleId: typeof payload.saleId === 'string' ? payload.saleId : null,
+    createdAt: row.createdAt.toISOString(),
+    readAt: row.readAt?.toISOString() ?? null,
+    folio: typeof payload.saleFolio === 'string' ? payload.saleFolio : null,
+    subtype: null,
+    cause: null,
+    reason: null,
+    requestOpen: null,
+    level: null,
   };
 }

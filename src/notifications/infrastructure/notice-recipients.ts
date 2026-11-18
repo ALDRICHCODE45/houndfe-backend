@@ -73,20 +73,9 @@ export async function resolveRecipients(
       ? [plain(membership.userId)]
       : [];
   }
-  const users = await tx.user.findMany({
-    where: {
-      isActive: true,
-      AND: AUDIENCE_GRANTS[audience].map(([action, subject]) => ({
-        tenantMemberships: {
-          some: { tenantId, ...roleGrants(action, subject) },
-        },
-      })),
-    },
-    select: { id: true },
-  });
-  const ids = users
-    .map((user) => user.id)
-    .filter((userId) => userId !== notice.actorUserId);
+  const ids = (
+    await usersWithGrants(tx, tenantId, AUDIENCE_GRANTS[audience])
+  ).filter((userId) => userId !== notice.actorUserId);
   if (audience !== 'ESCALATION_VIEWERS') return ids.map(plain);
   // The assignee, held or not as a viewer, is named by the sweep; ASSIGNEE
   // wins over ESCALATION when both apply.
@@ -111,6 +100,30 @@ export async function resolveRecipients(
     }
   }
   return recipients;
+}
+
+/**
+ * Active users of the tenant holding EVERY grant (merged across all their
+ * memberships, `manage` / `all` included). Shared by the request audiences and
+ * the sale-hold notice (pay-in-store-pickup / T2).
+ */
+export async function usersWithGrants(
+  tx: RecipientClient,
+  tenantId: string,
+  grants: ReadonlyArray<readonly [string, string]>,
+): Promise<string[]> {
+  const users = await tx.user.findMany({
+    where: {
+      isActive: true,
+      AND: grants.map(([action, subject]) => ({
+        tenantMemberships: {
+          some: { tenantId, ...roleGrants(action, subject) },
+        },
+      })),
+    },
+    select: { id: true },
+  });
+  return users.map((user) => user.id);
 }
 
 /** Users that turned email off. No row means the default: email on. */

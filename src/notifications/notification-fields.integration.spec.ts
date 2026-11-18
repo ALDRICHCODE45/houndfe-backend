@@ -118,6 +118,8 @@ const ITEM_KEYS = [
   'reason',
   'requestId',
   'requestOpen',
+  // pay-in-store-pickup / T2: additive, null on every request notice.
+  'saleId',
   'subtype',
   'title',
   'type',

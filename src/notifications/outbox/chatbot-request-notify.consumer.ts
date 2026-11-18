@@ -36,8 +36,15 @@ import {
   type NotificationEventsPort,
 } from '../domain/notification-events.port';
 import {
+  SALE_HOLD_REVIEW_GRANTS,
+  asSaleHoldReviewNotice,
+  type SaleHoldReviewNotice,
+  type SaleHoldReviewPayload,
+} from '../domain/sale-hold-notice';
+import {
   emailDisabledAmong,
   resolveRecipients,
+  usersWithGrants,
 } from '../infrastructure/notice-recipients';
 
 export const NOTICE_NOTIFY_BATCH_SIZE = Symbol.for('NoticeNotifyBatchSize');
@@ -124,6 +131,11 @@ export class ChatbotRequestNotifyConsumer {
   }
 
   private async apply(tx: Prisma.TransactionClient, row: NotifyRow) {
+    const saleNotice = asSaleHoldReviewNotice(row.payload);
+    if (saleNotice) {
+      await this.applySaleHoldReview(tx, row, saleNotice);
+      return;
+    }
     const notice = parseNotice(row.payload);
     // An SLA notice can be held until an opening: judge it against the request
     // as it is NOW. A drop is done, not failed (no retry), and delivers nothing.
@@ -176,6 +188,66 @@ export class ChatbotRequestNotifyConsumer {
         notificationId: item.id,
         type: item.type,
         requestId: item.requestId,
+      }));
+      if (this.events.publishCreatedMany) {
+        await this.events.publishCreatedMany(tx, events);
+      } else {
+        for (const event of events) {
+          await this.events.publishCreated(tx, event);
+        }
+      }
+    }
+    await tx.outboxEvent.update({
+      where: { id: row.id },
+      data: {
+        status: OutboxEventStatus.PUBLISHED,
+        publishedAt: new Date(),
+        lastError: null,
+      },
+    });
+  }
+
+  /**
+   * pay-in-store-pickup / T2 (S4): a sale notice. Same delivery as a request
+   * notice (idempotent per `dedupKey`, realtime hook, row PUBLISHED in this
+   * transaction) but no request (`requestId` null), recipients from
+   * `update:Sale`, and no email.
+   */
+  private async applySaleHoldReview(
+    tx: Prisma.TransactionClient,
+    row: NotifyRow,
+    notice: SaleHoldReviewNotice,
+  ): Promise<void> {
+    const recipients = await usersWithGrants(
+      tx,
+      row.tenantId,
+      SALE_HOLD_REVIEW_GRANTS,
+    );
+    if (recipients.length > 0) {
+      const payload: SaleHoldReviewPayload = {
+        saleId: notice.saleId,
+        saleFolio: notice.saleFolio,
+        reason: notice.reason,
+      };
+      const created = await tx.notification.createManyAndReturn({
+        data: recipients.map((userId) => ({
+          tenantId: row.tenantId,
+          userId,
+          type: notice.type,
+          requestId: null,
+          // SAFETY: the payload holds only strings.
+          payload: payload as unknown as Prisma.InputJsonObject,
+          dedupKey: notice.dedupKey,
+        })),
+        skipDuplicates: true,
+        select: { id: true, userId: true, type: true },
+      });
+      const events = created.map((item) => ({
+        tenantId: row.tenantId,
+        userId: item.userId,
+        notificationId: item.id,
+        type: item.type,
+        requestId: null,
       }));
       if (this.events.publishCreatedMany) {
         await this.events.publishCreatedMany(tx, events);
