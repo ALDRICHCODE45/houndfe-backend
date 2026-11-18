@@ -1,7 +1,7 @@
 import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleRefundMethod } from '../domain/sale.repository';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
-import type { SaleHoldView } from '../domain/sale-hold';
+import type { StaffSaleHoldView } from '../domain/sale-hold';
 
 export type SaleTimelineEventType =
   | 'SALE_REGISTERED'
@@ -163,7 +163,7 @@ export interface SaleDetailResponseDto {
    * stage, version }` when the bot declared IN_STORE, else null. Always
    * present on GET /sales/:id (optional only so older fixtures type-check).
    */
-  hold?: SaleHoldView | null;
+  hold?: StaffSaleHoldView | null;
   items: SaleDetailItemDto[];
   payments: SaleDetailPaymentDto[];
   timeline: SaleDetailTimelineEventDto[];

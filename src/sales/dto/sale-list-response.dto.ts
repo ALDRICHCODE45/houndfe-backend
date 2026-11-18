@@ -1,4 +1,4 @@
-import type { SaleHoldView } from '../domain/sale-hold';
+import type { StaffSaleHoldView } from '../domain/sale-hold';
 import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
 
@@ -33,7 +33,7 @@ export interface SaleListRowDto {
    * pay-in-store-pickup / T1 — the counter-payment hold; null unless the bot
    * declared IN_STORE. Always present on the wire (optional only for typing).
    */
-  hold?: SaleHoldView | null;
+  hold?: StaffSaleHoldView | null;
 }
 
 export interface SaleListResponseDto {

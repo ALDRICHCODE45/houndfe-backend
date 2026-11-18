@@ -1,6 +1,8 @@
 /**
  * pay-in-store-pickup / T3 (S2, S3, S6) — the sale-level items of the bot
- * feed: `sale.pickup_reminder`, `sale.pickup_expired`, `sale.pickup_extended`.
+ * feed: `sale.pickup_reminder`, `sale.pickup_expired`, `sale.pickup_extended`
+ * and (T6 / S12) `sale.pickup_expired_review`. Every payload carries the
+ * branch display name (`branchName`, the tenant's `name`).
  *
  * Always on the caller's transaction (the hold change and its item commit or
  * roll back together) through `insertFeedItems`, so they share the feed's
@@ -18,6 +20,7 @@
 import { canonicalPhone } from '../domain/canonical-phone';
 import {
   buildPickupExpiredPayload,
+  buildPickupExpiredReviewPayload,
   buildPickupExtendedPayload,
   buildPickupReminderPayload,
   FEED_TYPE,
@@ -62,18 +65,36 @@ const missingDeadline = (): never => {
   throw new Error('feed pickup: the sale has no hold deadline');
 };
 
+/** Display name of the sale's branch (the tenant), or null if unreadable. */
+async function branchNameOf(
+  tx: TenantClient,
+  tenantId: string,
+): Promise<string | null> {
+  const tenant = await tx.tenant.findUnique({
+    where: { id: tenantId },
+    select: { name: true },
+  });
+  return tenant?.name ?? null;
+}
+
+interface SaleItemContext {
+  conversationRef: string | null;
+  branchName: string | null;
+}
+
 async function enqueueSaleItem(
   tx: TenantClient,
   tenantId: string,
   sale: PickupFeedSale,
   type: string,
-  build: (conversationRef: string | null) => Record<string, unknown>,
+  build: (context: SaleItemContext) => Record<string, unknown>,
 ): Promise<boolean> {
   const conversationRef = await saleConversationRef(
     tx,
     tenantId,
     sale.customerId,
   );
+  const branchName = await branchNameOf(tx, tenantId);
   const inserted = await insertFeedItems(
     tx,
     tenantId,
@@ -82,7 +103,7 @@ async function enqueueSaleItem(
         saleId: sale.id,
         type,
         conversationRef,
-        payload: build(conversationRef),
+        payload: build({ conversationRef, branchName }),
       },
     ],
     { skipDuplicates: true },
@@ -103,18 +124,21 @@ export function enqueuePickupReminder(
     tenantId,
     sale,
     FEED_TYPE.pickupReminder,
-    (conversationRef) =>
+    (context) =>
       buildPickupReminderPayload({
         saleId: sale.id,
         folio: sale.folio,
         holdUntil,
         holdVersion,
-        conversationRef,
+        ...context,
       }),
   );
 }
 
-/** `sale.pickup_expired` (S2): the T2 sweep cancelled the unpaid sale. */
+/**
+ * `sale.pickup_expired` (S2): the unpaid sale was cancelled HOLD_EXPIRED, by
+ * the T2 sweep or by a staff manual expiry (T6). Same payload either way.
+ */
 export function enqueuePickupExpired(
   tx: TenantClient,
   tenantId: string,
@@ -126,21 +150,51 @@ export function enqueuePickupExpired(
     tenantId,
     sale,
     FEED_TYPE.pickupExpired,
-    (conversationRef) =>
+    (context) =>
       buildPickupExpiredPayload({
         saleId: sale.id,
         folio: sale.folio,
         holdVersion,
-        conversationRef,
+        ...context,
       }),
   );
 }
 
-/** `sale.pickup_extended` (S5, informational): staff moved the deadline. */
-export function enqueuePickupExtended(
+/**
+ * `sale.pickup_expired_review` (T6 / S12): the expiry decision was REVIEW (a
+ * payment or a pending receipt; no cancel), from the sweep or a manual
+ * expiry. Once per (sale, holdVersion) like the other sale items.
+ */
+export function enqueuePickupExpiredReview(
   tx: TenantClient,
   tenantId: string,
   sale: PickupFeedSale,
+  holdVersion: number,
+): Promise<boolean> {
+  return enqueueSaleItem(
+    tx,
+    tenantId,
+    sale,
+    FEED_TYPE.pickupExpiredReview,
+    (context) =>
+      buildPickupExpiredReviewPayload({
+        saleId: sale.id,
+        folio: sale.folio,
+        holdVersion,
+        ...context,
+      }),
+  );
+}
+
+/**
+ * `sale.pickup_extended` (S5, informational): staff moved the deadline. T6 /
+ * S12: `previousHoldExpiresAt` is the deadline before the edit (payload
+ * `previousHoldUntil` + `direction`).
+ */
+export function enqueuePickupExtended(
+  tx: TenantClient,
+  tenantId: string,
+  sale: PickupFeedSale & { previousHoldExpiresAt: Date | null },
   holdVersion: number,
 ): Promise<boolean> {
   const holdUntil = sale.holdExpiresAt ?? missingDeadline();
@@ -149,13 +203,14 @@ export function enqueuePickupExtended(
     tenantId,
     sale,
     FEED_TYPE.pickupExtended,
-    (conversationRef) =>
+    (context) =>
       buildPickupExtendedPayload({
         saleId: sale.id,
         folio: sale.folio,
         holdUntil,
+        previousHoldUntil: sale.previousHoldExpiresAt,
         holdVersion,
-        conversationRef,
+        ...context,
       }),
   );
 }

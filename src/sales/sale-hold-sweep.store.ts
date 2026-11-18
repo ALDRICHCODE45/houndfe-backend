@@ -17,8 +17,10 @@
  *      or `paymentIntent` moved is stale and left alone;
  *   3. `planHoldStep` decides from the locked row (and, at the deadline, the
  *      sale's PENDING receipts); the feed item / cancellation / staff notice
- *      and the new `holdStage` commit together, guarded by the version and
- *      stage read under the lock.
+ *      (+ T6 / S12 `sale.pickup_expired_review` for the bot) and the new
+ *      `holdStage` commit together, guarded by the version and stage read
+ *      under the lock (`applyStep`, shared with the manual expiry
+ *      `expireNow`, T6 / S11).
  *
  * Lock order: the sale row first, then whatever the cancellation takes
  * (stock journal, promotion counters, outbox), and the feed's per-tenant
@@ -35,6 +37,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   enqueuePickupExpired,
+  enqueuePickupExpiredReview,
   enqueuePickupReminder,
 } from '../chatbot-requests/infrastructure/sale-feed-writes';
 import { describePrismaError } from '../chatbot-requests/infrastructure/prisma-error-detail';
@@ -42,8 +45,13 @@ import { enqueueSaleHoldReviewNotice } from '../notifications/infrastructure/sal
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { TenantRunnerService } from '../shared/tenant/tenant-runner.service';
-import { HOLD_REMINDER_LEAD_MS } from './domain/sale-hold';
-import { planHoldStep, STAGE_AFTER } from './domain/sale-hold-sweep';
+import { HOLD_REMINDER_LEAD_MS, HOLD_STAGE } from './domain/sale-hold';
+import {
+  planHoldStep,
+  STAGE_AFTER,
+  type HoldSweepPlan,
+} from './domain/sale-hold-sweep';
+import { saleHoldError } from './sale-hold.service';
 import { SalesService } from './sales.service';
 
 export interface HoldSweepResult {
@@ -92,7 +100,27 @@ interface LockedSale {
   holdVersion: number;
 }
 
+/** The locked read of one sale (sweep and manual expiry). */
+const LOCKED_SALE_COLUMNS = Prisma.sql`
+      SELECT "folio", "status"::text AS "status",
+             "paymentStatus"::text AS "paymentStatus", "paidCents",
+             "deliveryStatus"::text AS "deliveryStatus", "customerId",
+             "paymentIntent"::text AS "paymentIntent", "holdExpiresAt",
+             "holdReminderAt", "holdStage", "holdVersion"
+      FROM "sales"`;
+
 type Outcome = keyof Omit<HoldSweepResult, 'candidates' | 'failed'>;
+
+/** T6 — result of a manual expiry (POST /sales/:id/hold/expire `outcome`). */
+export type ManualExpiryOutcome = 'CANCELLED' | 'REVIEW' | 'SETTLED';
+
+const MANUAL_OUTCOME: Partial<
+  Record<HoldSweepPlan['kind'], ManualExpiryOutcome>
+> = {
+  expire: 'CANCELLED',
+  review: 'REVIEW',
+  settle: 'SETTLED',
+};
 
 /** A failed candidate is not retried before this (per process). */
 export const HOLD_FAILURE_BACKOFF_MS = 60_000;
@@ -207,12 +235,7 @@ export class SaleHoldSweepStore {
     const tx = this.tenantPrisma.getClient();
     const { id, tenantId } = candidate;
     const [row] = await tx.$queryRaw<LockedSale[]>(Prisma.sql`
-      SELECT "folio", "status"::text AS "status",
-             "paymentStatus"::text AS "paymentStatus", "paidCents",
-             "deliveryStatus"::text AS "deliveryStatus", "customerId",
-             "paymentIntent"::text AS "paymentIntent", "holdExpiresAt",
-             "holdReminderAt", "holdStage", "holdVersion"
-      FROM "sales"
+      ${LOCKED_SALE_COLUMNS}
       WHERE "tenantId" = ${tenantId} AND "id" = ${id}
       FOR UPDATE SKIP LOCKED`);
     if (!row) return 'skipped';
@@ -227,6 +250,91 @@ export class SaleHoldSweepStore {
       return 'stale';
     }
 
+    const { plan, outcome } = await this.applyStep(tenantId, id, row, now);
+    return plan.kind === 'wait' ? 'stale' : outcome;
+  }
+
+  /**
+   * pay-in-store-pickup / T6 (S11) — «Vencer apartado ahora»: the sweep's
+   * expiry decision for ONE sale, applied now by a staff member. Runs inside
+   * the caller's tenant transaction (the endpoint's, with its idempotency
+   * slot), so an error rolls everything back.
+   *
+   * The sale row is taken `FOR UPDATE` (waiting, not SKIP LOCKED: a staff
+   * request must get an answer, and a sweep or payment holding the row
+   * finishes first), then checked: IN_STORE, `holdStage` < 2, CONFIRMED,
+   * `holdVersion` == `expectedVersion`. The decision is `planHoldStep` and
+   * its effects are `applyStep`, the sweep's own code, evaluated as of the
+   * deadline (`max(now, holdExpiresAt)`): the hold is treated as lapsed, so
+   * the plan is always the expiry stage (expire / review / settle), never a
+   * reminder. The only difference from the sweep: a cancellation is by the
+   * acting user (`canceledByUserId`, stock actor), not the system.
+   *
+   * Race with the sweep: whoever locks the row first applies stage 2; the
+   * other sees stage 2 (manual: HOLD_ALREADY_CLOSED) or a moved stage (sweep:
+   * stale), so the sale is cancelled once.
+   */
+  async expireNow(
+    saleId: string,
+    actorUserId: string,
+    expectedVersion: number,
+    now: Date = new Date(),
+  ): Promise<ManualExpiryOutcome> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error('expireNow must run inside a tenant transaction');
+    }
+    const tx = this.tenantPrisma.getClient();
+    const tenantId = this.tenantPrisma.getTenantId();
+    const [row] = await tx.$queryRaw<LockedSale[]>(Prisma.sql`
+      ${LOCKED_SALE_COLUMNS}
+      WHERE "tenantId" = ${tenantId} AND "id" = ${saleId}
+      FOR UPDATE`);
+    // Drafts stay private to the POS draft endpoints (as PATCH /hold).
+    if (!row || row.status === 'DRAFT') {
+      throw saleHoldError(404, 'SALE_NOT_FOUND');
+    }
+    if (row.paymentIntent !== 'IN_STORE') {
+      throw saleHoldError(409, 'SALE_NOT_PAY_IN_STORE');
+    }
+    if (row.holdStage >= HOLD_STAGE.EXPIRED) {
+      throw saleHoldError(409, 'HOLD_ALREADY_CLOSED');
+    }
+    if (row.status !== 'CONFIRMED' || row.holdExpiresAt === null) {
+      throw saleHoldError(409, 'SALE_HOLD_NOT_EDITABLE');
+    }
+    if (row.holdVersion !== expectedVersion) {
+      throw saleHoldError(409, 'HOLD_VERSION_CONFLICT');
+    }
+
+    const decisionAt = new Date(
+      Math.max(now.getTime(), row.holdExpiresAt.getTime()),
+    );
+    const { plan } = await this.applyStep(tenantId, saleId, row, decisionAt, {
+      userId: actorUserId,
+    });
+    const outcome = MANUAL_OUTCOME[plan.kind];
+    if (!outcome) {
+      // Unreachable: at the deadline the plan is always an expiry plan.
+      throw new Error(`manual hold expiry: unexpected plan ${plan.kind}`);
+    }
+    return outcome;
+  }
+
+  /**
+   * One step of the hold flow on a sale row the caller holds `FOR UPDATE`
+   * and has already checked (version, stage, intent): `planHoldStep` at
+   * `now`, its effects (feed item, cancellation, staff notice) and the new
+   * `holdStage`, all on the caller's transaction. Shared by the sweep and
+   * the manual expiry (`actor` set: the cancellation is that user's).
+   */
+  private async applyStep(
+    tenantId: string,
+    id: string,
+    row: LockedSale,
+    now: Date,
+    actor?: { userId: string },
+  ): Promise<{ plan: HoldSweepPlan; outcome: Outcome }> {
+    const tx = this.tenantPrisma.getClient();
     const expired =
       row.holdExpiresAt !== null &&
       row.holdExpiresAt.getTime() <= now.getTime();
@@ -247,7 +355,7 @@ export class SaleHoldSweepStore {
       },
       now,
     );
-    if (plan.kind === 'wait') return 'stale';
+    if (plan.kind === 'wait') return { plan, outcome: 'stale' };
 
     const feedSale = {
       id,
@@ -265,7 +373,7 @@ export class SaleHoldSweepStore {
         outcome = 'reminders';
         break;
       case 'expire':
-        await this.sales.expireHeldSale(id);
+        await this.sales.expireHeldSale(id, actor);
         // Feed lock last (after the sale, stock and outbox writes).
         if (row.customerId !== null) {
           await enqueuePickupExpired(tx, tenantId, feedSale, row.holdVersion);
@@ -279,6 +387,15 @@ export class SaleHoldSweepStore {
           holdVersion: row.holdVersion,
           reason: plan.reason,
         });
+        // T6 / S12: the bot learns the hold lapsed without a cancel.
+        if (row.customerId !== null) {
+          await enqueuePickupExpiredReview(
+            tx,
+            tenantId,
+            feedSale,
+            row.holdVersion,
+          );
+        }
         outcome = 'reviews';
         break;
       default:
@@ -291,7 +408,7 @@ export class SaleHoldSweepStore {
       WHERE "tenantId" = ${tenantId} AND "id" = ${id}
         AND "holdVersion" = ${row.holdVersion}
         AND "holdStage" = ${row.holdStage}`);
-    return outcome;
+    return { plan, outcome };
   }
 
   private async hasPendingReceipt(

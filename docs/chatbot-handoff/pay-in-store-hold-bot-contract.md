@@ -1,8 +1,10 @@
 # Chatbot ↔ backend: pay in store for pickup orders (T1, T2, T3)
 
-**Status:** T1, T2 and T3 on branch `feat/pay-in-store-hold`, not merged, not deployed. Migrations `20261118010000_pay_in_store_hold` then `20261118020000_sale_feed_items` (T2 adds none). Task: `odd/tasks/pay-in-store-pickup.md` (S1–S6). The feed items `sale.pickup_reminder`, `sale.pickup_expired` and `sale.pickup_extended` (S6) are **built**: `sale.pickup_extended` is emitted by the staff deadline edit (T3); the reminder and the expiry items are emitted by the hold sweep (**T2, built**, see "Hold sweep (T2)").
+**Status:** T1-T3 deployed to production on 2026-11-18 (main 4eb9aa38); T6 (manual expiry, `sale.pickup_expired_review`, `previousHoldUntil`/`direction`, `branchName`) on main after that, deploy pending. Migrations `20261118010000_pay_in_store_hold` then `20261118020000_sale_feed_items` (T2 adds none). Task: `odd/tasks/pay-in-store-pickup.md` (S1–S6). The feed items `sale.pickup_reminder`, `sale.pickup_expired` and `sale.pickup_extended` (S6) are **built**: `sale.pickup_extended` is emitted by the staff deadline edit (T3); the reminder and the expiry items are emitted by the hold sweep (**T2, built**, see "Hold sweep (T2)").
 
-Source: `src/chatbot-api/presentation/pay-in-store.controller.ts`, `src/sales/sale-hold.service.ts`, `src/sales/sale-hold-sweep.store.ts`, `src/sales/domain/sale-hold-sweep.ts`, `src/chatbot-requests/infrastructure/sale-feed-writes.ts`, `src/chatbot-api/presentation/pay-in-store-hold.integration.spec.ts`, `src/chatbot-requests/chatbot-feed-sale-items.integration.spec.ts`, `src/sales/sale-hold-sweep.integration.spec.ts`.
+**T6 / S12 (branch `feat/hold-expire-now`, not merged, no migration), all additive:** staff can expire a hold now from the POS («Vencer apartado ahora», `POST /sales/:id/hold/expire`): it runs the sweep's own decision, so `sale.pickup_expired` is now **also** emitted on a manual expiry (same payload, same once-per-`holdVersion` rule); a new item `sale.pickup_expired_review` tells you when an expiry did NOT cancel (payment or pending receipt), from the sweep and from the manual expiry; `sale.pickup_extended` gains `previousHoldUntil` and `direction`; every `sale.pickup_*` payload gains `branchName`. See "T6 / S12 changes" below.
+
+Source: `src/chatbot-api/presentation/pay-in-store.controller.ts`, `src/sales/sale-hold-expire.service.ts`, `src/sales/sale-hold-expire.integration.spec.ts`, `src/sales/sale-hold.service.ts`, `src/sales/sale-hold-sweep.store.ts`, `src/sales/domain/sale-hold-sweep.ts`, `src/chatbot-requests/infrastructure/sale-feed-writes.ts`, `src/chatbot-api/presentation/pay-in-store-hold.integration.spec.ts`, `src/chatbot-requests/chatbot-feed-sale-items.integration.spec.ts`, `src/sales/sale-hold-sweep.integration.spec.ts`.
 
 ## Flow
 
@@ -10,7 +12,7 @@ Source: `src/chatbot-api/presentation/pay-in-store.controller.ts`, `src/sales/sa
 2. If the customer chooses to pay at the counter, call `PATCH /chatbot-api/sales/:saleId/payment-intent` (below) and tell the customer the deadline (`holdUntil`).
 3. If the customer pays by transfer instead, do **not** call it; use the receipt flow as today.
 4. The customer pays at the counter; staff charge the sale in the POS. A paid sale (even partially) is never auto-cancelled.
-5. At `reminderAt` you get `sale.pickup_reminder`; at `holdUntil`, if nothing was paid and no transfer receipt is pending, the sale is cancelled and you get `sale.pickup_expired` (T2).
+5. At `reminderAt` you get `sale.pickup_reminder`; at `holdUntil`, if nothing was paid and no transfer receipt is pending, the sale is cancelled and you get `sale.pickup_expired` (T2). Staff may also expire the hold earlier from the POS (T6): same decision, same items. If a payment or a pending receipt exists, the sale is not cancelled and you get `sale.pickup_expired_review` (S12).
 
 Sales without a declared intent never get a deadline (existing pickup orders included).
 
@@ -97,6 +99,7 @@ They arrive on the same feed as the request items (`GET /chatbot-api/feed`, scop
   "payload": {
     "saleId": "8c1d…",
     "folio": "<sale folio>",
+    "branchName": "Sucursal Centro",
     "holdUntil": "2026-11-19T18:30:00.000Z",
     "holdVersion": 1,
     "conversationRef": "wa:5215512340000"
@@ -106,21 +109,26 @@ They arrive on the same feed as the request items (`GET /chatbot-api/feed`, scop
 }
 ```
 
-| `type`                 | Emitted when                                                                                                                         | `payload`                                                  | What you tell the customer                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------- |
-| `sale.pickup_reminder` | `reminderAt` passed (3 h before `holdUntil`; never for a hold of 3 h or less), sale still unpaid. Sweep (T2)                      | `{saleId, folio, holdUntil, holdVersion, conversationRef}` | "Tu pedido {folio} se aparta hasta {holdUntil}; pasa a pagarlo" |
-| `sale.pickup_expired`  | `holdUntil` passed unpaid, with no pending transfer receipt: the sale was cancelled (`HOLD_EXPIRED`) and its stock released. Sweep (T2)| `{saleId, folio, holdVersion, conversationRef}`            | "El apartado de {folio} venció y el pedido se canceló"          |
-| `sale.pickup_extended` | Staff moved the deadline (`PATCH /sales/:id/hold`), in the same transaction; only for a sale with a customer. Informational        | `{saleId, folio, holdUntil, holdVersion, conversationRef}` | "Tu apartado de {folio} ahora vence {holdUntil}"                |
+| `type` | Emitted when | `payload` | What you tell the customer |
+| --- | --- | --- | --- |
+| `sale.pickup_reminder` | `reminderAt` passed (3 h before `holdUntil`; never for a hold of 3 h or less), sale still unpaid. Sweep (T2) | `{saleId, folio, branchName, holdUntil, holdVersion, conversationRef}` | "Tu pedido {folio} se aparta hasta {holdUntil}; pasa a pagarlo" |
+| `sale.pickup_expired` | The hold lapsed unpaid, with no pending transfer receipt: the sale was cancelled (`HOLD_EXPIRED`) and its stock released. By the sweep at `holdUntil` (T2) **or by staff earlier with «Vencer apartado ahora» (T6)**; same payload either way | `{saleId, folio, branchName, holdVersion, conversationRef}` | "El apartado de {folio} venció y el pedido se canceló" |
+| `sale.pickup_expired_review` | **T6 / S12.** The hold lapsed (sweep at `holdUntil`, or staff manual expiry) but the sale has a partial payment or a `PENDING` transfer receipt: **not cancelled**, staff decide (S4) | `{saleId, folio, branchName, holdVersion, conversationRef}` | Your template for "venció el plazo; el equipo revisará su pago/comprobante" (owner-approved Meta template) |
+| `sale.pickup_extended` | Staff moved the deadline (`PATCH /sales/:id/hold`), in the same transaction; only for a sale with a customer. Informational | `{saleId, folio, branchName, holdUntil, previousHoldUntil, direction, holdVersion, conversationRef}` | `EXTENDED`: "Tu apartado de {folio} ahora vence {holdUntil}"; `SHORTENED`: "…ahora vence antes: {holdUntil}" |
 
 You compose the wording (tú/usted); there is no fallback text. `holdUntil` is ISO UTC: render it in the branch's time zone.
 
 **Envelope.** `requestId` is `null` and the item carries an extra top-level `saleId` (request items do not have this key). `folio` is the sale folio (`null` only for a sale that has none).
 
+**`branchName`** (T6 / S12, every `sale.pickup_*` type): the display name of the sale's branch (the tenant `name`, the same value the human-decision items call `branchName`), as a fallback for your templates. `null` only if the branch row cannot be read.
+
+**`previousHoldUntil` / `direction`** (T6 / S12, `sale.pickup_extended` only): `previousHoldUntil` is the deadline before the staff edit (ISO UTC; `null` only if the sale had none, which the bot's mark never leaves); `direction` is `"SHORTENED"` when the new `holdUntil` is earlier than `previousHoldUntil`, else `"EXTENDED"` (an unchanged deadline is `"EXTENDED"`).
+
 **`conversationRef`** (top level and payload, the same value): the one mirrored chat (`chatbot_conversations`) of the branch whose phone key is the canonical phone of the sale's customer, resolved like the transfer-receipt requests. `null` when the customer has no phone, no chat, or more than one chat. With `null`, use the conversation of your own checkout record for `saleId`; if you have none, ACK `STALE`. It contains the customer's phone: keep it out of logs.
 
 **`holdVersion` and staleness.** Each item belongs to one hold version (the `hold.version` of `GET /chatbot-api/checkouts/status`). Before you send, read the live hold: if `hold.version` is greater than the item's `holdVersion`, a later change overtook it (for example staff extended the deadline after a reminder was queued): ACK `STALE`. If the sale is already paid or cancelled, a reminder or an extension is moot: ACK `STALE`.
 
-**Exactly once.** The backend enqueues at most one item per (sale, type, `holdVersion`) (partial unique index `chatbot_feed_items_sale_hold_uq`): a sweep retry, a second replica or a repeated call is a no-op. Every staff edit bumps the version, so each edit brings one `sale.pickup_extended`, and the reset hold can bring a new reminder. The bot's own `PATCH …/payment-intent` emits **no** item. The feed is still at-least-once: dedupe by `deliveryId`.
+**Exactly once.** The backend enqueues at most one item per (sale, type, `holdVersion`) (partial unique index `chatbot_feed_items_sale_hold_uq`, which keys on the type, so it covers `sale.pickup_expired_review` with no migration): a sweep retry, a second replica, a manual expiry racing the sweep or a repeated call is a no-op. A hold version gets at most one of `sale.pickup_expired` / `sale.pickup_expired_review` (the expiry closes the hold, `stage` 2). Every staff edit bumps the version, so each edit brings one `sale.pickup_extended`, and the reset hold can bring a new reminder. The bot's own `PATCH …/payment-intent` emits **no** item. The feed is still at-least-once: dedupe by `deliveryId`.
 
 **ACK rules** (`POST /chatbot-api/deliveries/:deliveryId/outcome`, same body as every item):
 
@@ -148,9 +156,17 @@ Built. A backend interval (every 30 s, any number of replicas) walks the open ho
 | same | partially paid | `stage` 1, no reminder (staff review it at the deadline) | nothing |
 | same | fully paid or cancelled | `stage` 2 | nothing |
 | `holdUntil` passed | unpaid, no `PENDING` transfer receipt | sale cancelled `cancelReason: "HOLD_EXPIRED"` by the system: stock released through the journal, promotion capacity returned, `sale.canceled` event; `stage` 2 | `sale.pickup_expired` (once per `holdVersion`) |
-| `holdUntil` passed | partially paid, or a transfer receipt `PENDING` (S4) | **not cancelled**; staff get one in-app notice to decide (and refund if needed); `stage` 2 | nothing |
+| `holdUntil` passed | partially paid, or a transfer receipt `PENDING` (S4) | **not cancelled**; staff get one in-app notice to decide (and refund if needed); `stage` 2 | `sale.pickup_expired_review` (T6 / S12, once per `holdVersion`) |
 | `holdUntil` passed | fully paid, cancelled, or already handed over | `stage` 2 | nothing |
 
 A missed reminder is never sent after the deadline (the expiry stage runs instead). Items go only to sales with a customer (the bot's checkout always sets one). If staff extend a hold that stage 2 left uncancelled (pending receipt), the hold restarts (`stage` 0, `version` + 1, `sale.pickup_extended`) and is swept again at the new deadline.
+
+## T6 / S12 changes
+
+- **Manual expiry («Vencer apartado ahora», `POST /sales/:id/hold/expire`, staff only).** Runs the sweep's expiry row of the table above **now**, regardless of `holdUntil`, for a hold with `stage` < 2 at the version staff saw. Unpaid, no pending receipt → cancelled `HOLD_EXPIRED` (by the staff member, not the system) and you get **`sale.pickup_expired`, the same item and payload as the sweep's**; partial payment or pending receipt → `sale.pickup_expired_review`; fully paid → `stage` 2, nothing for you. Your staleness check is unchanged (`hold.version` does not move on an expiry; `hold.stage` becomes 2). The customer notice on expiry is the bot's to send (S10), with your approved template when the 24 h window is closed.
+- **`sale.pickup_expired_review`**: same envelope and ACK rules as the other `sale.*` types (`PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN`, `STALE`; both deferrals `422 OUTCOME_NOT_ALLOWED`), not in `pending-deliveries`, re-served by `saleUndeliveredResumeAfter` after a `410`. A sale that is paid or cancelled later does not withdraw it; ACK `STALE` if the live hold/sale makes the message moot.
+- **`sale.pickup_extended`**: `previousHoldUntil` + `direction` (see above).
+- **`branchName`** on every `sale.pickup_*` payload.
+- Your parser must accept the new type and the extra keys (an unknown type is ACKed `STALE` by the current bot, so deploying the backend first is safe).
 
 **Cancelling yourself.** `POST /chatbot-api/sales/:saleId/cancel` does not accept `HOLD_EXPIRED` (system-only reason). After a `sale.pickup_expired`, the sale is `CANCELED`; a later cancel call is the usual idempotent replay.

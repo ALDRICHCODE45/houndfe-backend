@@ -41,7 +41,7 @@ import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
 } from '../dto/sales-list-filter.types';
-import { toSaleHoldView } from '../domain/sale-hold';
+import { toStaffSaleHoldView } from '../domain/sale-hold';
 
 function extractLegacyReference(metadataJson: unknown): string | null {
   if (!metadataJson || typeof metadataJson !== 'object') {
@@ -163,6 +163,7 @@ type IdempotencyOperation =
   | 'sale_charge'
   | 'sale_payment'
   | 'sale_cancel'
+  | 'sale_hold_expire'
   | 'bot_sale_register'
   | 'sale_refund_settlement';
 
@@ -1873,7 +1874,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       paymentMethods: [...new Set(row.payments.map((p) => p.method))],
       shippingAddress: toSaleShippingAddressView(row, tenantId),
       // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
-      hold: toSaleHoldView(row),
+      // T6 (S10) — kept on a CANCELED sale, plus `expiredAt`.
+      hold: toStaffSaleHoldView(row),
     }));
   }
 
@@ -2257,7 +2259,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       ...(sale.sourceQuotation ? { quotationId: sale.sourceQuotation.id } : {}),
       shippingAddress: toSaleShippingAddressView(sale, tenantId),
       // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
-      hold: toSaleHoldView(sale),
+      // T6 (S10) — kept on a CANCELED sale, plus `expiredAt`.
+      hold: toStaffSaleHoldView(sale),
       items: sale.items.map((item) => {
         // Column-derived BXGY discriminator (design.md Decision 6). Same
         // predicate the domain SaleItem.isBuyXGetYReward() reads — we
@@ -2447,6 +2450,26 @@ export class PrismaSaleRepository implements ISaleRepository {
   }
 
   async markCancellationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void> {
+    return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
+  /**
+   * pay-in-store-pickup / T6 (S11) — POST /sales/:id/hold/expire slot. The
+   * caller acquires it INSIDE its transaction (conflict-safe branch), so a
+   * rejected expiry rolls the slot back with everything else. The slot is
+   * written WITHOUT its `saleId` (an unknown or foreign id must answer 404
+   * SALE_NOT_FOUND, not trip the FK); the request hash binds the sale and
+   * the success stamp sets `saleId`.
+   */
+  async acquireHoldExpireIdempotency(key: string, requestHash: string) {
+    return this.acquireIdempotency('sale_hold_expire', null, key, requestHash);
+  }
+
+  async markHoldExpireIdempotencySucceeded(
     token: string,
     saleId: string,
     payload: unknown,

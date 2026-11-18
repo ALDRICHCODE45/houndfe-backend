@@ -3584,17 +3584,31 @@ export class SalesService {
    * in the same transaction is the idempotency. Eligibility (CONFIRMED,
    * CREDIT, nothing paid, no pending receipt) is the caller's decision under
    * the same lock. Never called outside a transaction.
+   *
+   * T6 (S11) — a staff manual expiry («Vencer apartado ahora») passes the
+   * acting user: `canceledByUserId`, the `sale.canceled` actor and the stock
+   * reversal actor are that user instead of the system. Omitted = the sweep.
    */
-  async expireHeldSale(saleId: string): Promise<CancelSaleResult> {
+  async expireHeldSale(
+    saleId: string,
+    actor?: { userId: string },
+  ): Promise<CancelSaleResult> {
     if (!this.tenantPrisma.isInTransaction()) {
       throw new Error(
-        'expireHeldSale must run inside the hold sweep transaction',
+        'expireHeldSale must run inside the hold expiry transaction',
       );
     }
     // Re-entrant: the sweep's transaction already holds this row lock.
     const sale = await this.saleRepo.findByIdForUpdate(saleId);
     if (!sale) {
       throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+    if (actor) {
+      return this.applyCancellation(sale, {
+        actorId: actor.userId,
+        reason: 'HOLD_EXPIRED',
+        stockActor: { kind: 'user', userId: actor.userId },
+      });
     }
     return this.applyCancellation(sale, {
       actorId: SYSTEM_ACTOR_ID,

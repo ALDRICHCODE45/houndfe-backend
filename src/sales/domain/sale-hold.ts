@@ -54,6 +54,34 @@ export function toSaleHoldView(row: SaleHoldColumns): SaleHoldView | null {
   };
 }
 
+/**
+ * pay-in-store-pickup / T6 (S10) — the hold on STAFF reads (sale detail and
+ * list rows): the bot view plus `expiredAt`, when the expiry was applied.
+ *
+ * Derived without a column: a HOLD_EXPIRED cancellation (sweep or manual
+ * «Vencer apartado ahora») is the expiry, so `expiredAt` = `canceledAt`.
+ * The key is present ONLY then (additive: every other hold keeps its exact
+ * previous shape). An expiry that did NOT cancel (REVIEW / SETTLED, stage
+ * 2) stores no instant: no `expiredAt`; staff read `stage` 2 with
+ * `expiresAt` (the sweep applies it at the deadline; a manual expiry may be
+ * earlier).
+ */
+export interface StaffSaleHoldView extends SaleHoldView {
+  expiredAt?: string;
+}
+
+export function toStaffSaleHoldView(
+  row: SaleHoldColumns & {
+    cancelReason: string | null;
+    canceledAt: Date | null;
+  },
+): StaffSaleHoldView | null {
+  const view = toSaleHoldView(row);
+  if (view === null) return null;
+  if (row.cancelReason !== 'HOLD_EXPIRED' || !row.canceledAt) return view;
+  return { ...view, expiredAt: row.canceledAt.toISOString() };
+}
+
 export const SALE_HOLD_SELECT = {
   paymentIntent: true,
   holdExpiresAt: true,

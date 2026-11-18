@@ -31,6 +31,8 @@ export const FEED_TYPE = {
   pickupReminder: 'sale.pickup_reminder',
   pickupExpired: 'sale.pickup_expired',
   pickupExtended: 'sale.pickup_extended',
+  /** T6 / S12: the hold lapsed with a payment or a pending receipt; NOT cancelled. */
+  pickupExpiredReview: 'sale.pickup_expired_review',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -38,6 +40,7 @@ const SALE_FEED_TYPES: readonly string[] = [
   FEED_TYPE.pickupReminder,
   FEED_TYPE.pickupExpired,
   FEED_TYPE.pickupExtended,
+  FEED_TYPE.pickupExpiredReview,
 ];
 
 /** A sale-level item: it has a `saleId` and no request (no request audit). */
@@ -720,18 +723,22 @@ export function buildScheduledReminderPayload(input: {
  * migration keys on it (one item per sale, type and version), and the bot
  * compares it with the live hold (`GET /chatbot-api/checkouts/status`) to
  * drop an item a later change overtook. `conversationRef` is the one chat of
- * the sale customer's phone key, else `null`.
+ * the sale customer's phone key, else `null`. `branchName` (T6 / S12) is the
+ * display name of the sale's branch (the tenant), a fallback for the bot's
+ * templates; `null` only if the branch row cannot be read.
  */
 interface PickupPayloadInput {
   saleId: string;
   folio: string | null;
   holdVersion: number;
   conversationRef: string | null;
+  branchName: string | null;
 }
 
 const pickupBase = (input: PickupPayloadInput) => ({
   saleId: input.saleId,
   folio: input.folio,
+  branchName: input.branchName,
 });
 
 /** `sale.pickup_reminder` (S3): the hold expires at `holdUntil` (3 h ahead). */
@@ -746,7 +753,10 @@ export function buildPickupReminderPayload(
   };
 }
 
-/** `sale.pickup_expired` (S2): the hold lapsed unpaid; the sale was cancelled. */
+/**
+ * `sale.pickup_expired` (S2): the hold lapsed unpaid; the sale was cancelled
+ * (by the sweep at the deadline, or by staff with «Vencer apartado ahora»).
+ */
 export function buildPickupExpiredPayload(
   input: PickupPayloadInput,
 ): Record<string, unknown> {
@@ -757,13 +767,50 @@ export function buildPickupExpiredPayload(
   };
 }
 
-/** `sale.pickup_extended` (S5, informational): staff moved the deadline. */
+/**
+ * `sale.pickup_expired_review` (T6 / S12): the hold lapsed with a payment or
+ * a pending receipt, so the sale was NOT cancelled and staff decide (S4).
+ * Same fields as `sale.pickup_expired`.
+ */
+export function buildPickupExpiredReviewPayload(
+  input: PickupPayloadInput,
+): Record<string, unknown> {
+  return {
+    ...pickupBase(input),
+    holdVersion: input.holdVersion,
+    conversationRef: input.conversationRef,
+  };
+}
+
+/** Direction of a staff deadline change; an unchanged deadline is EXTENDED. */
+export type PickupHoldDirection = 'EXTENDED' | 'SHORTENED';
+
+export function pickupHoldDirection(
+  holdUntil: Date,
+  previousHoldUntil: Date | null,
+): PickupHoldDirection {
+  return previousHoldUntil !== null &&
+    holdUntil.getTime() < previousHoldUntil.getTime()
+    ? 'SHORTENED'
+    : 'EXTENDED';
+}
+
+/**
+ * `sale.pickup_extended` (S5, informational): staff moved the deadline. T6 /
+ * S12: `previousHoldUntil` is the deadline before the edit and `direction`
+ * compares both (`EXTENDED` when equal).
+ */
 export function buildPickupExtendedPayload(
-  input: PickupPayloadInput & { holdUntil: Date },
+  input: PickupPayloadInput & {
+    holdUntil: Date;
+    previousHoldUntil: Date | null;
+  },
 ): Record<string, unknown> {
   return {
     ...pickupBase(input),
     holdUntil: input.holdUntil.toISOString(),
+    previousHoldUntil: input.previousHoldUntil?.toISOString() ?? null,
+    direction: pickupHoldDirection(input.holdUntil, input.previousHoldUntil),
     holdVersion: input.holdVersion,
     conversationRef: input.conversationRef,
   };

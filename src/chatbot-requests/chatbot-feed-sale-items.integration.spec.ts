@@ -42,6 +42,7 @@ import { PrismaChatbotFeedStore } from './infrastructure/prisma-chatbot-feed.sto
 import { PrismaChatbotRecoveryStore } from './infrastructure/prisma-chatbot-recovery.store';
 import {
   enqueuePickupExpired,
+  enqueuePickupExpiredReview,
   enqueuePickupExtended,
   enqueuePickupReminder,
   type PickupFeedSale,
@@ -237,7 +238,21 @@ describeIfDb('sale-level feed items (PostgreSQL)', () => {
       ),
     extended: (b: Bot, s: PickupFeedSale, version: number) =>
       inTx(b.tenantId, () =>
-        enqueuePickupExtended(tenantPrisma.getClient(), b.tenantId, s, version),
+        enqueuePickupExtended(
+          tenantPrisma.getClient(),
+          b.tenantId,
+          { ...s, previousHoldExpiresAt: null },
+          version,
+        ),
+      ),
+    expiredReview: (b: Bot, s: PickupFeedSale, version: number) =>
+      inTx(b.tenantId, () =>
+        enqueuePickupExpiredReview(
+          tenantPrisma.getClient(),
+          b.tenantId,
+          s,
+          version,
+        ),
       ),
   };
 
@@ -303,6 +318,7 @@ describeIfDb('sale-level feed items (PostgreSQL)', () => {
       payload: {
         saleId: s.id,
         folio: s.folio,
+        branchName: 'Sucursal Apartado',
         holdUntil: HOLD_UNTIL.toISOString(),
         holdVersion: 1,
         conversationRef: `wa:${s.customerKey}`,
@@ -325,6 +341,9 @@ describeIfDb('sale-level feed items (PostgreSQL)', () => {
     expect(await enqueue.expired(b, s, 2)).toBe(false);
     expect(await enqueue.extended(b, s, 3)).toBe(true);
     expect(await enqueue.extended(b, s, 3)).toBe(false);
+    // T6 / S12: the existing expression index covers the new type too.
+    expect(await enqueue.expiredReview(b, s, 3)).toBe(true);
+    expect(await enqueue.expiredReview(b, s, 3)).toBe(false);
 
     const rows = await saleItems(b.tenantId, s.id);
     expect(
@@ -337,11 +356,25 @@ describeIfDb('sale-level feed items (PostgreSQL)', () => {
       ['sale.pickup_reminder', 2],
       ['sale.pickup_expired', 2],
       ['sale.pickup_extended', 3],
+      ['sale.pickup_expired_review', 3],
     ]);
     const expired = rows[2].payload as Record<string, unknown>;
     expect(Object.keys(expired).sort()).toEqual(
-      ['conversationRef', 'folio', 'holdVersion', 'saleId'].sort(),
+      [
+        'branchName',
+        'conversationRef',
+        'folio',
+        'holdVersion',
+        'saleId',
+      ].sort(),
     );
+    expect(rows[4].payload).toEqual({
+      saleId: s.id,
+      folio: s.folio,
+      branchName: 'Sucursal Apartado',
+      holdVersion: 3,
+      conversationRef: null,
+    });
   });
 
   it('conversationRef is null without a customer phone, without a chat, or with several chats for the key', async () => {

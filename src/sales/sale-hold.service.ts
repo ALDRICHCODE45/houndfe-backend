@@ -199,6 +199,7 @@ export class SaleHoldService {
               folio: updated.folio,
               holdExpiresAt: updated.holdExpiresAt,
               customerId: updated.customerId,
+              previousHoldExpiresAt: row.holdExpiresAt,
             },
             updated.holdVersion,
           );

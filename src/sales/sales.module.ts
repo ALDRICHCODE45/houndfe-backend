@@ -27,6 +27,7 @@ import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
+import { SaleHoldExpireService } from './sale-hold-expire.service';
 import { SaleHoldSweepScheduler } from './sale-hold-sweep.scheduler';
 import { SaleHoldSweepStore } from './sale-hold-sweep.store';
 import { TenantModule } from '../shared/tenant/tenant.module';
@@ -77,6 +78,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
     SaleHoldSweepStore,
     SaleHoldSweepScheduler,
+    SaleHoldExpireService,
     SaleStockService,
     {
       provide: SALE_REPOSITORY,

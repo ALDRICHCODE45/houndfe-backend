@@ -1,4 +1,4 @@
-import type { SaleHoldView } from './sale-hold';
+import type { StaffSaleHoldView } from './sale-hold';
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
 import type { ShippingAddressSnapshot } from './shipping-address-snapshot';
@@ -219,6 +219,23 @@ export interface ISaleRepository {
   >;
 
   markCancellationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
+  /** pay-in-store-pickup / T6 — POST /sales/:id/hold/expire idempotency slot. */
+  acquireHoldExpireIdempotency(
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markHoldExpireIdempotencySucceeded(
     token: string,
     saleId: string,
     payload: unknown,
@@ -464,7 +481,7 @@ export interface ISaleRepository {
       /** Snapshot plus source status; null when the sale has no snapshot. */
       shippingAddress: SaleShippingAddressView | null;
       /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
-      hold?: SaleHoldView | null;
+      hold?: StaffSaleHoldView | null;
     }>
   >;
 
@@ -568,7 +585,7 @@ export interface ISaleRepository {
     /** Snapshot plus source status; null without a snapshot. Absent on older repository mocks. */
     shippingAddress?: SaleShippingAddressView | null;
     /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
-    hold?: SaleHoldView | null;
+    hold?: StaffSaleHoldView | null;
     items: Array<{
       productName: string;
       variantName: string | null;
