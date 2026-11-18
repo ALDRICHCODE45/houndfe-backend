@@ -552,7 +552,7 @@ Hard-delete de una cotización. **Solo** `DRAFT` y `CANCELLED` se pueden elimina
 Contrato completo (bodies, respuestas, errores, ejemplos): [frontend-handoff/23-quotation-sale-conversion.md](frontend-handoff/23-quotation-sale-conversion.md). Resumen:
 
 - `POST /quotations/from-sale/:saleId` (`create:Quotation` + `delete:Sale`, header `Idempotency-Key` obligatorio): crea una cotización `DRAFT` con cliente, vendedor, lista de precios, líneas (precio vigente) y `customerNotes` opcional del body, y **borra** la venta borrador en la misma transacción. Responde `201 { quotation, discardedSaleId, droppedAdjustments }`. `droppedAdjustments` lista lo que una cotización no puede representar (promo de orden, 2x1/avanzadas, promos que ya no aplican).
-- `POST /quotations/:id/convert-to-sale` (`create:Sale` + `update:Quotation`, header `Idempotency-Key` obligatorio): desde `DRAFT` o `SENT` no vencida crea una venta borrador del POS con los **precios y descuentos cotizados** y pasa la cotización a `CONVERTED_TO_SALE` con `saleId`. Responde `201 { quotation, sale }`. Rechazos `422`: `QUOTATION_EXPIRED`, `QUOTATION_CANCELLED`, `QUOTATION_ALREADY_CONVERTED` (+ `saleId`), `QUOTATION_HAS_NO_ITEMS`, `QUOTATION_LINES_UNAVAILABLE` (+ `lines` con el motivo por línea: producto inexistente/no vendible, stock insuficiente).
+- `POST /quotations/:id/convert-to-sale` (`create:Sale` + `update:Quotation`, header `Idempotency-Key` obligatorio): desde `DRAFT` o `SENT` no vencida crea una venta borrador del POS con los **precios y descuentos cotizados** y pasa la cotización a `CONVERTED_TO_SALE` con `saleId`. Responde `201 { quotation, sale, suppressedPromotions }`. **Exacta por defecto (S8):** al abrir, el total de la venta es exactamente el de la cotización (por línea y total, al centavo); las promociones automáticas que aplicarían hoy se **vetan** en la venta y se listan en `suppressedPromotions: Array<{ promotionId: string; title: string | null }>` (`[]` si ninguna). Después el cajero ajusta con las rutas normales del borrador: re-activar una promo `POST /sales/drafts/:id/manual-promotions/:promotionId`, quitarla `DELETE /sales/drafts/:id/promotions/:promotionId`, cambiar precio `PATCH /sales/drafts/:id/items/:itemId/price`, descuentos `PATCH|DELETE /sales/drafts/:id/items/:itemId/discount` y `PATCH|DELETE /sales/drafts/:id/discount` (detalle en `docs/frontend-handoff/23-quotation-sale-conversion.md`). Rechazos `422`: `QUOTATION_EXPIRED`, `QUOTATION_CANCELLED`, `QUOTATION_ALREADY_CONVERTED` (+ `saleId`), `QUOTATION_HAS_NO_ITEMS`, `QUOTATION_LINES_UNAVAILABLE` (+ `lines` con el motivo por línea: producto inexistente/no vendible, stock insuficiente).
 - Mismo `Idempotency-Key` + misma petición → misma respuesta (no duplica). Dos conversiones simultáneas de la misma cotización → una sola venta.
 
 ---
@@ -587,10 +587,10 @@ Contrato completo (bodies, respuestas, errores, ejemplos): [frontend-handoff/23-
   subtotalCents: number;               // subtotal en centavos (sin descuentos)
   discountCents: number;               // descuento total aplicado en centavos
   totalCents: number;                  // total final = subtotal - discount (IVA incluido)
-  ivaBreakdown: {                      // IVA incluido por clasificación (ver 3.18). [] = no mostrar IVA
+  ivaBreakdown: Array<{                // IVA incluido por clasificación (ver 3.18). [] = no mostrar IVA
     classification: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO' | 'NOT_TAXABLE';
-    amountCents: number;
-  }[];
+    amountCents: number;               // entero >= 0 (centavos)
+  }>;
   // taxRate / taxCents YA NO existen en la respuesta (IVA por ítem, ver 3.18)
   manuallyEnded: boolean;              // interno — siempre false para cotizaciones
   items: QuotationItemResponseDto[];
@@ -603,6 +603,8 @@ Contrato completo (bodies, respuestas, errores, ejemplos): [frontend-handoff/23-
   optedInManualPromotionIds: string[]; // IDs de promos MANUAL aplicadas
   customerNotes: string | null;        // notas para el cliente (max 280 chars)
   saleId: string | null;               // venta borrador creada (solo CONVERTED_TO_SALE; null si se descartó)
+  saleStatus: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | null;
+                                       // estado de la venta enlazada; null sin enlace o si la venta ya no existe
   convertedAt: string | null;          // ISO 8601, cuándo se convirtió
   createdAt: string;                   // ISO 8601
   updatedAt: string;                   // ISO 8601
@@ -610,6 +612,8 @@ Contrato completo (bodies, respuestas, errores, ejemplos): [frontend-handoff/23-
 ```
 
 La venta borrador creada desde una cotización trae `quotationId` en sus lecturas (`GET /sales/drafts`, respuestas de mutaciones del borrador y `GET /sales/:id`). En ventas que no vienen de una cotización la clave **no aparece**.
+
+"Ver venta" según `saleStatus`: `DRAFT` → la venta es un borrador del POS **del cajero que convirtió** (`sale.userId`); sólo él la ve en `GET /sales/drafts` (que lista únicamente los borradores propios) y sólo él puede modificarla (otro usuario recibe `SALE_UPDATE_FORBIDDEN`); `GET /sales/:id` da 404 para borradores. `CONFIRMED` / `CANCELED` → `GET /sales/:id` (`read:Sale`). `null` → sin venta (mostrar "Venta descartada" si `status = CONVERTED_TO_SALE`).
 
 ### `QuotationItemResponseDto`
 

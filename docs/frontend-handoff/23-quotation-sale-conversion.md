@@ -1,6 +1,6 @@
 # POS "Pedido" tab — quotation ↔ sale conversion
 
-**Status:** implemented on `feat/quotation-sale-conversion` (worktree `houndfe-backend-quotation-sale`), **not merged, not pushed, not deployed**. Task: `odd/tasks/quotation-sale-conversion.md` (T1, specs S1–S7). Migration `20261118000000_quotation_sale_conversion` must be deployed first.
+**Status:** T1 (specs S1–S7) merged to `main`, deploy pending. T2 (S8: exact quoted total at opening, `suppressedPromotions`; plus `saleStatus` on quotation reads) on branch `fix/quotation-conversion-exact-price`, **not merged, not pushed, not deployed**; no migration. Task: `odd/tasks/quotation-sale-conversion.md`. Migration `20261118000000_quotation_sale_conversion` (T1) must be deployed first.
 
 Shapes come from the code and its specs: `src/quotations/controllers/quotation-sale-conversion.controller.ts`, `src/quotations/application/quotation-sale-conversion.service.ts`, `src/quotations/domain/quotation-sale-conversion.mapper.ts`, `quotation-sale-conversion.integration.spec.ts` (real PostgreSQL). Nothing was sent to the dev API.
 
@@ -55,7 +55,7 @@ Response `201`:
     "items": [ /* QuotationItemResponseDto, see docs/quotations-frontend.md §4 */ ],
     "subtotalCents": 25000, "discountCents": 500, "totalCents": 24500,
     "ivaBreakdown": [ { "classification": "IVA_16", "amountCents": 3379 } ],
-    "saleId": null, "convertedAt": null,
+    "saleId": null, "saleStatus": null, "convertedAt": null,
     "…": "rest of QuotationResponseDto"
   },
   "discardedSaleId": "9d2c…",
@@ -86,6 +86,8 @@ After `201`: clear the POS cart (the draft no longer exists, S3) and open the qu
 | Buy X get Y / advanced reward on a line | **Not representable** on a quotation. Line copied at full price; reward listed in `droppedAdjustments` (`REWARD_PROMOTION`). |
 | Order-level promotion | **Not representable**. Listed in `droppedAdjustments` (`ORDER_PROMOTION`). |
 | Product/variant names, IVA | Taken from the current catalog; every line gets the per-item IVA snapshot, so `ivaBreakdown[]` is populated. |
+
+`ivaBreakdown` shape (every quotation read): `ivaBreakdown: Array<{ classification: 'IVA_16' | 'IVA_8' | 'IVA_0' | 'IVA_EXENTO' | 'NOT_TAXABLE'; amountCents: number /* integer >= 0 */ }>`. Only the classifications present, in that order; `[]` means "do not show IVA". `taxRate` and `taxCents` were **removed** from the quotation response (IVA is per item).
 | Comments, shipping address, due date | Not copied. |
 
 `droppedAdjustments` is `[]` when nothing was lost. When it is not empty, tell the seller before or after the conversion ("La cotización no incluye: Orden -$10 (−$10.00)"); `discountCents` is the total the customer no longer saves.
@@ -122,6 +124,7 @@ Response `201`:
     "status": "CONVERTED_TO_SALE",
     "effectiveStatus": "CONVERTED_TO_SALE",
     "saleId": "c7e1…",
+    "saleStatus": "DRAFT",
     "convertedAt": "2026-11-18T18:04:05.123Z",
     "…": "rest of QuotationResponseDto"
   },
@@ -147,17 +150,37 @@ Response `201`:
       }
     ],
     "…": "rest of the POS draft sale (same shape as GET /sales/drafts)"
-  }
+  },
+  "suppressedPromotions": [
+    { "promotionId": "9d2a…", "title": "Orden auto" }
+  ]
 }
 ```
 
-After `201`: open the POS with `sale.id` (it is already one of the cashier's drafts in `GET /sales/drafts`). The draft belongs to the **calling** cashier (`userId`); the quotation's seller is kept as `sellerUserId`.
+`suppressedPromotions` (always present, `[]` when none): automatic promotions active **today** that would have changed the quoted total. They are vetoed on the new sale (see the pricing rule below); `title` is `null` only if the promotion row cannot be read. Idempotent replays return the same list.
+
+After `201`: open the POS with `sale.id` (it is already one of the cashier's drafts in `GET /sales/drafts`). The draft belongs to the **calling** cashier (`sale.userId` = the user who converted); the quotation's seller is kept as `sellerUserId`.
+
+**Who can open it:** `GET /sales/drafts` lists **only the caller's own** drafts, and every draft mutation (`/sales/drafts/:id/...`) rejects another user with `SALE_UPDATE_FORBIDDEN`. So a different cashier will **not** see this sale in "ventas en curso" and cannot continue it. There is no single-draft read: `GET /sales/:id` returns 404 for a `DRAFT` (it serves only `CONFIRMED` / `CANCELED`).
 
 ### Pricing rule (S5: "precio cotizado si está vigente")
 
 - Every line keeps the **quoted** unit price and the **quoted** discount, to the cent, whatever the catalog says today. Lines are created as sticky custom prices; a quoted discount becomes a manual line discount titled with the promotion name (or `"Descuento cotizado"` if the promotion no longer exists). Changing the quantity later keeps the per-unit price and discount.
 - Nothing is repriced: there is **no "price changed" rejection**. A quotation past its `expiresAt` cannot be converted at all (`QUOTATION_EXPIRED`): the seller renews it (new quotation) to get current prices.
-- The sale's promotion engine still runs (as on every draft): vetoes from the quotation are copied, lines with a quoted discount are never touched, and an automatic promotion active **today** may only **add** savings to a line without a quoted discount or at order level. So the sale total is never above the quoted total.
+- **Exact by default (S8: "Exacto por defecto, se ajusta después").** At opening, the sale total equals the quotation total to the cent, per line and in total. No new promotion is applied: every automatic promotion that would apply today (on a line or at order level) is added to the sale's per-draft **veto set** and returned in `suppressedPromotions`. Vetoes from the quotation are copied too (they are not listed in `suppressedPromotions`). Lines with a quoted discount are never touched.
+- The opened sale is a normal POS draft: afterwards the cashier can lower or raise prices and apply discounts or promotions line by line with the **existing** draft routes (no new routes):
+
+| Cashier action | Route (all `update:Sale`, owner cashier, `DRAFT` only) | Effect |
+| --- | --- | --- |
+| Re-enable a suppressed automatic promotion | `POST /sales/drafts/:id/manual-promotions/:promotionId` (empty body) | Clears the veto; the promotion applies again if still eligible (the total goes down). It is **not** left as a manual opt-in. |
+| Drop an applied promotion again | `DELETE /sales/drafts/:id/promotions/:promotionId` | Vetoes it again. |
+| Opt in a MANUAL promotion | `GET /sales/drafts/:id/applicable-promotions` then `POST /sales/drafts/:id/manual-promotions/:promotionId` | As on any draft. |
+| Change a line price (up or down) | `PATCH /sales/drafts/:id/items/:itemId/price` with `{ "customPriceCents": n }` or `{ "priceListId": "…" }` | New price; **clears that line's quoted discount** (as on any draft) and re-runs promotions (suppressed ones stay vetoed). |
+| Line discount | `PATCH /sales/drafts/:id/items/:itemId/discount` / `DELETE /sales/drafts/:id/items/:itemId/discount` | Apply / remove a manual line discount (removing the quoted discount raises the line to its quoted gross price). |
+| Whole-sale discount | `PATCH /sales/drafts/:id/discount` / `DELETE /sales/drafts/:id/discount` | As on any draft. |
+| Switch the sale price list | `PUT /sales/drafts/:id/price-list` | Converted lines are custom (sticky), so they keep the quoted price; only lines added later are priced from the list. |
+
+  UI: after `201`, if `suppressedPromotions` is not empty, show e.g. "Se respetó el precio cotizado. Promociones disponibles hoy: …" with an "Aplicar" button per entry calling the re-enable route. The draft read (`GET /sales/drafts`) does not list vetoed ids; keep `suppressedPromotions` from the conversion response.
 - Stock is checked like `POST /sales/drafts/:id/items` (no reservation). Customer and price list are copied; the shipping address is not (set it in the POS if needed).
 
 ### Errors
@@ -194,7 +217,14 @@ After `201`: open the POS with `sale.id` (it is already one of the cashier's dra
 ## 3. The new status and the links (S4, S7)
 
 - Quotation status `CONVERTED_TO_SALE` (terminal). Badge: "Convertida en venta". It is accepted by the list filter: `GET /quotations?status=CONVERTED_TO_SALE`.
-- Every quotation read (`GET /quotations`, `GET /quotations/:id`, every mutation response) now carries `saleId` (string or `null`) and `convertedAt` (ISO or `null`).
+- Every quotation read (`GET /quotations`, `GET /quotations/:id`, every mutation response, and `quotation` in the convert response) now carries `saleId` (string or `null`), `convertedAt` (ISO or `null`) and `saleStatus: 'DRAFT' | 'CONFIRMED' | 'CANCELED' | null` — the current status of the linked sale (`null` when there is no link or the sale was deleted). It is read live on every request (the list uses one batched query), except inside an idempotent replay of `convert-to-sale`, which returns the original body (`DRAFT`).
+- "Ver venta" by `saleStatus`:
+
+| `saleStatus` | Route | Notes |
+| --- | --- | --- |
+| `DRAFT` | POS draft: open the POS on `saleId`; the data comes from `GET /sales/drafts` (find it by `id`) and the `/sales/drafts/:id/...` mutations | Only the cashier who converted (`sale.userId`) has it. For anyone else show "En curso con otro cajero" instead of a link. |
+| `CONFIRMED` / `CANCELED` | `GET /sales/:id` (`read:Sale`) | Sale detail. |
+| `null` | — | No sale (if `status = CONVERTED_TO_SALE`: "Venta descartada", see below). |
 - Sale reads carry `quotationId` **only when the sale came from a quotation** (the key is absent otherwise): every POS draft response (`GET /sales/drafts`, item/customer/price mutations) and `GET /sales/:id` once charged or cancelled. The sales list is unchanged.
 - A converted quotation is read-only: edits and send → `QUOTATION_NOT_DRAFT`, cancel → `QUOTATION_ALREADY_CONVERTED` (cancel the sale instead), delete → `QUOTATION_CANNOT_DELETE`. The PDF still renders. The lazy expiry never turns it into `EXPIRED`. Races are resolved in favour of the conversion: an edit, send or delete that was already in flight when another user converted the quotation fails with `QUOTATION_NOT_DRAFT` (edit/send; no email is sent) or `QUOTATION_ALREADY_CONVERTED` (delete; nothing is deleted). Reload and show the converted quotation.
 - If the draft sale created from a quotation is later **deleted** from the POS, the quotation stays `CONVERTED_TO_SALE` with `saleId: null`. In that state it can be converted again (same rules: not expired) or cancelled. Show "Venta descartada" and offer "Convertir de nuevo".
@@ -204,5 +234,6 @@ After `201`: open the POS with `sale.id` (it is already one of the cashier's dra
 1. POS: open a draft, add two products, assign a customer → `POST /quotations/from-sale/:saleId` with `Idempotency-Key: <uuid>` → `201`; `GET /sales/drafts` no longer lists it.
 2. Repeat the same request with the same key → same body; with another sale and the same key → `409 IDEMPOTENCY_KEY_CONFLICT`.
 3. `POST /quotations/drafts/:id/send?email=false` → `SENT`; `POST /quotations/:id/convert-to-sale` → `201`; the sale total equals the quotation total; `GET /quotations/:id` → `saleId`.
+   - With an automatic promotion active today on a quoted product that had no quoted discount: the sale total still equals the quotation total and the promotion is in `suppressedPromotions`; `POST /sales/drafts/:saleId/manual-promotions/:promotionId` → lower total; `PATCH /sales/drafts/:saleId/items/:itemId/price` with a higher `customPriceCents` → higher total.
 4. Convert again with a new key → `422 QUOTATION_ALREADY_CONVERTED` with `saleId`.
 5. Set `expiresAt` in the past on a DRAFT quotation and convert → `422 QUOTATION_EXPIRED`.

@@ -64,7 +64,10 @@ import {
   BusinessRuleViolationError,
 } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
-import type { QuotationResponseDto } from '../dto/quotation-response.dto';
+import type {
+  QuotationLinkedSaleStatus,
+  QuotationResponseDto,
+} from '../dto/quotation-response.dto';
 import type { AssignSellerDto } from '../dto/assign-seller.dto';
 import { ProductsService } from '../../products/products.service';
 import type {
@@ -849,9 +852,19 @@ export class QuotationsService {
       return customer;
     };
 
+    // "Ver venta" — one batched, tenant-scoped read of every linked sale's
+    // status for the page (no per-row query).
+    const saleStatuses = await this.loadLinkedSaleStatuses(
+      data.map((d) => d.convertedSaleId),
+    );
+
     const enriched = await Promise.all(
       data.map(async (d) =>
-        this.toResponse(d, await loadCustomerCached(d.customerId)),
+        this.toResponse(
+          d,
+          await loadCustomerCached(d.customerId),
+          saleStatuses,
+        ),
       ),
     );
 
@@ -1545,15 +1558,40 @@ export class QuotationsService {
       lastName: string | null;
       email: string | null;
     } | null = null,
+    /** Pre-loaded linked-sale statuses (list path); loaded on demand otherwise. */
+    saleStatuses?: ReadonlyMap<string, QuotationLinkedSaleStatus>,
   ): Promise<QuotationResponseDto> {
     const wire = draft.toResponse();
     const sellerName = await this.loadSellerNameForWire(draft.sellerUserId);
+    const saleId = draft.convertedSaleId;
+    const statuses =
+      saleStatuses ?? (await this.loadLinkedSaleStatuses([saleId]));
     return {
       ...wire,
       effectiveStatus: draft.getEffectiveStatus(),
       customer,
       seller: { id: draft.sellerUserId, name: sellerName },
+      saleStatus: saleId ? (statuses.get(saleId) ?? null) : null,
     } as QuotationResponseDto;
+  }
+
+  /**
+   * "Ver venta" — status of the linked sales, in ONE tenant-scoped query.
+   * Ids without a row (sale deleted) are absent from the map. No query
+   * when nothing is linked.
+   */
+  private async loadLinkedSaleStatuses(
+    saleIds: ReadonlyArray<string | null>,
+  ): Promise<Map<string, QuotationLinkedSaleStatus>> {
+    const ids = [...new Set(saleIds.filter((id): id is string => id !== null))];
+    if (ids.length === 0) return new Map();
+    const rows = await this.tenantPrisma.getClient().sale.findMany({
+      where: { id: { in: ids }, tenantId: this.tenantPrisma.getTenantId() },
+      select: { id: true, status: true },
+    });
+    return new Map(
+      rows.map((row) => [row.id, row.status as QuotationLinkedSaleStatus]),
+    );
   }
 
   /**

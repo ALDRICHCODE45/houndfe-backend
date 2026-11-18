@@ -82,6 +82,18 @@ export interface ConvertQuotationToSaleResult {
   quotation: QuotationResponseDto;
   /** The new POS DRAFT sale (`quotationId` set). */
   sale: ConvertedSaleResponse;
+  /**
+   * S8 — automatic promotions that would have changed the quoted total
+   * today. They are vetoed on the new sale so it opens at the exact quote;
+   * the cashier re-enables any of them with
+   * `POST /sales/drafts/:id/manual-promotions/:promotionId`.
+   */
+  suppressedPromotions: SuppressedPromotion[];
+}
+
+export interface SuppressedPromotion {
+  promotionId: string;
+  title: string | null;
 }
 
 interface CatalogLine {
@@ -334,6 +346,15 @@ export class QuotationSaleConversionService {
         );
       }
 
+      // S8 — vetoes the sale added on top of the quotation's own ones are
+      // the automatic promotions suppressed to keep the exact quoted total.
+      const quotedVetoes = new Set(quotation.vetoedPromotionIds);
+      const suppressedIds = created.vetoedPromotionIds.filter(
+        (id) => !quotedVetoes.has(id),
+      );
+      const suppressedTitles =
+        await this.store.findPromotionTitles(suppressedIds);
+
       const [converted, sale] = await Promise.all([
         this.quotationRepo.findById(quotation.id),
         this.saleRepo.findById(created.id),
@@ -341,6 +362,10 @@ export class QuotationSaleConversionService {
       const result = normalize<ConvertQuotationToSaleResult>({
         quotation: await this.quotationsService.toWireResponse(converted!),
         sale: sale!.toResponse(),
+        suppressedPromotions: suppressedIds.map((promotionId) => ({
+          promotionId,
+          title: suppressedTitles.get(promotionId) ?? null,
+        })),
       });
       await this.store.markIdempotencySucceeded(slot.token, created.id, result);
       return result;

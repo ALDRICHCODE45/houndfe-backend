@@ -292,6 +292,53 @@ describe('mapQuotationLineToSaleLine (quotation → sale DRAFT, S5)', () => {
     });
   });
 
+  it('S8 — mapped lines reproduce every quoted line total and the quoted order total exactly, all sticky and manual', () => {
+    const quoted = [
+      {
+        productId: 'p-1',
+        variantId: null,
+        quantity: 3,
+        unitPriceCents: 9_999,
+        discountType: null,
+        discountValue: null,
+        discountAmountCents: 0,
+        promotionId: null,
+      },
+      {
+        productId: 'p-2',
+        variantId: 'v-2',
+        quantity: 2,
+        unitPriceCents: 4_501,
+        discountType: 'percentage' as const,
+        discountValue: 10,
+        discountAmountCents: 500,
+        promotionId: 'promo-q',
+      },
+    ];
+    const quotedTotal = quoted.reduce(
+      (sum, l) => sum + l.unitPriceCents * l.quantity,
+      0,
+    );
+
+    const mapped = quoted.map((l) =>
+      mapQuotationLineToSaleLine(l, { ...catalog, promotionTitle: null, now }),
+    );
+
+    mapped.forEach((line, i) => {
+      const q = quoted[i]!;
+      expect(line.unitPriceCents * line.quantity).toBe(
+        q.unitPriceCents * q.quantity,
+      );
+      // Sticky (never repriced) and never tied to a promotion the sale
+      // recompute could strip or replace.
+      expect(line.priceSource).toBe('custom');
+      expect(line.promotionId).toBeNull();
+    });
+    expect(
+      mapped.reduce((sum, l) => sum + l.unitPriceCents * l.quantity, 0),
+    ).toBe(quotedTotal);
+  });
+
   it('falls back to a generic title when the promotion no longer exists', () => {
     const line = mapQuotationLineToSaleLine(
       {

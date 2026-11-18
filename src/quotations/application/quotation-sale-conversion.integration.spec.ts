@@ -37,6 +37,7 @@ const describeDb =
   process.env.SKIP_DB_INTEGRATION === '1' ? describe.skip : describe;
 
 const PROMO_DISCOUNT_CENTS = 500;
+const ORDER_DISCOUNT_CENTS = 1_000;
 
 describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
   let db: PrismaClient;
@@ -46,15 +47,23 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
   let quotations: QuotationsService;
   let saleRepo: PrismaSaleRepository;
   let quotationRepo: PrismaQuotationRepository;
+  let sales: SalesService;
   let promoId: string;
+  /** AUTOMATIC ORDER_DISCOUNT promotion (only evaluated when active). */
+  let orderPromoId: string;
+  let orderPromoActive = false;
   const ownedTenants: string[] = [];
 
   /**
    * Deterministic engine: a per-unit $5.00 discount on any line whose
    * product is the fixture's promo product, unless vetoed or the line
-   * carries a manual discount. Same behavior for SALE and QUOTATION.
+   * carries a manual discount, plus (when `orderPromoActive`) an AUTOMATIC
+   * $10.00 order discount unless vetoed. Same behavior for SALE and
+   * QUOTATION. Like the real engine, only MANUAL opt-ins are targetable
+   * (both fixture promotions are AUTOMATIC).
    */
   let promoProductIds = new Set<string>();
+  const automaticIds = () => new Set([promoId, orderPromoId]);
   const engine: IPosEvaluatePromotionsUseCase = {
     evaluate: async (input: PosEvalInput): Promise<PosEvalResult> => ({
       lines: input.lines
@@ -72,9 +81,20 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
           discountValue: PROMO_DISCOUNT_CENTS,
           discountTitle: 'Promo test',
         })),
-      order: null,
+      order:
+        orderPromoActive && !input.vetoedPromotionIds.includes(orderPromoId)
+          ? {
+              promotionId: orderPromoId,
+              discountType: 'amount' as const,
+              discountValue: ORDER_DISCOUNT_CENTS,
+              discountAmountCents: ORDER_DISCOUNT_CENTS,
+              discountTitle: 'Orden auto',
+            }
+          : null,
       availableManualPromotions: [],
-      targetableManualPromotionIds: [...input.optedInManualPromotionIds],
+      targetableManualPromotionIds: input.optedInManualPromotionIds.filter(
+        (id) => !automaticIds().has(id),
+      ),
       promotionCapacityDemands: [],
       capacityExcludedPromotionIds: [],
     }),
@@ -108,7 +128,7 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
       engine,
       { send: async () => undefined } as never,
     );
-    const sales = new SalesService(
+    sales = new SalesService(
       saleRepo,
       products,
       { emit: () => true } as never,
@@ -195,6 +215,18 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
       },
     });
     promoId = promotion.id;
+    const orderPromotion = await db.promotion.create({
+      data: {
+        tenantId,
+        title: 'Orden auto',
+        type: 'ORDER_DISCOUNT',
+        method: 'AUTOMATIC',
+        discountType: 'FIXED',
+        discountValue: ORDER_DISCOUNT_CENTS,
+      },
+    });
+    orderPromoId = orderPromotion.id;
+    orderPromoActive = false;
     const run = <T>(work: () => Promise<T>, tenant = tenantId): Promise<T> =>
       cls.runWith(
         { tenantId: tenant, userId: cashierId, isSuperAdmin: false },
@@ -760,6 +792,50 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
       expect(await db.sale.count({ where: { tenantId: b.tenantId } })).toBe(0);
     });
 
+    it('quotation reads expose the linked sale status: DRAFT after conversion, CONFIRMED once confirmed, null once the draft is deleted', async () => {
+      const f = await fixture();
+      const quotationId = await quotation(f);
+      const other = await quotation(f);
+      const { sale, quotation: converted } = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'k'),
+      );
+      expect(converted.saleStatus).toBe('DRAFT');
+
+      const statusInList = async () => {
+        const list = await f.run(() =>
+          quotations.findAll({ page: 1, limit: 20 }),
+        );
+        return new Map(list.data.map((q) => [q.id, q.saleStatus]));
+      };
+      expect(
+        (await f.run(() => quotations.findOne(quotationId))).saleStatus,
+      ).toBe('DRAFT');
+      expect(await statusInList()).toEqual(
+        new Map([
+          [quotationId, 'DRAFT'],
+          [other, null],
+        ]),
+      );
+
+      await db.sale.update({
+        where: { id: sale.id },
+        data: { status: 'CONFIRMED', confirmedAt: new Date() },
+      });
+      expect(
+        (await f.run(() => quotations.findOne(quotationId))).saleStatus,
+      ).toBe('CONFIRMED');
+      expect((await statusInList()).get(quotationId)).toBe('CONFIRMED');
+
+      await db.sale.update({
+        where: { id: sale.id },
+        data: { status: 'DRAFT', confirmedAt: null },
+      });
+      await f.run(() => saleRepo.delete(sale.id));
+      const afterDelete = await f.run(() => quotations.findOne(quotationId));
+      expect(afterDelete).toMatchObject({ saleId: null, saleStatus: null });
+      expect((await statusInList()).get(quotationId)).toBeNull();
+    });
+
     it('allows converting again once the linked draft sale was discarded (FK SET NULL)', async () => {
       const f = await fixture();
       const quotationId = await quotation(f);
@@ -775,6 +851,153 @@ describeDb('Quotation ↔ sale conversion (PostgreSQL)', () => {
       );
       expect(second.sale.id).not.toBe(first.sale.id);
       expect(second.quotation.saleId).toBe(second.sale.id);
+    });
+  });
+
+  // ── S8: the opened sale is the quote, exactly; adjust afterwards ──
+
+  describe('S8 — exact quoted total at opening', () => {
+    const QUOTED_TOTAL = 2 * 10_000 + 12_345;
+
+    /** Quoted before today's promotions started: no quoted discount. */
+    const quoteWithoutDiscounts = (f: Fixture) =>
+      quotation(
+        f,
+        {
+          subtotalCents: QUOTED_TOTAL,
+          discountCents: 0,
+          totalCents: QUOTED_TOTAL,
+        },
+        [
+          {
+            productId: f.promoted.id,
+            productName: 'Jeans',
+            quantity: 2,
+            unitPriceCents: 10_000,
+            priceSource: 'CUSTOM',
+            customPriceCents: 10_000,
+          },
+          {
+            productId: f.plain.id,
+            productName: 'Playera',
+            quantity: 1,
+            unitPriceCents: 12_345,
+            priceSource: 'CUSTOM',
+            customPriceCents: 12_345,
+          },
+        ],
+      );
+
+    it('automatic line and order promotions active today do not change the opened sale: they are vetoed on it and reported', async () => {
+      const f = await fixture();
+      orderPromoActive = true;
+      const quotationId = await quoteWithoutDiscounts(f);
+
+      const result = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'key-s8'),
+      );
+
+      expect(result.quotation.totalCents).toBe(QUOTED_TOTAL);
+      expect(result.sale.totalCents).toBe(QUOTED_TOTAL);
+      expect(result.sale.discountCents).toBe(0);
+      const byProduct = new Map(result.sale.items.map((i) => [i.productId, i]));
+      expect(byProduct.get(f.promoted.id)).toMatchObject({
+        quantity: 2,
+        unitPriceCents: 10_000,
+        discountAmountCents: null,
+        promotionId: null,
+      });
+      expect(byProduct.get(f.plain.id)).toMatchObject({
+        quantity: 1,
+        unitPriceCents: 12_345,
+      });
+      expect(
+        [...result.suppressedPromotions].sort((a, b) =>
+          a.promotionId.localeCompare(b.promotionId),
+        ),
+      ).toEqual(
+        [
+          { promotionId: promoId, title: 'Promo test' },
+          { promotionId: orderPromoId, title: 'Orden auto' },
+        ].sort((a, b) => a.promotionId.localeCompare(b.promotionId)),
+      );
+
+      // Persisted as per-sale vetoes; a re-read is still the exact quote.
+      const vetoes = await db.salePromotionVeto.findMany({
+        where: { saleId: result.sale.id },
+      });
+      expect(vetoes.map((v) => v.promotionId).sort()).toEqual(
+        [promoId, orderPromoId].sort(),
+      );
+      const reread = await f.run(() => saleRepo.findById(result.sale.id));
+      expect(reread?.toResponse().totalCents).toBe(QUOTED_TOTAL);
+
+      // Replay returns the same body (suppressedPromotions included).
+      const replay = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'key-s8'),
+      );
+      expect(replay).toEqual(result);
+    });
+
+    it('reports nothing when no promotion applies today', async () => {
+      const f = await fixture();
+      const quotationId = await quotation(f);
+      const result = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'k'),
+      );
+      expect(result.sale.totalCents).toBe(
+        2 * (10_000 - PROMO_DISCOUNT_CENTS) + 12_345,
+      );
+      expect(result.suppressedPromotions).toEqual([]);
+      expect(
+        await db.salePromotionVeto.count({
+          where: { saleId: result.sale.id },
+        }),
+      ).toBe(0);
+    });
+
+    it('the cashier re-enables a vetoed promotion (lower total) and raises a line price (higher total) with the existing draft routes', async () => {
+      const f = await fixture();
+      orderPromoActive = true;
+      const quotationId = await quoteWithoutDiscounts(f);
+      const { sale } = await f.run(() =>
+        conversion.convertToSale(quotationId, f.cashierId, 'k'),
+      );
+      expect(sale.totalCents).toBe(QUOTED_TOTAL);
+
+      // POST /sales/drafts/:id/manual-promotions/:promotionId — clears the
+      // veto; the AUTOMATIC promotion applies again (lower total).
+      const reEnabled = await f.run(() =>
+        sales.applyManualPromotion(sale.id, f.cashierId, promoId),
+      );
+      expect(reEnabled.totalCents).toBe(
+        QUOTED_TOTAL - 2 * PROMO_DISCOUNT_CENTS,
+      );
+      expect(
+        (
+          await db.salePromotionVeto.findMany({ where: { saleId: sale.id } })
+        ).map((v) => v.promotionId),
+      ).toEqual([orderPromoId]);
+      // Not left behind as a MANUAL opt-in (it is AUTOMATIC).
+      expect(
+        await db.salePromotionOptIn.count({ where: { saleId: sale.id } }),
+      ).toBe(0);
+
+      // PATCH /sales/drafts/:id/items/:itemId/price — raise a line price.
+      const plainItem = reEnabled.items.find(
+        (i) => i.productId === f.plain.id,
+      )!;
+      const raised = await f.run(() =>
+        sales.overrideItemPrice(
+          sale.id,
+          plainItem.id,
+          { customPriceCents: 15_000 },
+          f.cashierId,
+        ),
+      );
+      expect(raised.totalCents).toBe(
+        QUOTED_TOTAL - 2 * PROMO_DISCOUNT_CENTS + (15_000 - 12_345),
+      );
     });
   });
 

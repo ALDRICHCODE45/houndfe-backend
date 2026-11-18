@@ -144,6 +144,13 @@ export class QuotationResponseDto {
    * later discarded (it can then be converted again).
    */
   saleId: string | null;
+  /**
+   * Status of the linked sale (`saleId`), so the FE picks the right read
+   * route: `DRAFT` → POS draft routes (`/sales/drafts`, owner cashier
+   * only); `CONFIRMED` / `CANCELED` → `GET /sales/:id`. Null when there is
+   * no link or the sale no longer exists.
+   */
+  saleStatus: QuotationLinkedSaleStatus | null;
   /** When the conversion happened. Null unless converted. */
   convertedAt: Date | null;
   createdAt: Date;
@@ -156,6 +163,8 @@ export class QuotationResponseDto {
  * helper. `pagination.total` is the row count BEFORE
  * `limit`/`skip` apply; `data.length` is the page size.
  */
+export type QuotationLinkedSaleStatus = 'DRAFT' | 'CONFIRMED' | 'CANCELED';
+
 export interface QuotationListResponseDto {
   data: QuotationResponseDto[];
   pagination: {

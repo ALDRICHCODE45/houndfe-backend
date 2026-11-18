@@ -108,6 +108,14 @@ import {
   type CashPaymentMethod,
   type ICashLedger,
 } from '../cash-register/cash-ledger.port';
+import { promotionsToVetoForExactOpening } from './domain/quotation-opening-promotions';
+
+/**
+ * S8 — upper bound on veto rounds when opening a sale from a quotation.
+ * Each round vetoes ≥1 new promotion; the bound only guards against a
+ * misbehaving engine.
+ */
+const MAX_EXACT_OPENING_ROUNDS = 20;
 
 type SupportedChargeMethod =
   | 'cash'
@@ -1503,11 +1511,16 @@ export class SalesService {
    *
    * The lines arrive already mapped to the quoted prices: sticky `custom`
    * prices and, where the quotation had a discount, a MANUAL discount with
-   * the exact quoted cents. The standard recompute still runs so the draft
-   * preview equals what charge will compute: sticky / manual lines are
-   * never repriced or stripped, while automatic promotions that are active
-   * NOW may only ADD savings on lines without a quoted discount (vetoes
-   * copied from the quotation stay vetoed).
+   * the exact quoted cents. Vetoes copied from the quotation stay vetoed.
+   *
+   * T2 (S8, "Exacto por defecto, se ajusta después") — the opened sale
+   * totals EXACTLY the quote. Every promotion the engine would apply today
+   * (line or ORDER) is added to the per-sale veto set, re-evaluating until
+   * nothing applies (vetoing a best-wins winner can surface a runner-up).
+   * The standard recompute then runs as usual, so the draft preview equals
+   * what charge computes. The cashier adjusts afterwards with the existing
+   * draft routes (re-enable: `POST /sales/drafts/:id/manual-promotions/
+   * :promotionId`, which clears the veto).
    */
   async openDraftFromQuotation(input: {
     userId: string;
@@ -1535,6 +1548,19 @@ export class SalesService {
     }
     for (const line of input.lines) {
       sale.addItem({ ...line, id: randomUUID(), saleId });
+    }
+
+    // Bounded: each round vetoes at least one new id or stops.
+    for (let round = 0; round < MAX_EXACT_OPENING_ROUNDS; round++) {
+      const applied = await this.evaluatePromotionsForSale(sale);
+      const toVeto = promotionsToVetoForExactOpening(
+        applied,
+        sale.vetoedPromotionIds,
+      );
+      if (toVeto.length === 0) break;
+      for (const promotionId of toVeto) {
+        sale.addVetoedPromotion(promotionId);
+      }
     }
 
     await this.recomputePricingAndPromotions(sale);
