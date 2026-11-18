@@ -59,6 +59,14 @@ export interface ChatbotRecoveryStore {
   undelivered(requestIds: string[], perRequest: number): Promise<FeedItemRow[]>;
   /** Per request with any: how many items have no terminal outcome, and the oldest. */
   undeliveredSummary(requestIds: string[]): Promise<UndeliveredSummary[]>;
+  /**
+   * The feed `after` that re-serves the tenant's oldest sale-level item
+   * (pay-in-store hold, T3) with no terminal outcome (never below the
+   * retention watermark), or `null` when there is none. Sale items belong to
+   * no request, so the request walk cannot list them; the bot re-reads them
+   * from the feed.
+   */
+  saleResumeAfter(): Promise<bigint | null>;
 }
 
 export interface UndeliveredSummary {
@@ -97,6 +105,13 @@ export interface RecoveryAnswer {
   items: RecoveryRequestView[];
   /** The feed position to resume from (`GET /chatbot-api/feed?after=`). */
   nextCursor: string;
+  /**
+   * pay-in-store-pickup / T3: the feed `after` that serves the tenant's
+   * oldest unacknowledged sale-level item (`sale.pickup_*`) again (its cursor
+   * minus one), or `null` when there is none. Resume the feed from the
+   * smallest of this, `nextCursor` and any `undeliveredResumeAfter`.
+   */
+  saleUndeliveredResumeAfter: string | null;
   /** `cursor` of the next page; `null` on the last one. */
   nextPage: string | null;
 }
@@ -144,9 +159,12 @@ export class ChatbotRecoveryService {
             this.store.undelivered(ids, RECOVERY_LIMITS.deliveriesPerRequest),
             this.store.undeliveredSummary(ids),
           ]);
+    const saleResumeAfter = await this.store.saleResumeAfter();
     const summaryOf = new Map(summaries.map((item) => [item.requestId, item]));
     const byRequest = new Map<string, PendingDeliveryView[]>();
     for (const delivery of deliveries) {
+      // Request items only (the store filters by request id).
+      if (delivery.requestId === null) continue;
       const list = byRequest.get(delivery.requestId) ?? [];
       list.push(toPendingView(delivery));
       byRequest.set(delivery.requestId, list);
@@ -174,6 +192,8 @@ export class ChatbotRecoveryService {
         ...truncation(summaryOf.get(row.id)),
       })),
       nextCursor: formatCursor(feedCursor),
+      saleUndeliveredResumeAfter:
+        saleResumeAfter === null ? null : formatCursor(saleResumeAfter),
       nextPage:
         hasMore && last
           ? encodeRecoveryPage({

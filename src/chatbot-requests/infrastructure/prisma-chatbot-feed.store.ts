@@ -35,7 +35,8 @@ import {
 
 interface LockedDelivery {
   cursor: bigint;
-  requestId: string;
+  /** `null` for a sale-level item (pay-in-store hold, T3). */
+  requestId: string | null;
   type: string;
   attemptId: string | null;
   evidenceHash: string | null;
@@ -108,7 +109,7 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
     const tenantId = this.tenantId;
     return this.db.$queryRaw<FeedItemRow[]>(Prisma.sql`
       SELECT "cursor", "deliveryId"::text AS "deliveryId", "type", "requestId",
-             "conversationRef", "payload"
+             "saleId", "conversationRef", "payload"
       FROM "chatbot_feed_items"
       WHERE ("tenantId", "cursor") > (${tenantId}, ${after})
         AND ("tenantId", "cursor") <= (${tenantId}, ${MAX_CURSOR})
@@ -127,6 +128,8 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
     // S16 3: a staff message deferred by the window is served only while its
     // own epoch is still an ACTIVE session (once it ends the message is FAILED
     // and acknowledged; this guard also covers an ACK that raced the end).
+    // A sale-level item (T3) is never deferred (`classifyOutcome`), so it
+    // never matches the outcome filter.
     return this.db.$queryRaw<FeedItemRow[]>(Prisma.sql`
       SELECT f."cursor", f."deliveryId"::text AS "deliveryId", f."type",
              f."requestId", f."conversationRef", f."payload", f."outcome"
@@ -166,8 +169,14 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
 
       // L4: an attempt this delivery already applied (an older deferral, after
       // a later attempt) is a replay, answered from its audit event with the
-      // state it had; it never overwrites the current state.
-      if (row.attemptId !== null && row.attemptId !== input.attemptId) {
+      // state it had; it never overwrites the current state. A sale-level item
+      // (T3) has no request audit and cannot be deferred, so it only ever
+      // holds one applied attempt: the row itself.
+      if (
+        row.requestId !== null &&
+        row.attemptId !== null &&
+        row.attemptId !== input.attemptId
+      ) {
         const prior = await this.findAppliedAttempt(
           row.requestId,
           deliveryId,
@@ -193,7 +202,11 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
         // answering the deferral. The replay answers what the bot was told
         // then, from the audit event of that attempt (also the answer of a
         // plain STALE report, which the event holds as STALE).
-        if (row.outcome === 'STALE' && row.attemptId !== null) {
+        if (
+          row.requestId !== null &&
+          row.outcome === 'STALE' &&
+          row.attemptId !== null
+        ) {
           const original = await this.findAppliedAttempt(
             row.requestId,
             deliveryId,
@@ -232,6 +245,12 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
           ackedAt,
         },
       });
+      // A sale-level item (T3) has no request: its outcome, attempt, evidence
+      // hash and wamid live on the item row only (one terminal ACK, never
+      // deferred, never a staff message).
+      if (row.requestId === null) {
+        return this.toAck(deliveryId, input.outcome, input.attemptId, ackedAt);
+      }
       // The request's own version at ack time; an ACK changes no request state.
       const request = await db.chatbotRequest.findFirst({
         where: { tenantId, id: row.requestId },

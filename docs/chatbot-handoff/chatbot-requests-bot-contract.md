@@ -190,6 +190,8 @@ Scope `feed:read`, class `feed`. `after` is the `nextCursor` of the previous ans
 | `request.merged`         | Staff merged this request into another open one of the same customer, subtype **and conversation** (§3.5, §12.11). Informational                    | `{requestId, intoRequestId, conversationRef}`                                                                                |
 | `request.overdue_notice` | The request went past the deadline of its active clock (§5.4, unit 7c). **Once per request, ever**                                                  | `{requestId, folio, kind, subtype, clock, overdueAt, assigned}`, see "`request.overdue_notice`" below                        |
 
+**Sale-level items (pay-in-store hold, `pay-in-store-pickup` T3).** `sale.pickup_reminder`, `sale.pickup_expired` and `sale.pickup_extended` belong to a **sale**, not to a request: their envelope has `requestId: null` and one extra key, `saleId`. Every request item keeps its exact envelope (no `saleId` key). Same cursor, long-poll, `deliveryId` dedupe and ACK route; they are never deferred, never served by `pending-deliveries`, and the recovery walk points at them with `saleUndeliveredResumeAfter`. Types, payloads and rules: section "Pay-in-store hold items" below and `docs/chatbot-handoff/pay-in-store-hold-bot-contract.md`.
+
 `conversationRef` is the request's (`null` when the request has none, e.g. a stock request created without one). `legacyId` is the id the bot already tracks from the create answer (`legacy.id`: the human decision, the zone requester or the receipt).
 
 **The bot composes the message; `text` is only a fallback.** Owner decision: the bot writes the wording with each customer's tú/usted register, **from the structured fields** of the payload. The backend `text`/`prefix` are an **usted fallback** for a bot that cannot compose (written in usted throughout, with the one exception noted below). `prefix` is `"Le comparto la respuesta del equipo:"` only when `text` is what staff wrote for the customer, else `null`.
@@ -254,12 +256,12 @@ Exactly those keys; an unknown key, a missing required key, a key an outcome for
 | `200`                                               | First outcome, or an exact replay: the **same `attemptId` and the same evidence** (the backend hashes `attemptId`, `outcome`, `attemptedAt` and `providerMessageId`). A replay of **any attempt this delivery already applied** answers `200` with that attempt's own stored state, even after a later attempt (for example an old `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` replayed after the delivery was accepted): it changes nothing |
 | `409 IDEMPOTENCY_CONFLICT`                          | An `attemptId` this delivery already applied, sent with other evidence                                                                                                                                                                                                                                                                                                                                                                                |
 | `409 OUTCOME_ALREADY_RECORDED`                      | A **new** `attemptId` after a terminal outcome (`PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` or `STALE`; a deferral is not terminal)                                                                                                                                                                                                                                                                                                                       |
-| `422 OUTCOME_NOT_ALLOWED`                           | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled` or `request.overdue_notice` delivery; **any outcome except `STALE` for a `request.merged` delivery**                                                                                                                                                                                                                                                                   |
+| `422 OUTCOME_NOT_ALLOWED`                           | `DEFERRED_WINDOW_CLOSED` or `DEFERRED_HUMAN_SESSION` for a `request.cancelled`, `request.overdue_notice` or `sale.pickup_*` delivery; **any outcome except `STALE` for a `request.merged` delivery**                                                                                                                                                                                                                                                   |
 | `404 NOT_FOUND` (`message: "Delivery not found"`)   | Unknown delivery, or one of another branch                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `400 VALIDATION_ERROR`                              | Body or `deliveryId` malformed                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `403 INSUFFICIENT_SCOPE`, `401`, `429 RATE_LIMITED` | Credential, scope, budget                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
-Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after a deferral (either) uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`).
+Retry a lost ACK with the **same body**: it answers `200`. A new send attempt after a deferral (either) uses a **new `attemptId`**. Every first outcome adds a `DELIVERY_OUTCOME` event to the request's audit (`needsReconciliation: true` for `DELIVERY_UNKNOWN`). A sale-level item (`sale.pickup_*`) has no request: its outcome, `attemptId`, evidence hash, `attemptedAt` and `providerMessageId` are stored on the delivery itself, and no request event is written.
 
 ### `GET /chatbot-api/requests/pending-deliveries?conversationRef=` (or `?requestId=`)
 
@@ -290,7 +292,7 @@ Scope `feed:read`, class `read`. The deliveries whose last outcome was a deferra
 | `WINDOW_CLOSED`  | The customer writes again (the 24 h window is open). Deliver and ACK with a new `attemptId`.                                              |
 | `HUMAN_SESSION`  | The human session ended (`conversation.ended`, unit 11) or the conversation's next bot-mode turn. Deliver and ACK with a new `attemptId`. |
 
-Both are served by the same route, by `conversationRef` and by `requestId`. This avoids walking the feed again.
+Both are served by the same route, by `conversationRef` and by `requestId`. This avoids walking the feed again. A sale-level item (`sale.pickup_*`) is never listed here: it cannot be deferred.
 
 Send **exactly one** filter (both or neither is `400`):
 
@@ -365,6 +367,7 @@ Anything else (a missing or other `status`, an unknown key, a non-canonical `upd
     }
   ],
   "nextCursor": "000000001900",
+  "saleUndeliveredResumeAfter": null,
   "nextPage": "eyJ1Ijoi…"
 }
 ```
@@ -374,6 +377,7 @@ Anything else (a missing or other `status`, an unknown key, a non-canonical `upd
 - **`undeliveredTruncated` / `undeliveredResumeAfter`.** `pendingDeliveries` lists at most 5 items per request. When the request has more undelivered items than that, `undeliveredTruncated` is `true` and `undeliveredResumeAfter` is the feed `after` that serves its **oldest** undelivered item again (its cursor minus one); otherwise they are `false` and `null`. If any request in the walk is truncated, resume the feed from the **smallest** of those `undeliveredResumeAfter` values and the walk's `nextCursor` (all are fixed-width, zero-padded cursors, so compare them as strings; do no arithmetic), and dedupe by `deliveryId`: the feed then re-serves the older items. Do **not** use `pending-deliveries` for this: it serves deferred items only, not the ones that were never attempted.
 - **`nextCursor`** is the tenant's feed position when the **first page** was served (never below the retention watermark; `000000000000` for an empty feed). **Every page of one walk answers the same value** (the page cursor carries it).
 - **`nextPage`** is the `cursor` of the next page, `null` on the last one.
+- **`saleUndeliveredResumeAfter`** (pay-in-store hold, T3; additive): the sale-level items (`sale.pickup_*`) belong to no request, so the walk cannot list them. This is the feed `after` that serves the branch's **oldest** sale item with no terminal outcome again (its cursor minus one, never below the purge watermark), or `null` when every sale item was acknowledged. Every page answers it (read live, so a later page may show a larger value once you ACK; keep the smallest you saw).
 
 Procedure:
 
@@ -381,7 +385,7 @@ Procedure:
 2. Call the route with `status=open` and `updatedSince` = the last instant your state was complete. Omit it if you do not know: every open request is returned anyway, so a pending record of yours for a request the walk did not list as open is a closed one (you just do not get its final status or its unacknowledged answer).
 3. Walk every page with `cursor=<nextPage>` until `nextPage` is `null`. Keep the `nextCursor` of the first page.
 4. For each item, make your records match it: `NEW` or `IN_PROGRESS` → you must hold a pending record (create or refresh it from `conversationRef`, `legacyId`, the window); `RESOLVED` or `CANCELLED` → drop the pending record (and the same for any record the walk did not list as open). Then handle its `pendingDeliveries` as feed items (same type rules, dedupe by `deliveryId`, ACK each).
-5. Only after every page was processed and saved, store as your feed position `nextCursor` (or, if a request came back truncated, the smaller `undeliveredResumeAfter`, see above) and resume `GET /chatbot-api/feed?after=<that>`. Everything that committed after the walk started is after that position; what the walk already showed may arrive again in the feed, which is safe (dedupe by `deliveryId`, ACKs are idempotent). `nextCursor` is accepted by the feed (it is never below the purge watermark), so it cannot answer `410` again right away.
+5. Only after every page was processed and saved, store as your feed position `nextCursor` (or, if a request came back truncated or `saleUndeliveredResumeAfter` is set, the smallest of those values, see above) and resume `GET /chatbot-api/feed?after=<that>`. Everything that committed after the walk started is after that position; what the walk already showed may arrive again in the feed, which is safe (dedupe by `deliveryId`, ACKs are idempotent). `nextCursor` is accepted by the feed (it is never below the purge watermark), so it cannot answer `410` again right away.
 
 ### Shutdown and restarts
 
@@ -1167,6 +1171,27 @@ Updated by step. Parts 2 to 4 (this branch `feat/human-intervention-u14`, not me
 5. **Order of rollout:** ship the bot's handling of `conversation.scheduled_reminder` and `conversation.rescheduled` (send only if the 24 h window is open, else ACK `STALE`; the ACK table above), the slots + `scheduledFor` booking flow, `409 SLOT_UNAVAILABLE` / `ALREADY_SCHEDULED`, and the use of `scheduledRequest` in recovery, **before** enabling scheduling on a branch. The backend side can be deployed first with scheduling off without changing any behaviour.
 6. Inngest does not need a re-sync (no new function). The schedule sweep is the backend's own `@Interval` (every 15 s, `FOR UPDATE SKIP LOCKED`, no cursor in memory: replicas can run side by side), gated in tests like the other schedulers.
 7. After deploy, check `GET /chatbot-requests/counts` (`scheduled`, `needsReschedule`) on a branch with scheduling on, and watch the log line `schedule sweep: N reminders, N notices, N flagged, …` (it prints only when something happened; the notice count is correct from this build on).
+
+## Pay-in-store hold items (`pay-in-store-pickup` T3)
+
+**Deploy checklist (pay-in-store, T1-T3).** Order is binding:
+1. The bot ships a feed consumer that accepts `requestId: null` with a `saleId` and the `sale.pickup_*` types (ACK `STALE` while its pay-in-store flow is off). Until then this backend must not be deployed: a strict parser would reject the page and stall the whole feed.
+2. Backend deploy (migrations `20261118010000_pay_in_store_hold`, `20261118020000_sale_feed_items`; the second briefly holds ACCESS EXCLUSIVE on `chatbot_feed_items` and SHARE ROW EXCLUSIVE on `sales`: deploy at low traffic).
+3. The bot enables its flow (`PATCH /chatbot-api/sales/:saleId/payment-intent`). No sale item can exist before a sale is marked `IN_STORE`, and only the bot marks it; a staff hold edit then emits `sale.pickup_extended` at once.
+
+The feed's only **sale-level** items. Full flow (marking a sale pay-in-store, the hold, the checkout status read): `docs/chatbot-handoff/pay-in-store-hold-bot-contract.md`. Migration `20261118020000_sale_feed_items`.
+
+| `type`                 | When                                                                                         | `payload`                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `sale.pickup_reminder` | The hold expires in 3 h (S3; only for holds longer than 3 h). Created by the hold sweep (T2) | `{saleId, folio, holdUntil, holdVersion, conversationRef}` |
+| `sale.pickup_expired`  | The hold lapsed unpaid and the sale was cancelled, stock released (S2). Sweep (T2)          | `{saleId, folio, holdVersion, conversationRef}`            |
+| `sale.pickup_extended` | Staff moved the deadline from the POS (S5); informational                                    | `{saleId, folio, holdUntil, holdVersion, conversationRef}` |
+
+- **Envelope.** `requestId: null` and an extra top-level `saleId` (the `saleId` of your checkout). `conversationRef` (top level and in the payload, the same value) is the one mirrored chat of the branch whose phone key is the sale customer's phone, as for a transfer receipt; **`null`** when the customer has no phone, no chat or more than one chat. With `null`, map `saleId` to the conversation of your own checkout record; if you have none, ACK `STALE`.
+- **`holdVersion`** is the hold version the item belongs to. Before sending, compare it with the live hold (`GET /chatbot-api/checkouts/status` → `hold.version`): a smaller value means a later change overtook the item (for example staff extended the deadline after the reminder was queued), so ACK `STALE`. A sale that is paid (`PARTIAL`/`PAID`) or already cancelled does not need a reminder: ACK `STALE`.
+- **Exactly once** per (sale, type, `holdVersion`) on the backend (a partial unique index); you may still see an item twice (at-least-once): dedupe by `deliveryId`. A staff extension resets the hold, so a new version can bring a new reminder.
+- **ACK.** `PROVIDER_ACCEPTED`, `DELIVERY_UNKNOWN` or `STALE`. **`DEFERRED_WINDOW_CLOSED` and `DEFERRED_HUMAN_SESSION` are `422 OUTCOME_NOT_ALLOWED`**: a reminder after the deadline, or an expiry/extension notice days later, is useless. With the 24 h window closed, send an approved template if you have one, else ACK `STALE`; during a human session ACK `STALE` (the attendee sees the POS). Idempotency is the common rule (same `attemptId` and evidence → `200` replay; a new attempt after the terminal one → `409 OUTCOME_ALREADY_RECORDED`). No request audit event is written; the outcome is stored on the delivery.
+- **Not in `pending-deliveries`** (never deferred). **Recovery after `410`:** resume the feed from `saleUndeliveredResumeAfter` when it is smaller than `nextCursor` (see the recovery section); the feed serves the unacknowledged sale items again.
 
 ## Catalog search (`GET /chatbot-api/catalog/search?q=&limit=`)
 

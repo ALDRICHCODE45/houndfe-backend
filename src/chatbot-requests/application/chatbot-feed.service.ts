@@ -32,7 +32,10 @@ export interface FeedItemRow {
   cursor: bigint;
   deliveryId: string;
   type: string;
-  requestId: string;
+  /** `null` only for a sale-level item (pay-in-store hold, T3). */
+  requestId: string | null;
+  /** Set only for a sale-level item; absent or `null` for a request item. */
+  saleId?: string | null;
   conversationRef: string | null;
   payload: unknown;
   /** Read only where the outcome matters (pending and recovery lists). */
@@ -43,7 +46,12 @@ export interface FeedItemView {
   cursor: string;
   deliveryId: string;
   type: string;
-  requestId: string;
+  requestId: string | null;
+  /**
+   * Only on a sale-level item (`sale.pickup_*`, `requestId: null`). A request
+   * item keeps its exact envelope, without this key.
+   */
+  saleId?: string;
   conversationRef: string | null;
   payload: unknown;
   notBefore: null;
@@ -105,6 +113,7 @@ export function toView(row: FeedItemRow): FeedItemView {
     deliveryId: row.deliveryId,
     type: row.type,
     requestId: row.requestId,
+    ...(row.saleId ? { saleId: row.saleId } : {}),
     conversationRef: row.conversationRef,
     payload: row.payload,
     notBefore: null,

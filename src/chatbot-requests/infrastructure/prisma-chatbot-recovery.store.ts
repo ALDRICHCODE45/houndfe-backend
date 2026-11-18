@@ -99,6 +99,30 @@ export class PrismaChatbotRecoveryStore implements ChatbotRecoveryStore {
       ORDER BY d."cursor"`);
   }
 
+  /**
+   * pay-in-store-pickup / T3: the oldest sale-level item with no terminal
+   * outcome. Sale items are few (at most three per hold version) and the
+   * partial unique index `chatbot_feed_items_sale_hold_uq` holds only them,
+   * keyed by tenant first. Answers the feed `after` that re-serves it (its
+   * cursor minus one), never below the retention watermark (the purge goes
+   * by `createdAt`, so a kept item may sit under it): that `after` can never
+   * answer `410` again.
+   */
+  async saleResumeAfter(): Promise<bigint | null> {
+    const tenantId = this.tenantId;
+    const [row] = await this.db.$queryRaw<{ after: bigint | null }[]>(
+      Prisma.sql`
+      SELECT GREATEST(min(f."cursor") - 1,
+        COALESCE((SELECT "purgedThroughCursor" FROM "chatbot_feed_retention"
+                  WHERE "tenantId" = ${tenantId}), 0)) AS "after"
+      FROM "chatbot_feed_items" f
+      WHERE f."tenantId" = ${tenantId} AND f."saleId" IS NOT NULL
+        AND f."ackedAt" IS NULL
+      HAVING count(*) > 0`,
+    );
+    return row?.after ?? null;
+  }
+
   undeliveredSummary(requestIds: string[]): Promise<UndeliveredSummary[]> {
     const tenantId = this.tenantId;
     return this.db.$queryRaw<UndeliveredSummary[]>(Prisma.sql`

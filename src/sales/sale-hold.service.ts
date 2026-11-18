@@ -1,6 +1,7 @@
 import { HttpException, Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
+import { enqueuePickupExtended } from '../chatbot-requests/infrastructure/sale-feed-writes';
 import {
   HOLD_DEFAULT_DURATION_MS,
   HOLD_STAGE,
@@ -135,6 +136,10 @@ export class SaleHoldService {
    * Staff: move the deadline of an IN_STORE CONFIRMED unpaid sale (S5).
    * Compare-and-set on `holdVersion` under a row lock; recomputes the
    * reminder (S3), resets `holdStage` to 0 and bumps the version.
+   *
+   * T3: in the same transaction, tells the bot (`sale.pickup_extended`, one
+   * per new hold version) when the sale has a customer to tell. The feed lock
+   * is taken after the sale row lock (the order of every enqueuer).
    */
   async updateHold(
     saleId: string,
@@ -181,8 +186,23 @@ export class SaleHoldService {
             holdStage: HOLD_STAGE.NONE,
             holdVersion: { increment: 1 },
           },
-          select: SALE_HOLD_SELECT,
+          select: { ...SALE_HOLD_SELECT, folio: true, customerId: true },
         });
+        // Informational for the bot; a sale with no customer has nobody to
+        // tell (the bot's checkout always sets one).
+        if (updated.customerId !== null) {
+          await enqueuePickupExtended(
+            prisma,
+            tenantId,
+            {
+              id: saleId,
+              folio: updated.folio,
+              holdExpiresAt: updated.holdExpiresAt,
+              customerId: updated.customerId,
+            },
+            updated.holdVersion,
+          );
+        }
         return {
           view: toSaleHoldView(updated) as SaleHoldView,
           previousExpiresAt: row.holdExpiresAt,

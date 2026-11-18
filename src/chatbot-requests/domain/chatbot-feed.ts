@@ -26,8 +26,23 @@ export const FEED_TYPE = {
   conversationRescheduled: 'conversation.rescheduled',
   /** Created by the reminder sweep (a later step of unit 14). */
   scheduledReminder: 'conversation.scheduled_reminder',
+  // Pay-in-store hold of a bot PICKUP sale (pay-in-store-pickup / T3): the
+  // only SALE-level items (`requestId` NULL, `saleId` set).
+  pickupReminder: 'sale.pickup_reminder',
+  pickupExpired: 'sale.pickup_expired',
+  pickupExtended: 'sale.pickup_extended',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
+
+const SALE_FEED_TYPES: readonly string[] = [
+  FEED_TYPE.pickupReminder,
+  FEED_TYPE.pickupExpired,
+  FEED_TYPE.pickupExtended,
+];
+
+/** A sale-level item: it has a `saleId` and no request (no request audit). */
+export const isSaleFeedType = (type: string): boolean =>
+  SALE_FEED_TYPES.includes(type);
 
 /** §3.3 and §6.4: 30 days of retention, a 25 s long-poll, 2 per credential. */
 export const FEED_LIMITS = {
@@ -276,7 +291,10 @@ export function classifyOutcome(
       // Unit 14 (S19 Q9): a time change or a reminder delivered later only
       // confuses; a reminder while a person talks is useless.
       current.type === FEED_TYPE.conversationRescheduled ||
-      current.type === FEED_TYPE.scheduledReminder)
+      current.type === FEED_TYPE.scheduledReminder ||
+      // Pay-in-store hold (T3): a reminder after the deadline, or an expiry or
+      // extension notice days later, is useless; nothing waits for a window.
+      isSaleFeedType(current.type))
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
@@ -691,6 +709,63 @@ export function buildScheduledReminderPayload(input: {
     timeZone: input.timeZone,
     whatsappWindowClosesAt: input.whatsappWindowClosesAt?.toISOString() ?? null,
     requiresTemplateAtStart: input.requiresTemplateAtStart,
+  };
+}
+
+// ------------------------------------------------- pay-in-store hold (T3)
+
+/**
+ * The common fields of a `sale.pickup_*` payload. `holdVersion` is the
+ * sale's hold version the item belongs to: the partial unique index of the
+ * migration keys on it (one item per sale, type and version), and the bot
+ * compares it with the live hold (`GET /chatbot-api/checkouts/status`) to
+ * drop an item a later change overtook. `conversationRef` is the one chat of
+ * the sale customer's phone key, else `null`.
+ */
+interface PickupPayloadInput {
+  saleId: string;
+  folio: string | null;
+  holdVersion: number;
+  conversationRef: string | null;
+}
+
+const pickupBase = (input: PickupPayloadInput) => ({
+  saleId: input.saleId,
+  folio: input.folio,
+});
+
+/** `sale.pickup_reminder` (S3): the hold expires at `holdUntil` (3 h ahead). */
+export function buildPickupReminderPayload(
+  input: PickupPayloadInput & { holdUntil: Date },
+): Record<string, unknown> {
+  return {
+    ...pickupBase(input),
+    holdUntil: input.holdUntil.toISOString(),
+    holdVersion: input.holdVersion,
+    conversationRef: input.conversationRef,
+  };
+}
+
+/** `sale.pickup_expired` (S2): the hold lapsed unpaid; the sale was cancelled. */
+export function buildPickupExpiredPayload(
+  input: PickupPayloadInput,
+): Record<string, unknown> {
+  return {
+    ...pickupBase(input),
+    holdVersion: input.holdVersion,
+    conversationRef: input.conversationRef,
+  };
+}
+
+/** `sale.pickup_extended` (S5, informational): staff moved the deadline. */
+export function buildPickupExtendedPayload(
+  input: PickupPayloadInput & { holdUntil: Date },
+): Record<string, unknown> {
+  return {
+    ...pickupBase(input),
+    holdUntil: input.holdUntil.toISOString(),
+    holdVersion: input.holdVersion,
+    conversationRef: input.conversationRef,
   };
 }
 

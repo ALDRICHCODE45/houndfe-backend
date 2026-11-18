@@ -45,6 +45,7 @@ function setup(
   rows: RecoveryRequestRow[] = [],
   deliveries: FeedItemRow[] = [],
   summary: UndeliveredSummary[] = [],
+  saleAfter: bigint | null = null,
 ) {
   const events: string[] = [];
   const currentFeedCursor = jest.fn(() => {
@@ -57,11 +58,13 @@ function setup(
   });
   const undelivered = jest.fn(() => Promise.resolve(deliveries));
   const undeliveredSummary = jest.fn(() => Promise.resolve(summary));
+  const saleResumeAfter = jest.fn(() => Promise.resolve(saleAfter));
   const store: ChatbotRecoveryStore = {
     currentFeedCursor,
     readPage,
     undelivered,
     undeliveredSummary,
+    saleResumeAfter,
   };
   return {
     service: new ChatbotRecoveryService(store),
@@ -156,9 +159,17 @@ describe('ChatbotRecoveryService (§3.3 recovery after 410 CURSOR_EXPIRED)', () 
     expect(answer).toEqual({
       items: [],
       nextCursor: '000000001842',
+      saleUndeliveredResumeAfter: null,
       nextPage: null,
     });
     expect(mocks.undelivered).not.toHaveBeenCalled();
+  });
+
+  it('T3: says where the feed re-serves the oldest unacknowledged sale item (pay-in-store hold)', async () => {
+    const { service } = setup([], [], [], 1799n);
+    const answer = await service.recover({ status: 'open' });
+    expect(answer.saleUndeliveredResumeAfter).toBe('000000001799');
+    expect(answer.nextCursor).toBe('000000001842');
   });
 
   it('asks the store for one row more than the limit to know whether another page exists', async () => {

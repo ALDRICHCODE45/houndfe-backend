@@ -613,6 +613,101 @@ d('pay-in-store hold (PostgreSQL)', () => {
     });
   });
 
+  describe('T3: a staff deadline change feeds the bot (sale.pickup_extended)', () => {
+    const saleFeed = (tenantId: string) =>
+      prisma.chatbotFeedItem.findMany({
+        where: { tenantId, saleId: { not: null } },
+        orderBy: { cursor: 'asc' },
+      });
+
+    it('enqueues exactly one item per new hold version, in the edit transaction, with the customer chat', async () => {
+      const s = await sucursal();
+      const conversationRef = 'wa:5215512340000';
+      await prisma.chatbotConversation.create({
+        data: {
+          tenantId: s.tenantId,
+          conversationRef,
+          customerKey: '525512340000',
+        },
+      });
+      const { saleId, folio } = await pickupSale(s);
+      await markInStore(s, saleId).expect(200);
+      // The bot's own mark is not an extension.
+      expect(await saleFeed(s.tenantId)).toHaveLength(0);
+
+      const expiresAt = new Date(Date.now() + 30 * HOUR).toISOString();
+      await editHold(s.staff.token, saleId, {
+        expiresAt,
+        expectedVersion: 1,
+      }).expect(200);
+      // A stale retry of the same edit changes nothing and feeds nothing.
+      const stale = await editHold(s.staff.token, saleId, {
+        expiresAt,
+        expectedVersion: 1,
+      });
+      expect(stale.status).toBe(409);
+
+      const items = await saleFeed(s.tenantId);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        tenantId: s.tenantId,
+        requestId: null,
+        saleId,
+        type: 'sale.pickup_extended',
+        conversationRef,
+        outcome: null,
+        payload: {
+          saleId,
+          folio,
+          holdUntil: expiresAt,
+          holdVersion: 2,
+          conversationRef,
+        },
+      });
+
+      const later = new Date(Date.now() + 50 * HOUR).toISOString();
+      await editHold(s.staff.token, saleId, {
+        expiresAt: later,
+        expectedVersion: 2,
+      }).expect(200);
+      const after = await saleFeed(s.tenantId);
+      expect(
+        after.map((i) => (i.payload as { holdVersion: number }).holdVersion),
+      ).toEqual([2, 3]);
+      expect((after[1].payload as { holdUntil: string }).holdUntil).toBe(later);
+    });
+
+    it('a sale without a customer gets no item; a rejected edit leaves none', async () => {
+      const s = await sucursal();
+      const anonymous = await rawSale(s, {
+        paymentIntent: 'IN_STORE',
+        holdExpiresAt: new Date(Date.now() + 10 * HOUR),
+        holdVersion: 1,
+      });
+      await editHold(s.staff.token, anonymous, {
+        expiresAt: new Date(Date.now() + 20 * HOUR).toISOString(),
+        expectedVersion: 1,
+      }).expect(200);
+
+      const paid = await rawSale(s, {
+        customerId: s.customerId,
+        paymentIntent: 'IN_STORE',
+        holdExpiresAt: new Date(Date.now() + HOUR),
+        holdVersion: 1,
+        paymentStatus: 'PAID',
+        paidCents: PRICE,
+        debtCents: 0,
+      });
+      const refused = await editHold(s.staff.token, paid, {
+        expiresAt: new Date(Date.now() + 20 * HOUR).toISOString(),
+        expectedVersion: 1,
+      });
+      expect(refused.status).toBe(409);
+
+      expect(await saleFeed(s.tenantId)).toHaveLength(0);
+    });
+  });
+
   describe('reads expose hold', () => {
     it('GET /sales/:id, GET /sales and the bot checkout status carry the hold', async () => {
       const s = await sucursal();

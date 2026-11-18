@@ -1,8 +1,8 @@
-# Chatbot ↔ backend: pay in store for pickup orders (T1)
+# Chatbot ↔ backend: pay in store for pickup orders (T1, T3)
 
-**Status:** T1 on branch `feat/pay-in-store-hold`, not merged, not deployed. Migration `20261118010000_pay_in_store_hold` first. Task: `odd/tasks/pay-in-store-pickup.md` (S1–S6). The feed items `sale.pickup_reminder`, `sale.pickup_expired` and `sale.pickup_extended` (S6) are **T3, not built yet**; the reminder/expiry sweep is **T2, not built yet**.
+**Status:** T1 and T3 on branch `feat/pay-in-store-hold`, not merged, not deployed. Migrations `20261118010000_pay_in_store_hold` then `20261118020000_sale_feed_items`. Task: `odd/tasks/pay-in-store-pickup.md` (S1–S6). The feed items `sale.pickup_reminder`, `sale.pickup_expired` and `sale.pickup_extended` (S6) are **built (T3)**: `sale.pickup_extended` is emitted today by the staff deadline edit; the reminder and the expiry items are emitted by the reminder/expiry sweep, which is **T2, not built yet** (until then they never appear).
 
-Source: `src/chatbot-api/presentation/pay-in-store.controller.ts`, `src/sales/sale-hold.service.ts`, `src/chatbot-api/presentation/pay-in-store-hold.integration.spec.ts`.
+Source: `src/chatbot-api/presentation/pay-in-store.controller.ts`, `src/sales/sale-hold.service.ts`, `src/chatbot-requests/infrastructure/sale-feed-writes.ts`, `src/chatbot-api/presentation/pay-in-store-hold.integration.spec.ts`, `src/chatbot-requests/chatbot-feed-sale-items.integration.spec.ts`.
 
 ## Flow
 
@@ -40,7 +40,7 @@ Response `200`:
 ```
 
 - `holdUntil` = now + **24 h** (fixed default, S5). Staff may move it per sale from the POS later.
-- `reminderAt` = `holdUntil − 3 h`, or `null` when the hold is 3 h or shorter (S3). The reminder itself will arrive as a feed item in T3; the bot does not schedule anything.
+- `reminderAt` = `holdUntil − 3 h`, or `null` when the hold is 3 h or shorter (S3). The reminder itself arrives as a feed item (`sale.pickup_reminder`, below); the bot does not schedule anything.
 
 **Idempotent:** calling it again for a sale already marked (and still eligible) returns the **current** hold unchanged (`200`, same body unless staff moved the deadline meanwhile). Safe to retry after a timeout. No `X-Idempotency-Key` is needed.
 
@@ -76,7 +76,67 @@ For a succeeded checkout, the answer gains a sibling key `hold` (the sale's **cu
 
 `stage`: `0` nothing sent, `1` reminded, `2` expired (T2). `version` grows on every change (bot mark, staff edit).
 
-## Not in T1
+## Feed items (T3)
 
-- Reminder and expiry (T2): at `reminderAt` the customer is reminded; at `holdUntil`, an unpaid sale with no pending transfer receipt is cancelled with `cancelReason: "HOLD_EXPIRED"` and its stock released; with a payment or a pending receipt, staff get a notice instead (S4).
-- Feed items (T3): `sale.pickup_reminder { saleId, folio, holdUntil }`, `sale.pickup_expired { saleId, folio }`, `sale.pickup_extended { saleId, folio, holdUntil }`.
+**Deploy checklist (pay-in-store, T1-T3).** Order is binding:
+1. The bot ships a feed consumer that accepts `requestId: null` with a `saleId` and the `sale.pickup_*` types (ACK `STALE` while its pay-in-store flow is off). Until then this backend must not be deployed: a strict parser would reject the page and stall the whole feed.
+2. Backend deploy (migrations `20261118010000_pay_in_store_hold`, `20261118020000_sale_feed_items`; the second briefly holds ACCESS EXCLUSIVE on `chatbot_feed_items` and SHARE ROW EXCLUSIVE on `sales`: deploy at low traffic).
+3. The bot enables its flow (`PATCH /chatbot-api/sales/:saleId/payment-intent`). No sale item can exist before a sale is marked `IN_STORE`, and only the bot marks it; a staff hold edit then emits `sale.pickup_extended` at once.
+
+They arrive on the same feed as the request items (`GET /chatbot-api/feed`, scope `feed:read`) and are acknowledged on the same route (`POST /chatbot-api/deliveries/:deliveryId/outcome`, scope `feed:ack`). They belong to a **sale**, not to a request.
+
+```json
+{
+  "cursor": "000000002210",
+  "deliveryId": "6f0e…",
+  "type": "sale.pickup_reminder",
+  "requestId": null,
+  "saleId": "8c1d…",
+  "conversationRef": "wa:5215512340000",
+  "payload": {
+    "saleId": "8c1d…",
+    "folio": "<sale folio>",
+    "holdUntil": "2026-11-19T18:30:00.000Z",
+    "holdVersion": 1,
+    "conversationRef": "wa:5215512340000"
+  },
+  "notBefore": null,
+  "expiresAt": null
+}
+```
+
+| `type`                 | Emitted when                                                                                                                         | `payload`                                                  | What you tell the customer                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------- |
+| `sale.pickup_reminder` | `reminderAt` passed (3 h before `holdUntil`; never for a hold of 3 h or less). Sweep, **T2**                                       | `{saleId, folio, holdUntil, holdVersion, conversationRef}` | "Tu pedido {folio} se aparta hasta {holdUntil}; pasa a pagarlo" |
+| `sale.pickup_expired`  | `holdUntil` passed unpaid, with no pending transfer receipt: the sale was cancelled (`HOLD_EXPIRED`) and its stock released. **T2** | `{saleId, folio, holdVersion, conversationRef}`            | "El apartado de {folio} venció y el pedido se canceló"          |
+| `sale.pickup_extended` | Staff moved the deadline (`PATCH /sales/:id/hold`), in the same transaction; only for a sale with a customer. Informational        | `{saleId, folio, holdUntil, holdVersion, conversationRef}` | "Tu apartado de {folio} ahora vence {holdUntil}"                |
+
+You compose the wording (tú/usted); there is no fallback text. `holdUntil` is ISO UTC: render it in the branch's time zone.
+
+**Envelope.** `requestId` is `null` and the item carries an extra top-level `saleId` (request items do not have this key). `folio` is the sale folio (`null` only for a sale that has none).
+
+**`conversationRef`** (top level and payload, the same value): the one mirrored chat (`chatbot_conversations`) of the branch whose phone key is the canonical phone of the sale's customer, resolved like the transfer-receipt requests. `null` when the customer has no phone, no chat, or more than one chat. With `null`, use the conversation of your own checkout record for `saleId`; if you have none, ACK `STALE`. It contains the customer's phone: keep it out of logs.
+
+**`holdVersion` and staleness.** Each item belongs to one hold version (the `hold.version` of `GET /chatbot-api/checkouts/status`). Before you send, read the live hold: if `hold.version` is greater than the item's `holdVersion`, a later change overtook it (for example staff extended the deadline after a reminder was queued): ACK `STALE`. If the sale is already paid or cancelled, a reminder or an extension is moot: ACK `STALE`.
+
+**Exactly once.** The backend enqueues at most one item per (sale, type, `holdVersion`) (partial unique index `chatbot_feed_items_sale_hold_uq`): a sweep retry, a second replica or a repeated call is a no-op. Every staff edit bumps the version, so each edit brings one `sale.pickup_extended`, and the reset hold can bring a new reminder. The bot's own `PATCH …/payment-intent` emits **no** item. The feed is still at-least-once: dedupe by `deliveryId`.
+
+**ACK rules** (`POST /chatbot-api/deliveries/:deliveryId/outcome`, same body as every item):
+
+| Outcome                  | Allowed | Use it when                                                                                                                 |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `PROVIDER_ACCEPTED`      | yes     | Meta accepted the message (send `providerMessageId`).                                                                       |
+| `DELIVERY_UNKNOWN`       | yes     | You tried and cannot tell; do not retry.                                                                                    |
+| `STALE`                  | yes     | Not sent and not needed: overtaken version, paid/cancelled sale, no conversation, window closed with no template, human session. |
+| `DEFERRED_WINDOW_CLOSED` | **no**  | `422 OUTCOME_NOT_ALLOWED`: a hold notice delivered after the customer writes again is useless (the deadline may have passed). |
+| `DEFERRED_HUMAN_SESSION` | **no**  | `422 OUTCOME_NOT_ALLOWED`: during a human session ACK `STALE`; the attendee sees the hold in the POS.                        |
+
+One terminal outcome per delivery: the same `attemptId` with the same evidence replays `200`; a new `attemptId` afterwards is `409 OUTCOME_ALREADY_RECORDED`; the same `attemptId` with other evidence is `409 IDEMPOTENCY_CONFLICT`. The outcome is stored on the delivery (there is no request audit for a sale item). The reminder fires 21 h after a 24 h hold started, usually inside the customer's 24 h window; the expiry fires at 24 h, usually **outside** it: send it with an approved template or ACK `STALE`.
+
+**Not in `pending-deliveries`** (they are never deferred).
+
+**Recovery after `410 CURSOR_EXPIRED`.** Sale items belong to no request, so the request walk (`GET /chatbot-api/requests?status=open`) cannot list them. Its answer carries `saleUndeliveredResumeAfter`: the feed `after` that re-serves the branch's oldest sale item with no terminal outcome (never below the purge watermark), or `null`. Resume the feed from the smallest of `nextCursor`, `saleUndeliveredResumeAfter` and any `undeliveredResumeAfter`, dedupe by `deliveryId`, apply the staleness check above (`GET /chatbot-api/checkouts/status`) and ACK each one. Feed items are kept 30 days, far longer than a hold.
+
+## Not built yet (T2)
+
+- The reminder and expiry sweep: at `reminderAt` the customer is reminded (`sale.pickup_reminder`); at `holdUntil`, an unpaid sale with no pending transfer receipt is cancelled with `cancelReason: "HOLD_EXPIRED"`, its stock released and the bot told (`sale.pickup_expired`); with a payment or a pending receipt, staff get a notice instead and the bot gets nothing (S4).

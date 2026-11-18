@@ -1562,6 +1562,8 @@ model Sale {
   // quotation-sale-conversion / T1 — back-relation of
   // `Quotation.convertedSaleId` (the quotation this draft sale came from).
   sourceQuotation    Quotation?            @relation("QuotationConvertedSale")
+  // pay-in-store-pickup / T3 — sale-level bot feed items (sale.pickup_*).
+  chatbotFeedItems   ChatbotFeedItem[]
       // delivery-routes / WU1 — back-relation for DeliveryRouteStop.sale.
       // onDelete: Restrict on the FK side (design ADR-2) so a Sale cannot be
       // hard-deleted while referenced by any route stop.
@@ -4082,7 +4084,11 @@ model ChatbotFeedItem {
   cursor            BigInt    @id @default(autoincrement())
   tenantId          String
   deliveryId        String    @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  requestId         String
+  // Exactly one of `requestId` / `saleId` is set (CHECK
+  // `chatbot_feed_items_subject_chk`, migration-only): request items, or the
+  // sale-level items of a pay-in-store hold (pay-in-store-pickup / T3).
+  requestId         String?
+  saleId            String?
   type              String
   conversationRef   String?
   payload           Json
@@ -4094,8 +4100,10 @@ model ChatbotFeedItem {
   attemptedAt       DateTime?
   providerMessageId String?
 
-  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request ChatbotRequest? @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  // Tenant-consistent: the item's tenant must own the sale.
+  sale    Sale?           @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
 
   // Migration-only (20261111070000_chatbot_sla_sweep; partial index, not
   // expressible in Prisma's DSL): `chatbot_feed_items_overdue_notice_uq`, UNIQUE
@@ -4105,6 +4113,10 @@ model ChatbotFeedItem {
   // `chatbot_feed_items_clarification_answer_uq`, UNIQUE ("tenantId", "requestId")
   // WHERE "type" = 'request.answered' AND payload->>'kind' = 'CLARIFICATION' — at
   // most one staff clarification answer per request (unit 10).
+  // Migration-only (20261118020000_sale_feed_items):
+  // `chatbot_feed_items_sale_hold_uq`, UNIQUE ("tenantId", "saleId", "type",
+  // (payload->>'holdVersion')) WHERE "saleId" IS NOT NULL — one
+  // `sale.pickup_*` item per sale, type and hold version.
   @@index([tenantId, cursor])
   @@index([tenantId, requestId])
   @@index([createdAt])

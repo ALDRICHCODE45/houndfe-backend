@@ -193,9 +193,10 @@ export function findReceiptSale(
  * `conversationRef`, and the staff conversation read, unread counts and live
  * sessions all key on it, so the request takes the one chat of this tenant
  * whose `customerKey` (derived from the `wa:` id) is the sale customer's
- * phone key. None or several: left unlinked rather than guessed.
+ * phone key. None or several: left unlinked rather than guessed. The
+ * sale-level feed items (pay-in-store hold, T3) resolve their chat the same way.
  */
-async function customerConversation(
+export async function customerConversation(
   tx: TenantClient,
   tenantId: string,
   customerKey: string,

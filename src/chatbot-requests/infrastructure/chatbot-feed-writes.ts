@@ -31,31 +31,39 @@ import {
 } from '../domain/chatbot-feed';
 import type { TenantClient } from './chatbot-request-writes';
 
-export interface FeedDraft {
-  requestId: string;
+/**
+ * One item: a request item (`requestId`) or a sale-level item (`saleId`,
+ * pay-in-store hold, T3), never both (CHECK `chatbot_feed_items_subject_chk`).
+ */
+export type FeedDraft = {
   type: string;
   conversationRef: string | null;
   payload: Record<string, unknown>;
-}
+} & (
+  | { requestId: string; saleId?: never }
+  | { saleId: string; requestId?: never }
+);
 
+/** Returns how many items were inserted (fewer only with `skipDuplicates`). */
 export async function insertFeedItems(
   tx: TenantClient,
   tenantId: string,
   drafts: FeedDraft[],
   /** `ON CONFLICT DO NOTHING`: for items a unique index keeps single. */
   options: { skipDuplicates?: boolean } = {},
-): Promise<void> {
-  if (drafts.length === 0) return;
+): Promise<number> {
+  if (drafts.length === 0) return 0;
   const key = `chatbot-feed:${tenantId}`;
   // Prisma cannot decode `void`; the cast keeps the transaction-scoped lock.
   await tx.$queryRaw(
     Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`,
   );
-  await tx.chatbotFeedItem.createMany({
+  const { count } = await tx.chatbotFeedItem.createMany({
     skipDuplicates: options.skipDuplicates === true,
     data: drafts.map((draft) => ({
       tenantId,
-      requestId: draft.requestId,
+      requestId: draft.requestId ?? null,
+      saleId: draft.saleId ?? null,
       type: draft.type,
       conversationRef: draft.conversationRef,
       payload: draft.payload as Prisma.InputJsonObject,
@@ -64,6 +72,7 @@ export async function insertFeedItems(
   await tx.$queryRaw(
     Prisma.sql`SELECT pg_notify(${FEED_CHANNEL}, ${tenantId})::text`,
   );
+  return count;
 }
 
 const unresolved = (): never => {
