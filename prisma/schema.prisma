@@ -137,6 +137,15 @@ enum SaleCancelReason {
   OUT_OF_STOCK
   DUPLICATE_SALE
   OTHER
+  // pay-in-store-pickup / T1 — system-only reason written by the hold
+  // expiry sweep (T2). Never accepted from staff or bot cancel requests.
+  HOLD_EXPIRED
+}
+
+// pay-in-store-pickup / T1 — how the customer said they will pay. Null on
+// every sale that never declared an intent (POS and legacy bot sales).
+enum SalePaymentIntent {
+  IN_STORE
 }
 
 enum SalePaymentMethod {
@@ -1519,6 +1528,18 @@ model Sale {
   // flips the discriminator to true (including null clears).
   globalPriceListId      String?
   priceListExplicitlySet Boolean @default(false)
+
+  // pay-in-store-pickup / T1 — counter-payment hold of a bot PICKUP sale.
+  // `paymentIntent` IN_STORE + `holdExpiresAt` set by the bot route; staff
+  // move the deadline per sale (`holdVersion` is the compare-and-set token).
+  // `holdReminderAt` = expiry − 3 h, null when the hold is 3 h or shorter.
+  // `holdStage`: 0 none, 1 reminded, 2 expired (written by the T2 sweep).
+  // Sales without an intent keep every hold column NULL/0 (no backfill).
+  paymentIntent  SalePaymentIntent?
+  holdExpiresAt  DateTime?
+  holdReminderAt DateTime?
+  holdStage      Int               @default(0) @db.SmallInt
+  holdVersion    Int               @default(0)
 
   // Relations
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)

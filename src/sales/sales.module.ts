@@ -25,6 +25,8 @@ import { AuthModule } from '../auth/auth.module';
 import { SaleEventListener } from './listeners/sale-event.listener';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
+import { SaleHoldController } from './sale-hold.controller';
+import { SaleHoldService } from './sale-hold.service';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { SaleCommentsModule } from './comments/sale-comments.module';
 import { ReceiptReviewController } from './review/receipt-review.controller';
@@ -61,10 +63,13 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     SalesCatalogController,
     SalesQueryController,
     SalesPaymentsController,
+    // pay-in-store-pickup / T1 — PATCH /sales/:id/hold.
+    SaleHoldController,
     ReceiptReviewController,
   ],
   providers: [
     SalesService,
+    SaleHoldService,
     SaleStockService,
     {
       provide: SALE_REPOSITORY,
@@ -77,6 +82,11 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     },
     SaleEventListener,
   ],
-  exports: [SalesService, SALE_REPOSITORY, ReceiptReviewService],
+  exports: [
+    SalesService,
+    SALE_REPOSITORY,
+    ReceiptReviewService,
+    SaleHoldService,
+  ],
 })
 export class SalesModule {}

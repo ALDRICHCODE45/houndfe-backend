@@ -41,6 +41,7 @@ import type {
   SalesListBaseFilter,
   SalesListExtendedFilter,
 } from '../dto/sales-list-filter.types';
+import { toSaleHoldView } from '../domain/sale-hold';
 
 function extractLegacyReference(metadataJson: unknown): string | null {
   if (!metadataJson || typeof metadataJson !== 'object') {
@@ -1868,6 +1869,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       seller: row.seller,
       paymentMethods: [...new Set(row.payments.map((p) => p.method))],
       shippingAddress: toSaleShippingAddressView(row, tenantId),
+      // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
+      hold: toSaleHoldView(row),
     }));
   }
 
@@ -2250,6 +2253,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       // from a quotation (keeps every other detail byte-identical).
       ...(sale.sourceQuotation ? { quotationId: sale.sourceQuotation.id } : {}),
       shippingAddress: toSaleShippingAddressView(sale, tenantId),
+      // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
+      hold: toSaleHoldView(sale),
       items: sale.items.map((item) => {
         // Column-derived BXGY discriminator (design.md Decision 6). Same
         // predicate the domain SaleItem.isBuyXGetYReward() reads — we

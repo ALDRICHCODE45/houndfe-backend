@@ -8,6 +8,7 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { ChatbotApiService } from './application/chatbot-api.service';
 import { CheckoutService } from './application/checkout.service';
 import { CheckoutController } from './presentation/checkout.controller';
+import { PayInStoreController } from './presentation/pay-in-store.controller';
 import { BotRateLimitModule } from './presentation/guards/bot-rate-limit.module';
 import { ServiceAuthGuard } from './presentation/guards/service-auth.guard';
 import { ChatbotApiController } from './presentation/chatbot-api.controller';
@@ -47,6 +48,8 @@ import { ReceiptsModule } from '../receipts/receipts.module';
     ChatbotApiController,
     CheckoutController,
     ShippingQuotesController,
+    // pay-in-store-pickup / T1 — PATCH /chatbot-api/sales/:saleId/payment-intent.
+    PayInStoreController,
   ],
   providers: [
     ChatbotApiService,

@@ -1,5 +1,6 @@
 import type { PickupLocation } from '../../../shipping/pickup/application/pickup-location.service';
 import type { BotSaleResponse } from './bot-sale.response';
+import type { SaleHoldView } from '../../../sales/domain/sale-hold';
 
 export interface CheckoutResponse {
   status: 'created';
@@ -21,5 +22,14 @@ export interface CheckoutResponse {
 }
 
 export type CheckoutStatusResponse =
-  | { status: 'succeeded'; checkout: CheckoutResponse }
+  | {
+      status: 'succeeded';
+      /** The creation receipt, replayed byte-identically. */
+      checkout: CheckoutResponse;
+      /**
+       * pay-in-store-pickup / T1 — the sale's CURRENT hold (live read), null
+       * when no payment intent was declared.
+       */
+      hold?: SaleHoldView | null;
+    }
   | { status: 'not_observed'; checkout: null };

@@ -34,7 +34,10 @@ export type SaleCancelReason =
   | 'ORDER_ERROR'
   | 'OUT_OF_STOCK'
   | 'DUPLICATE_SALE'
-  | 'OTHER';
+  | 'OTHER'
+  // pay-in-store-pickup — system-only (T2 hold expiry sweep); the staff and
+  // bot cancel DTOs keep their explicit lists and never accept it.
+  | 'HOLD_EXPIRED';
 
 export interface CancelSaleActor {
   actorId: string;

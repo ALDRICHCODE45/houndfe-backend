@@ -15,6 +15,7 @@ Backend contracts for the frontend, **in implementation order**. Each file cover
 | 9 | Cash display fields: session `openedAt`, `closedAt`, `cashierDisplayName` (list and detail); custody `senderDisplayName`, `sourceRegisterName`, `notes` | Implemented on `feat/fe-design-pass`, not merged | [09-cash-display-fields.md](09-cash-display-fields.md) |
 | 10 | Shipping settings screens: delivery zones, pending zone validations (24 h urgency, approve/reject), product/variant packaging, standard boxes, shipping origin, opening hours; seed data via `pnpm seed:showcase` | On local `main` (d858cc3, not pushed); showcase step on `docs/fe-shipping-handoff` | [10-shipping-settings-screens.md](10-shipping-settings-screens.md) |
 | 22 | Receipt destination check (N18): `destinationCheck` on the receipt queues and the chatbot request detail, destination keys in `extracted`, email warning | Implemented on `feat/receipt-destination-check`, not merged | [22-receipt-destination-check.md](22-receipt-destination-check.md) |
+| 24 | Pay-in-store hold of bot pickup orders: `hold` on sale reads, «Apartado · pagar en tienda · vence {fecha}», `PATCH /sales/:id/hold`, counter payment of bot sales | Implemented on `feat/pay-in-store-hold` (T1), not merged; sweep/feed pending | [24-pay-in-store-hold.md](24-pay-in-store-hold.md) |
 
 Operations: [deploy/inventory-journal-o1-rollout.md](../deploy/inventory-journal-o1-rollout.md) is the rollout runbook for the O1 migration (stop writers, pre-flight queries, rollback, permissions). It is for whoever deploys, not for the FE.
 

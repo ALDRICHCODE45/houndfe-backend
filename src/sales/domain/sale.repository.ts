@@ -1,3 +1,4 @@
+import type { SaleHoldView } from './sale-hold';
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
 import type { ShippingAddressSnapshot } from './shipping-address-snapshot';
@@ -458,6 +459,8 @@ export interface ISaleRepository {
       paymentMethods: string[];
       /** Snapshot plus source status; null when the sale has no snapshot. */
       shippingAddress: SaleShippingAddressView | null;
+      /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
+      hold?: SaleHoldView | null;
     }>
   >;
 
@@ -560,6 +563,8 @@ export interface ISaleRepository {
     seller: { id: string; name: string } | null;
     /** Snapshot plus source status; null without a snapshot. Absent on older repository mocks. */
     shippingAddress?: SaleShippingAddressView | null;
+    /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
+    hold?: SaleHoldView | null;
     items: Array<{
       productName: string;
       variantName: string | null;

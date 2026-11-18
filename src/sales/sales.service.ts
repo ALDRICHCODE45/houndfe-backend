@@ -2056,6 +2056,8 @@ export class SalesService {
         ? { quotationId: sale.quotationId }
         : {}),
       shippingAddress: sale.shippingAddress ?? null,
+      // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
+      hold: sale.hold ?? null,
       items: sale.items,
       // Custom Payment Methods (custom-payment-methods / WU2 — D10):
       // spread the three catalog fields only when non-null so legacy rows
@@ -4471,7 +4473,18 @@ export class SalesService {
         );
       }
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
-      if (!sale || (authMode === 'owner' && sale.userId !== actorId)) {
+      // Owner rule: a POS sale (draft or confirmed) is collected only by its
+      // own cashier. pay-in-store-pickup / T1 — ONLINE (bot) sales are
+      // collected at the counter by any staff member: their `userId` is the
+      // bot's configured cashier, never the person at the register, and the
+      // route already requires `update:Sale`. A PARTIAL/PAID result takes the
+      // sale out of the hold-expiry flow (T2 only expires CREDIT, 0 paid).
+      if (
+        !sale ||
+        (authMode === 'owner' &&
+          sale.userId !== actorId &&
+          sale.channel !== 'ONLINE')
+      ) {
         throw new BusinessRuleViolationError(
           'SALE_NOT_FOUND',
           'SALE_NOT_FOUND',
