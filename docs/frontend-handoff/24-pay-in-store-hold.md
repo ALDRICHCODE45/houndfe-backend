@@ -38,6 +38,21 @@ Show the badge **«Apartado · pagar en tienda · vence {fecha}»** only while t
 
 `{fecha}` = `expiresAt` in the sucursal time zone (e.g. «vie 19 nov, 12:30»). Once the sale is paid (`PARTIAL`/`PAID`) or cancelled, hide the badge: the `hold` object stays on the sale as history, but a paid sale is never expired (see §3). A cancelled sale whose `cancelReason` is `HOLD_EXPIRED` was cancelled by the deadline (T2); see §4.
 
+### `channel` and `cancelReason` on GET `/sales` rows (T5)
+
+Branch `feat/sales-list-channel-cancel-reason`, not merged. Two additive keys on every row of `GET /sales` `data[]`, always present; no other field changes:
+
+```json
+{ "id": "…", "folio": "…", "status": "CANCELED", "channel": "ONLINE", "cancelReason": "HOLD_EXPIRED", "hold": { … } }
+```
+
+| Field | Values |
+| --- | --- |
+| `channel` | `"POS"` (rung at the counter) or `"ONLINE"` (chatbot sale). Same value as `GET /sales/:id`. |
+| `cancelReason` | `null` unless the sale was cancelled; then one of `CUSTOMER_REQUEST`, `ORDER_ERROR`, `OUT_OF_STOCK`, `DUPLICATE_SALE`, `OTHER`, `HOLD_EXPIRED`. Same value as `GET /sales/:id`. |
+
+List labels: show the real channel from `channel`, and «Apartado vencido» for `cancelReason === "HOLD_EXPIRED"`. There is no list filter by channel or reason yet (`status=CANCELED` still lists every cancelled sale).
+
 ## 2. Editing the deadline: `PATCH /sales/:id/hold`
 
 Permission: `update:Sale` (the same as every other confirmed-sale edit, e.g. `PATCH /sales/:id/due-date`). Hide the edit control without it.
@@ -80,6 +95,8 @@ Idempotency-Key: <one per press>
 
 Same body, split payments (`payments: [...]`), catalog `paymentMethodId` and cash-session binding as for any other later collection. Response: `{ saleId, paidCents, debtCents, totalCents, paymentStatus, paymentIds }`.
 
+**Without `cashSessionId` (T5 answer).** Omitting it is accepted for every method (`cash`, `card_credit`, `card_debit`, `transfer`), on POS and ONLINE sales alike, and no open cash session is required. The payment is recorded on the sale (payment row with the acting user, `paidCents`/`debtCents`/`paymentStatus` updated, the hold ends as above), but **no cash-register movement is written**: it belongs to no session and does not count in any session's expected cash at close. So a cash payment taken at the counter without `cashSessionId` shows up as a surplus when that drawer is counted. Send `cashSessionId` (the user's OPEN session) whenever the money goes into a drawer; with it the session must be OPEN and owned by the caller (otherwise the request fails and nothing is written). Omitting it is right only for money that does not enter a drawer (e.g. a transfer already in the bank).
+
 Any payment (`PARTIAL` or `PAID`) ends the hold: the sale can no longer be edited with `PATCH /hold` and it will never be auto-cancelled by the deadline. A **partially** paid sale still reaches staff as a notice at the deadline (§5), so someone decides what to do with the rest. After charging, mark the pickup as delivered as usual.
 
 ## 4. Auto-cancelled at the deadline: `cancelReason: "HOLD_EXPIRED"`
@@ -120,4 +137,6 @@ If at `expiresAt` the sale has a **partial payment** or a **`PENDING` transfer r
 
 ## Test data
 
-`hold` appears only on bot pickup sales after the bot calls `PATCH /chatbot-api/sales/:saleId/payment-intent` (see `docs/chatbot-handoff/pay-in-store-hold-bot-contract.md`). To get one on the dev DB, create a bot pickup sale and call that route with a bot credential holding `sales:write`; no seed creates holds.
+`hold` appears only on bot pickup sales after the bot calls `PATCH /chatbot-api/sales/:saleId/payment-intent` (see `docs/chatbot-handoff/pay-in-store-hold-bot-contract.md`). The base seed and `pnpm seed:showcase` create no holds.
+
+On the dev DB, `scripts/dev-showcase/pay-in-store-holds.cjs` (T5) creates two bot pickup sales in Sucursal Centro (`manager@houndfe.com`) through the real routes of the running API: one with a live 24 h hold (the badge) and one whose deadline is set ~1 min ahead with a partial cash payment, so the sweep raises `SALE_HOLD_REVIEW` (§5) on its next tick after the deadline. It prints the folios. How to run it: [dev-showcase-guide.md](../dev-showcase-guide.md) §6.

@@ -269,4 +269,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { loadEnv, assertSafeTarget };
+module.exports = { loadEnv, assertSafeTarget, makeApi, devPasswords };

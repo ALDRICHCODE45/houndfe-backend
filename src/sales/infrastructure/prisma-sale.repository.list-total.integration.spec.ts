@@ -251,6 +251,82 @@ describeIfDb(
       expect(kpi.salesCount).toBe(6);
     });
 
+    // pay-in-store-pickup / T5 (S7) — each GET /sales row carries the sale
+    // channel and the cancel reason, so the list shows the real channel and
+    // «Apartado vencido» (HOLD_EXPIRED) without opening the detail.
+    it('exposes channel and cancelReason on every list row', async () => {
+      const userId = await seedCashier();
+      const base = {
+        userId,
+        tenantId,
+        paymentStatus: 'CREDIT' as const,
+        deliveryStatus: 'PENDING' as const,
+        totalCents: 5000,
+        debtCents: 5000,
+      };
+      await prisma.sale.createMany({
+        data: [
+          {
+            ...base,
+            id: randomUUID(),
+            folio: 'C-POS',
+            channel: 'POS',
+            status: 'CONFIRMED',
+            confirmedAt: new Date('2026-08-01T12:00:00.000Z'),
+          },
+          {
+            ...base,
+            id: randomUUID(),
+            folio: 'C-ONLINE',
+            channel: 'ONLINE',
+            fulfillmentMode: 'PICKUP',
+            status: 'CONFIRMED',
+            paymentIntent: 'IN_STORE',
+            holdExpiresAt: new Date('2026-08-03T12:00:00.000Z'),
+            confirmedAt: new Date('2026-08-02T12:00:00.000Z'),
+          },
+          {
+            ...base,
+            id: randomUUID(),
+            folio: 'C-EXPIRED',
+            channel: 'ONLINE',
+            fulfillmentMode: 'PICKUP',
+            status: 'CANCELED',
+            paymentIntent: 'IN_STORE',
+            holdExpiresAt: new Date('2026-08-04T12:00:00.000Z'),
+            holdStage: 2,
+            canceledAt: new Date('2026-08-04T12:00:00.000Z'),
+            cancelReason: 'HOLD_EXPIRED',
+            confirmedAt: new Date('2026-08-03T12:00:00.000Z'),
+          },
+        ],
+      });
+
+      const rows = await repo.findManyConfirmed({
+        status: [ListSalesStatus.CONFIRMED, ListSalesStatus.CANCELED],
+        page: 1,
+        limit: 100,
+        sortBy: 'confirmedAt',
+        sortOrder: 'asc',
+      });
+
+      expect(
+        rows.map((row) => ({
+          folio: row.folio,
+          channel: row.channel,
+          cancelReason: row.cancelReason,
+        })),
+      ).toEqual([
+        { folio: 'C-POS', channel: 'POS', cancelReason: null },
+        { folio: 'C-ONLINE', channel: 'ONLINE', cancelReason: null },
+        {
+          folio: 'C-EXPIRED',
+          channel: 'ONLINE',
+          cancelReason: 'HOLD_EXPIRED',
+        },
+      ]);
+    });
+
     describe('debt sort and filter summary (generated openDebtCents)', () => {
       const ALL_STATUSES: SalesListExtendedFilter = {
         status: [ListSalesStatus.CONFIRMED, ListSalesStatus.CANCELED],

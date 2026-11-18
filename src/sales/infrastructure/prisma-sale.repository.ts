@@ -1851,6 +1851,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       id: row.id,
       folio: row.folio,
       status: row.status,
+      // pay-in-store-pickup / T5 (S7) — real channel + cancel reason per row.
+      channel: row.channel,
+      cancelReason: row.cancelReason ?? null,
       paymentStatus: row.paymentStatus,
       deliveryStatus: row.deliveryStatus,
       totalCents: row.totalCents,

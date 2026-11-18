@@ -447,6 +447,10 @@ export interface ISaleRepository {
       id: string;
       folio: string | null;
       status: string;
+      /** pay-in-store-pickup / T5 (S7). Absent on older repository mocks. */
+      channel?: 'POS' | 'ONLINE';
+      /** pay-in-store-pickup / T5 (S7) — null unless canceled. Absent on older repository mocks. */
+      cancelReason?: SaleCancelReason | null;
       paymentStatus: string | null;
       deliveryStatus: string;
       totalCents: number;
