@@ -551,6 +551,47 @@ describe('CashClosingA4Document', () => {
     expect(text).toContain('corte congelado');
   });
 
+  describe('session opening time (cash-redesign-reads T2/S7)', () => {
+    const OPENED_AT = '2026-01-15T14:00:00.000Z';
+
+    function withOpenedAt(openedAt: CashJson | undefined): CashDocument {
+      const doc = makeDocument();
+      const snapshot = { ...(doc.snapshot as Record<string, CashJson>) };
+      if (openedAt === undefined) {
+        delete snapshot.openedAt;
+      } else {
+        snapshot.openedAt = openedAt;
+      }
+      return { ...doc, snapshot };
+    }
+
+    it('parses openedAt verbatim and renders it as the opening time', () => {
+      const receipt = parseCashClosingReceipt(withOpenedAt(OPENED_AT));
+
+      expect(receipt.snapshot.openedAt).toBe(OPENED_AT);
+      const text = renderText(receipt);
+      expect(text).toContain('Apertura');
+      // America/Mexico_City is UTC−6 in January: 14:00Z → 08:00.
+      expect(text).toContain('08:00');
+    });
+
+    it.each([
+      ['absent (snapshot frozen before T2)', undefined],
+      ['null', null],
+    ])('reads openedAt %s as null and omits the field', (_label, value) => {
+      const receipt = parseCashClosingReceipt(withOpenedAt(value));
+
+      expect(receipt.snapshot.openedAt).toBeNull();
+      expect(renderText(receipt)).not.toContain('Apertura');
+    });
+
+    it('rejects a malformed openedAt', () => {
+      expect(() => parseCashClosingReceipt(withOpenedAt('not-a-date'))).toThrow(
+        CashClosingSnapshotParseError,
+      );
+    });
+  });
+
   it('never labels the combined totals as physical cash or profit', () => {
     const text = renderText().toLowerCase();
 

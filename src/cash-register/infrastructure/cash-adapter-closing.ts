@@ -4,8 +4,9 @@
  * Closing requires a submitted declaration, an independent verifier, a
  * released drawer and fully received/allocated custody. The frozen snapshot
  * carries expected/declared/verified amounts, per-channel differences,
- * actors, timestamps, folio and the original declaration timestamp, so a
- * later payment or catalog rename cannot rewrite a closed cut.
+ * actors, timestamps (including the session's `openedAt`), folio and the
+ * original declaration timestamp, so a later payment or catalog rename
+ * cannot rewrite a closed cut.
  */
 import {
   CASH_RULE_CODES,
@@ -192,6 +193,9 @@ export async function close(
   });
   const snapshot = {
     ...baseSnapshot,
+    // cash-redesign-reads T2 (S7) — the session opening time, frozen with
+    // the cut. Snapshots frozen before this field read it as `null`.
+    openedAt: session.openedAt.toISOString(),
     registerName: register ? register.name : null,
     cashierName: await userName(tx, session.cashierUserId),
     verifierName: await userName(tx, verification.actorUserId),

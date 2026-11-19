@@ -1,6 +1,6 @@
 # Caja redesign — recipients, session filters, closing filter, close contract
 
-**Status:** implemented on branch `feat/cash-redesign-reads`, **not merged, not pushed, not deployed**. **No migration.** Task: `odd/tasks/cash-redesign-reads.md` (T1, S1–S6).
+**Status:** T1 (S1–S6) merged in main (`0b985890`). T2 (S7, §3.1 and `openedAt` in §6) implemented on branch `feat/cash-closings-list-fields`, **not merged, not pushed, not deployed**. **No migration.** Task: `odd/tasks/cash-redesign-reads.md`.
 
 Shapes come from the code and its specs: `src/cash-register/presentation/cash-handover.controller.ts`, `cash-session.controller.ts`, `cash-closing.controller.ts`, `presentation/dto/query.dto.ts`, `infrastructure/cash-adapter-recipients.ts`, `cash-adapter-queries.ts`, `cash-adapter-list-scope.ts`, `cash-adapter-closing.ts`, `src/shared/filters/domain-exception.filter.ts`, and the specs `presentation/cash-register.controller.spec.ts`, `infrastructure/cash-adapter-queries.spec.ts`, `infrastructure/prisma-cash-register.redesign-reads.integration.spec.ts` (real PostgreSQL). Nothing was sent to the dev API.
 
@@ -55,6 +55,40 @@ Errors: `401` (no/invalid token), `403 INSUFFICIENT_PERMISSIONS` (no `create:Cas
 
 `cashierUserId` (UUID) keeps only cuts whose **closed session** belongs to that cashier (not who closed it). It narrows together with `registerId` and `from`/`to`. Without `read:CashSessionAudit` you still only see cuts you closed or cuts of your own sessions, so filtering by another cashier returns only the cuts you closed for them. Order: `createdAt` newest first, then `id`.
 
+### 3.1 List item fields: register, cashier, difference (S7)
+
+Each item of `GET /cash-closings` now also carries the register, the cashier and the cut's difference, so the list no longer needs `GET /cash-closings/:id` per row. Existing keys are unchanged.
+
+```json
+{
+  "items": [
+    {
+      "id": "9a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
+      "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+      "createdAt": "2026-11-05T22:45:30.120Z",
+      "register": { "id": "a1f3e0b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b", "name": "Caja Mostrador 2" },
+      "cashier": { "userId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "displayName": "Ana Cajera" },
+      "differenceCents": -500
+    }
+  ],
+  "page": 1,
+  "limit": 25,
+  "total": 1
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `register` | `{ id, name }` \| null | The closed session's register. `name` is the register's **current** name (string \| null). |
+| `cashier` | `{ userId, displayName }` \| null | The closed session's cashier (not who closed it). `displayName` is the **current** `User.name` (string \| null). |
+| `differenceCents` | integer \| null | Frozen cash difference **declared − expected** (physical cash), read from the snapshot: `comparison.declarationDifferenceCents`, or `declaredCents − expectedCents` when an old snapshot has no `comparison`. Negative = shortage. `null` when the snapshot has neither. Never recomputed from live data. |
+
+- `register`/`cashier` are `null` only if the source session cannot be read (not expected; the database keeps the link).
+- Names here are current; the closing detail and PDF keep the names **frozen at close** (`snapshot.registerName`, `snapshot.cashierName`). If a register or user was renamed later, the list and the detail can differ.
+- `differenceCents` is the same "declared − expected" value as `comparison.declarationDifferenceCents` in §6 and as the session list's `differenceCents`. The verifier's difference (verified − declared) stays in the detail only.
+- Visibility, filters, order and paging are unchanged (§3, §4). The fields are filled with a fixed number of batched lookups per page (no per-row reads).
+
 ## 4. Real paging (S5)
 
 Both lists (`/cash-sessions`, `/cash-closings`) now filter, count and page **in the database** (`skip`/`take`, `total` from a count) when the caller's cash permissions are plain grants, which is every role the app builds today. Results, `total` and order are the same as before (proved by a spec comparing both paths page by page). The response shape `{ items, page, limit, total }` does not change.
@@ -102,6 +136,7 @@ Both lists (`/cash-sessions`, `/cash-closings`) now filter, count and page **in 
     "verifiedAt": "2026-11-05T22:18:00.000Z",
     "closedAt": "2026-11-05T22:45:30.000Z",
     "closedByUserId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+    "openedAt": "2026-11-05T14:00:00.000Z",
     "registerName": "Caja Mostrador 2",
     "cashierName": "Ana Cajera",
     "verifierName": "Luis Supervisor",
@@ -158,7 +193,7 @@ Suggested readiness checklist for the detail screen (all from `GET /cash-session
 
 ## 6. Closing snapshot fields (verified against the code)
 
-The snapshot is frozen at close; it is never recomputed. Field list checked against `createCashClosingSnapshot` (`src/cash-register/domain/cash-snapshot.ts`) and `close()` (`cash-adapter-closing.ts`); it matches [cash-register-closing.md](../cash-register-closing.md#frozen-snapshot-closing-detail-and-pdf).
+The snapshot is frozen at close; it is never recomputed. Field list checked against `createCashClosingSnapshot` (`src/cash-register/domain/cash-snapshot.ts`) and `close()` (`cash-adapter-closing.ts`, which adds `openedAt` and the display extras); it matches [cash-register-closing.md](../cash-register-closing.md#frozen-snapshot-closing-detail-and-pdf).
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -176,6 +211,7 @@ The snapshot is frozen at close; it is never recomputed. Field list checked agai
 | `verifiedAt` | ISO string \| null | Verification time. Always set by close. |
 | `closedAt` | ISO string | Close time (server clock, can differ by milliseconds from the top-level `createdAt`). |
 | `closedByUserId` | UUID string | Closer. |
+| `openedAt` | ISO string \| null | Session opening time, frozen at close (T2/S7). **`null` for cuts closed before T2**: those snapshots never stored it, and the backend does not fill it from the live session because the cut is frozen. Use `GET /cash-sessions/:id` → `session.openedAt` if you need it for an old cut. The PDF shows it as «Apertura» only when present. |
 | `registerName` | string \| null | Register name at close. |
 | `cashierName`, `verifierName`, `closedByName` | string \| null | `User.name` at close (`null` only if the user row is missing). |
 | `declarationNotes` | string \| null | Notes of the latest declaration revision. |

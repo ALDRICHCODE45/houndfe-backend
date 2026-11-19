@@ -140,6 +140,8 @@ describe('cash-adapter-closing — direct module contract', () => {
     expect(snapshot.sessionId).toBe('s-1');
     expect(snapshot.folio).toBe(doc.folio);
     expect(snapshot.cashierName).toBe('Ana');
+    // cash-redesign-reads T2/S7 — the session opening time is frozen too.
+    expect(snapshot.openedAt).toBe('2026-01-01T10:00:00.000Z');
     expect(asItems(snapshot.channels)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

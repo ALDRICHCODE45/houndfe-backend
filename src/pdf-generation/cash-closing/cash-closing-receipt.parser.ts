@@ -261,6 +261,11 @@ function parseSnapshot(
       'snapshot.verificationNotes',
     ),
     closingNotes: readOptionalText(raw.closingNotes, 'snapshot.closingNotes'),
+    // cash-redesign-reads T2 — absent on snapshots frozen before it.
+    openedAt:
+      raw.openedAt === undefined
+        ? null
+        : readNullableIsoString(raw.openedAt, 'snapshot.openedAt'),
   };
 }
 

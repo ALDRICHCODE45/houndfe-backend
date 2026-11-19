@@ -50,6 +50,7 @@ import {
   toDomainMovement,
   toDomainSession,
 } from './cash-adapter-mappers';
+import { closingListItems } from './cash-adapter-closing-list';
 import { resolveListScope } from './cash-adapter-list-scope';
 import { normalizePage, parseRange } from './cash-adapter-paging';
 import { userNames } from './cash-adapter-storage';
@@ -372,6 +373,9 @@ export async function queryClosings(
   );
   let total: number;
   let pageRows: CashClosing[];
+  // Sessions already loaded by the per-row path are reused by the item
+  // projection, so neither path reads per row (cash-redesign-reads S7).
+  let knownSessions: Map<string, CashSession> | undefined;
   if (scope === 'PER_ROW') {
     if (and.length > 0) {
       where.AND = and;
@@ -395,6 +399,7 @@ export async function queryClosings(
     );
     total = visible.length;
     pageRows = visible.slice(skip, skip + limit);
+    knownSessions = sessionById;
   } else if (scope === 'NONE') {
     total = 0;
     pageRows = [];
@@ -424,12 +429,7 @@ export async function queryClosings(
       take: limit,
     });
   }
-  const items = pageRows.map((row) => ({
-    id: row.id,
-    sessionId: row.sessionId,
-    folio: row.folio,
-    createdAt: iso(row.createdAt),
-  }));
+  const items = await closingListItems(tx, tenantId, pageRows, knownSessions);
   return document({ items, page, limit, total });
 }
 

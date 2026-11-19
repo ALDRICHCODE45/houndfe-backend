@@ -40,8 +40,27 @@ export function closingDocument(
     sessionId: row.sessionId,
     folio: row.folio,
     createdAt: iso(row.createdAt),
-    snapshot,
+    snapshot: withOpenedAt(snapshot),
   });
+}
+
+/**
+ * cash-redesign-reads T2 (S7) — CLOSE freezes `openedAt` (the session's
+ * opening time) into every new snapshot. A snapshot frozen before that has
+ * no such key; the read exposes it as `null` instead of deriving it from the
+ * live session, because a closed cut is frozen and must not gain values it
+ * did not record. The stored row is never rewritten.
+ */
+function withOpenedAt(snapshot: CashJson): CashJson {
+  if (
+    snapshot === null ||
+    typeof snapshot !== 'object' ||
+    Array.isArray(snapshot) ||
+    'openedAt' in snapshot
+  ) {
+    return snapshot;
+  }
+  return { ...snapshot, openedAt: null };
 }
 
 export function handoverDocument(row: CashHandover): CashDocument {

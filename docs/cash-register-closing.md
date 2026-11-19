@@ -263,7 +263,7 @@ permission; releasing a drawer does not require granting receipt permission.
 `GET /cash-handovers/recipients` → `{ items: [{ userId, displayName, roleName }] }` (active sucursal members whose role grants `update:CashHandover`, including `manage:all`; the caller is excluded for `kind=WITHDRAWAL`; sorted by `displayName`; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 `POST .../release-drawer` → `{ sessionId, drawerReleasedAt }`
 `POST .../close` and `GET /cash-closings/:id` → `{ id, sessionId, folio, createdAt, snapshot }`
-`GET /cash-closings` → `{ items: [{ id, sessionId, folio, createdAt }], page, limit, total }`
+`GET /cash-closings` → `{ items: [{ id, sessionId, folio, createdAt, register: { id, name|null }|null, cashier: { userId, displayName|null }|null, differenceCents|null }], page, limit, total }` (`register`/`cashier` are the closed session's, with current names; `differenceCents` is the frozen declared − expected cash difference from the snapshot; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 
 `CashSessionProjection`:
 `{ id, tenantId, registerId, status, cashierUserId, openingCents, frozenAt|null, drawerReleasedAt|null, blind }`
@@ -866,10 +866,14 @@ only `FLOAT` items expose `sourceRegisterId`/`sourceDrawerReleasedAt`.
 
 `{ sessionId, tenantId, registerId, folio, cashierUserId, openingCents,
 expectedCents, declaredCents, verifiedCents|null, verifierUserId|null, channels[],
-handovers[], countedAt, verifiedAt|null, closedAt, closedByUserId, registerName,
-cashierName, verifierName, closedByName, declarationNotes, verificationNotes,
-comparison, closingNotes }`
+handovers[], countedAt, verifiedAt|null, closedAt, closedByUserId, openedAt|null,
+registerName, cashierName, verifierName, closedByName, declarationNotes,
+verificationNotes, comparison, closingNotes }`
 
+`openedAt` is the session's opening time, frozen by CLOSE (cash-redesign-reads
+T2). Snapshots frozen before that do not store it; reads return `openedAt: null`
+for them and never derive it from the live session (the cut is frozen; the stored
+row is not rewritten). The PDF shows "Apertura" only when it is present.
 `countedAt` is the original declaration's timestamp, not a later annotation's.
 `closingNotes` is frozen by CLOSE and consumed directly by the receipt parser.
 
