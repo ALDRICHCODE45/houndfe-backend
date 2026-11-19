@@ -66,10 +66,33 @@ import type {
   ReceiptSale,
   ReceiptCustomer,
 } from './templates/receipt/receipt.types';
-import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
+import {
+  formatQuotationFolio,
+  type QuotationDocumentProps,
+} from './templates/quotation/quotation-a4.document';
 import type { QuotationResponseDto } from '../quotations/dto/quotation-response.dto';
 import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
 import { SellerSalesReportA4Document } from './templates/report/seller-sales-report-a4.document';
+
+/** Printed when the quotation's seller has no human name. */
+const UNNAMED_SELLER = 'Vendedor sin nombre';
+
+/**
+ * Seller name for the PDF. Blank names and the id fallbacks of the wire DTO
+ * (`seller.name === sellerUserId` when the user record is missing) are NOT
+ * names: they read «Vendedor sin nombre», never a user id.
+ */
+function sellerDisplayName(quotation: QuotationResponseDto): string {
+  const name = quotation.seller?.name?.trim();
+  if (
+    !name ||
+    name === quotation.sellerUserId ||
+    name === quotation.seller?.id
+  ) {
+    return UNNAMED_SELLER;
+  }
+  return name;
+}
 
 const SUPPORTED_FORMATS: readonly FormatKey[] = [
   DEFAULT_FORMAT_KEY,
@@ -333,9 +356,9 @@ export class PdfGenerationService implements OnModuleInit {
    *   3. `renderToStream(<Template {...props} />)` returns a Node
    *      `Readable` we hand back to the controller.
    *
-   * Returns `{ stream, folio }` (folio = the quotation id) so the
-   * controller can stamp it into the `Content-Disposition` filename
-   * (`cotizacion-{id}.pdf`).
+   * Returns `{ stream, folio }` (folio = the human-readable `COT-xxxxxxxx`
+   * short folio, never the raw UUID) so the controller can stamp it into the
+   * `Content-Disposition` filename (`cotizacion-{folio}.pdf`).
    *
    * **No status guard** — quotations are renderable in any status
    * per the spec scenario "PDF preview DRAFT/SENT/EXPIRED".
@@ -366,7 +389,7 @@ export class PdfGenerationService implements OnModuleInit {
       throw new InternalServerErrorException('PDF_GENERATION_FAILED');
     }
 
-    return { stream, folio: quotation.id };
+    return { stream, folio: formatQuotationFolio(quotation.id) };
   }
 
   /**
@@ -473,7 +496,9 @@ export class PdfGenerationService implements OnModuleInit {
         logoUrl: LOGO_URL,
       },
       quotation: {
-        id: quotation.id,
+        // Printed folio: the quotation model has no folio column, so the id
+        // prints shortened (`COT-` + first 8 hex chars), never the full UUID.
+        id: formatQuotationFolio(quotation.id),
         date:
           quotation.createdAt instanceof Date
             ? quotation.createdAt.toISOString()
@@ -493,12 +518,14 @@ export class PdfGenerationService implements OnModuleInit {
           : null,
         email: quotation.customer?.email ?? null,
       },
-      // The seller display name rides on `seller.name` when present; the
+      // The seller display name rides on `seller.name` when present. The
       // send-flow wire DTO (built in `QuotationsService.send` from the
-      // entity directly) does NOT carry the `seller` snapshot, so we fall
-      // back to the raw `sellerUserId` — never render an empty Vendedor row.
+      // entity directly) does NOT carry the `seller` snapshot, and the read
+      // path falls back to the raw user id when the user record is missing.
+      // A user id is never printed as a name: those cases read
+      // «Vendedor sin nombre».
       seller: {
-        name: quotation.seller?.name ?? quotation.sellerUserId,
+        name: sellerDisplayName(quotation),
       },
       items,
       totals: {

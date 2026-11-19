@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
   Document,
+  Image,
   Page,
   renderToBuffer,
   Text,
@@ -220,9 +221,34 @@ describe('ReceiptA4Document', () => {
         business: { ...receipt.business, companyName: 'Mascotas Felices' },
       };
       expect(textOf(named)).toContain('Mascotas Felices');
-      expect(tree(receipt).some((element) => element.type === 'IMAGE')).toBe(
+      expect(tree(receipt).some((element) => element.type === Image)).toBe(
         false,
       );
+    });
+
+    it('draws the kit «Logo» placeholder without a logo and the image with one', () => {
+      const withLogo = {
+        ...receipt,
+        business: { ...receipt.business, logoUrl: 'https://cdn.test/logo.png' },
+      };
+      const images = tree(withLogo).filter((element) => element.type === Image);
+
+      expect(textOf(receipt)).toContain('Logo');
+      expect(images).toHaveLength(1);
+      expect(images[0].props.src).toBe('https://cdn.test/logo.png');
+      expect(textOf(withLogo)).not.toMatch(/\bLogo\b/);
+      // The header is the kit's: no local copy of the header styles.
+      expect(SOURCE).toContain('<A4PageHeader');
+      expect(SOURCE).not.toContain('function ReceiptHeader');
+    });
+
+    it('prints dates in the one A4 format (lowercase month, 24 h, CDMX)', () => {
+      const text = textOf();
+
+      // 2026-07-20T15:30Z → 09:30 in America/Mexico_City.
+      expect(text).toContain('20 jul 2026, 09:30');
+      expect(text).toContain('09:31');
+      expect(text).not.toMatch(/JUL/);
     });
 
     it('prints line items with variant, qty × unit (grouped) and line total', () => {
@@ -401,6 +427,7 @@ describe('ReceiptA4Document', () => {
       expect(flattenText(footer?.props.children as ReactNode)).toContain(
         'HoundFe',
       );
+      expect(SOURCE).not.toContain("'HoundFe'");
       expect(render({ pageNumber: 2, totalPages: 3 })).toBe('Página 2 de 3');
       expect(SOURCE).not.toMatch(/Página \d/);
     });
@@ -420,6 +447,37 @@ describe('ReceiptA4Document', () => {
       const continued = flattenText(render({ pageNumber: 2 }));
       expect(continued).toContain('Recibo');
       expect(continued).toContain('Folio #A-0001');
+    });
+
+    it('uses the business name in the footer and the continuation header', () => {
+      const named = {
+        ...receipt,
+        business: { ...receipt.business, companyName: 'Mascotas Felices' },
+      };
+      const footer = tree(named).find(
+        (element) =>
+          element.type === View &&
+          element.props.fixed === true &&
+          flattenText(element.props.children as ReactNode).includes(
+            'Recibo A-0001',
+          ),
+      );
+      const header = tree(named).find(
+        (element) =>
+          element.type === View &&
+          element.props.fixed === true &&
+          typeof element.props.render === 'function',
+      );
+      const render = header?.props.render as (info: {
+        pageNumber: number;
+      }) => ReactNode;
+      const footerText = flattenText(footer?.props.children as ReactNode);
+
+      expect(footerText).toContain('Mascotas Felices');
+      expect(footerText).not.toContain('HoundFe');
+      expect(flattenText(render({ pageNumber: 2 }))).toContain(
+        'Mascotas Felices',
+      );
     });
   });
 });

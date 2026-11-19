@@ -26,17 +26,17 @@
  *   - `quotations/send-and-pdf/spec.md` PDF Preview for Quotation.
  *   - `pdf-generation/delta.md` Quotation-A4 Format Registration.
  */
-import { Document, Image, StyleSheet, Text, View } from '@react-pdf/renderer';
+import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
   A4_COLORS,
   A4_FONTS,
-  A4_STYLES,
   A4MetaBar,
   A4Page,
   A4PageHeader,
   A4Section,
   A4TotalsBlock,
   LedgerTable,
+  formatA4Date,
   px,
   type A4MetaBarItem,
   type A4TotalsLine,
@@ -90,6 +90,15 @@ export interface QuotationDocumentProps {
 
 const SUBTITLE = 'Punto de Venta';
 
+/**
+ * Human-readable quotation folio for the PDF. The quotation model has no
+ * folio/number column, so the UUID id prints shortened: `COT-` + its first
+ * 8 hex characters (never the full UUID).
+ */
+export function formatQuotationFolio(id: string): string {
+  return `COT-${id.replace(/-/g, '').slice(0, 8)}`;
+}
+
 const ITEM_COLUMNS: readonly LedgerColumn[] = [
   { key: 'description', label: 'Descripción', flex: 5 },
   { key: 'qty', label: 'Cantidad × precio', flex: 2.4, align: 'right' },
@@ -115,61 +124,43 @@ export function QuotationA4Document({
     >
       <A4Page
         footerLabel={`Cotización ${quotation.id}`}
+        brandName={business.companyName}
+        logoUrl={business.logoUrl}
         continuation={{
           kicker: 'Cotización',
           folio,
           brandSubtitle: SUBTITLE,
         }}
       >
-        <QuotationHeader logoUrl={business.logoUrl} folio={folio} />
+        <A4PageHeader
+          brandName={business.companyName}
+          logoUrl={business.logoUrl}
+          subtitle={SUBTITLE}
+          kicker="Cotización"
+          folio={folio}
+        />
         <A4MetaBar
           items={metaItems(quotation.date, seller, quotation.expiresAt)}
         />
         <CustomerSection customer={customer} />
         <ItemsSection items={items} />
         <Totals {...totals} />
-        <Closing expiresAt={quotation.expiresAt} />
+        <Closing
+          expiresAt={quotation.expiresAt}
+          brandName={business.companyName}
+        />
       </A4Page>
     </Document>
   );
 }
 
 /**
- * Page header. The kit header only draws the «Logo» placeholder box; when the
- * business has a logo we keep printing it (legacy field) in that same box,
- * reusing the kit styles. Without a logo the stock kit header is used.
+ * Short Spanish date in the kit's one A4 format (`06 ago 2026`). Rendered in
+ * UTC so a quote date never shifts by the server's time zone (an expiry set to
+ * midnight UTC would otherwise display as the previous day).
  */
-function QuotationHeader({
-  logoUrl,
-  folio,
-}: {
-  logoUrl?: string;
-  folio: string;
-}) {
-  if (!logoUrl) {
-    return (
-      <A4PageHeader subtitle={SUBTITLE} kicker="Cotización" folio={folio} />
-    );
-  }
-  return (
-    <View>
-      <View style={A4_STYLES.header}>
-        <View style={A4_STYLES.brand}>
-          <View style={styles.logoFrame}>
-            <Image src={logoUrl} style={styles.logoImage} cache={false} />
-          </View>
-          <View>
-            <Text style={A4_STYLES.brandName}>HoundFe</Text>
-            <Text style={A4_STYLES.brandSub}>{SUBTITLE}</Text>
-          </View>
-        </View>
-        <View style={A4_STYLES.docMeta}>
-          <Text style={A4_STYLES.kicker}>Cotización</Text>
-          <Text style={A4_STYLES.folio}>{folio}</Text>
-        </View>
-      </View>
-    </View>
-  );
+function formatQuotationDate(iso: string): string {
+  return formatA4Date(iso, 'UTC');
 }
 
 function metaItems(
@@ -177,12 +168,17 @@ function metaItems(
   seller: { name: string } | null,
   expiresAt: string | null,
 ): A4MetaBarItem[] {
-  const items: A4MetaBarItem[] = [{ label: 'Fecha', value: formatDate(date) }];
+  const items: A4MetaBarItem[] = [
+    { label: 'Fecha', value: formatQuotationDate(date) },
+  ];
   if (seller?.name) {
     items.push({ label: 'Vendedor', value: seller.name });
   }
   if (expiresAt) {
-    items.push({ label: 'Válido hasta', value: formatDate(expiresAt) });
+    items.push({
+      label: 'Válido hasta',
+      value: formatQuotationDate(expiresAt),
+    });
   }
   return items;
 }
@@ -273,32 +269,27 @@ function Totals({
 }
 
 /** Closing — expiry line, thank-you line and the fiscal disclaimer. */
-function Closing({ expiresAt }: { expiresAt: string | null }) {
+function Closing({
+  expiresAt,
+  brandName,
+}: {
+  expiresAt: string | null;
+  brandName: string;
+}) {
   return (
     <View style={styles.closing} wrap={false}>
       <Text style={styles.closingStrong}>
         {expiresAt
-          ? `Válido hasta: ${formatDate(expiresAt)}`
+          ? `Válido hasta: ${formatQuotationDate(expiresAt)}`
           : 'Sin fecha de expiración'}
       </Text>
-      <Text>Gracias por confiar en HoundFe</Text>
+      <Text>Gracias por confiar en {brandName}</Text>
       <Text>Este comprobante no constituye una factura fiscal.</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  logoFrame: {
-    width: px(36),
-    height: px(36),
-    borderWidth: px(1.5),
-    borderColor: A4_COLORS.strong,
-    borderStyle: 'solid',
-    marginRight: px(12),
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  logoImage: { width: px(30), height: px(30), objectFit: 'contain' },
   party: { flexDirection: 'row', marginTop: px(2) },
   partyColumn: {
     flex: 1,
@@ -350,32 +341,4 @@ function formatQuantity(qty: number): string {
     return qty.toString();
   }
   return qty.toFixed(2).replace(/\.?0+$/, '');
-}
-
-/**
- * Format an ISO timestamp as a short Spanish date, e.g. `06 ago 2026`.
- *
- * Rendered in UTC so a quote date never shifts by the server's time zone
- * (an expiry set to midnight UTC would otherwise display as the previous
- * day in UTC-negative zones). Falls back to the raw input when unparseable.
- */
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  try {
-    return new Intl.DateTimeFormat('es-MX', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      timeZone: 'UTC',
-    })
-      .format(date)
-      .replace(/\./g, '')
-      .toLowerCase();
-  } catch {
-    // Older Node builds without full ICU data fall back to ISO date.
-    return date.toISOString().slice(0, 10);
-  }
 }

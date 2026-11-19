@@ -23,17 +23,18 @@
  *
  * Built-in Helvetica only (kit tokens): no remote font registration.
  */
-import { Document, Image, StyleSheet, Text, View } from '@react-pdf/renderer';
+import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
   A4_COLORS,
   A4_FONTS,
-  A4_STYLES,
   A4MetaBar,
   A4Page,
   A4PageHeader,
   A4Section,
   A4TotalsBlock,
   LedgerTable,
+  formatA4DateTime,
+  formatA4Time,
   px,
   type A4TotalsLine,
   type LedgerColumn,
@@ -57,20 +58,24 @@ export function ReceiptA4Document({
     <Document title={`Recibo ${sale.folio}`}>
       <A4Page
         footerLabel={`Recibo ${sale.folio}`}
+        brandName={business.companyName}
+        logoUrl={business.logoUrl}
         continuation={{
           kicker: 'Recibo',
           folio: `Folio #${sale.folio}`,
           brandSubtitle: BRAND_SUBTITLE,
         }}
       >
-        <ReceiptHeader
+        <A4PageHeader
+          brandName={business.companyName}
           logoUrl={business.logoUrl}
-          companyName={business.companyName}
-          folio={sale.folio}
+          subtitle={BRAND_SUBTITLE}
+          kicker="Recibo"
+          folio={`Folio #${sale.folio}`}
         />
         <A4MetaBar
           items={[
-            { label: 'Fecha', value: formatReceiptDate(sale.date) },
+            { label: 'Fecha', value: formatA4DateTime(sale.date) },
             { label: 'Cajero', value: sale.cashier },
             { label: 'Vendedor', value: sale.seller },
           ]}
@@ -90,50 +95,6 @@ export function ReceiptA4Document({
         </View>
       </A4Page>
     </Document>
-  );
-}
-
-// ── Header ───────────────────────────────────────────────────────────
-
-/**
- * Page header. Without a logo it is the kit's `A4PageHeader`; with
- * `business.logoUrl` it is a local variant (same kit styles) that swaps the
- * placeholder box for the business logo, as the receipt always did.
- */
-function ReceiptHeader({
-  logoUrl,
-  companyName,
-  folio,
-}: {
-  logoUrl?: string;
-  companyName: string;
-  folio: string;
-}) {
-  const folioText = `Folio #${folio}`;
-  if (!logoUrl) {
-    return (
-      <A4PageHeader
-        brandName={companyName}
-        subtitle={BRAND_SUBTITLE}
-        kicker="Recibo"
-        folio={folioText}
-      />
-    );
-  }
-  return (
-    <View style={A4_STYLES.header}>
-      <View style={A4_STYLES.brand}>
-        <Image src={logoUrl} style={styles.logo} cache={false} />
-        <View>
-          <Text style={A4_STYLES.brandName}>{companyName}</Text>
-          <Text style={A4_STYLES.brandSub}>{BRAND_SUBTITLE}</Text>
-        </View>
-      </View>
-      <View style={A4_STYLES.docMeta}>
-        <Text style={A4_STYLES.kicker}>Recibo</Text>
-        <Text style={A4_STYLES.folio}>{folioText}</Text>
-      </View>
-    </View>
   );
 }
 
@@ -258,7 +219,7 @@ function PaymentsSection({ payments }: { payments: readonly Payment[] }) {
               ) : null}
               {payment.paidAt ? (
                 <Text style={styles.paymentSmall}>
-                  {formatTimestamp(payment.paidAt)}
+                  {formatA4Time(payment.paidAt)}
                 </Text>
               ) : null}
             </View>
@@ -302,54 +263,11 @@ function formatMethod(method: string): string {
   return map[method.toUpperCase()] ?? method;
 }
 
-function formatReceiptDate(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  try {
-    return new Intl.DateTimeFormat('es-MX', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(date);
-  } catch {
-    // Older Node builds without full ICU data fall back to ISO.
-    return date.toISOString().replace('T', ' ').slice(0, 16);
-  }
-}
-
-/** Payment time only (`HH:mm`) — the meta bar already shows the day. */
-function formatTimestamp(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  try {
-    return new Intl.DateTimeFormat('es-MX', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(date);
-  } catch {
-    return date.toISOString().slice(11, 16);
-  }
-}
-
 // ── Local styles (artboard .r / .pay / .closing) ─────────────────────
 
 const HAIRLINE = px(1);
 
 const styles = StyleSheet.create({
-  logo: {
-    width: px(36),
-    height: px(36),
-    marginRight: px(12),
-    objectFit: 'contain',
-  },
   customerRow: {
     paddingVertical: px(6),
     borderBottomWidth: HAIRLINE,

@@ -602,7 +602,7 @@ describe('PdfGenerationService', () => {
       );
 
       expect(result.stream).toBe(expectedStream);
-      expect(result.folio).toBe(quotation.id);
+      expect(result.folio).toBe('COT-00000000');
       expect(renderer.renderToStream).toHaveBeenCalledTimes(1);
     });
 
@@ -657,7 +657,8 @@ describe('PdfGenerationService', () => {
           logoUrl: LOGO_URL,
         },
         quotation: {
-          id: quotation.id,
+          // Printed folio: short `COT-` + first 8 hex chars, never the UUID.
+          id: 'COT-00000000',
           // The date string round-trips through the wire DTO.
           date: '2026-07-20T15:00:00.000Z',
           expiresAt: null,
@@ -749,10 +750,9 @@ describe('PdfGenerationService', () => {
       });
     });
 
-    it('falls back to sellerUserId when the wire DTO carries no seller snapshot', async () => {
+    it('prints «Vendedor sin nombre» — never a user id — when no seller snapshot is available', async () => {
       // The `send()` flow builds its wire DTO from the entity directly
-      // (no `seller` snapshot), so buildQuotationProps must fall back to
-      // the raw `sellerUserId` — never an empty Vendedor row on the PDF.
+      // (no `seller` snapshot); the id must not leak as a seller name.
       const quotation = makeQuotationResponse({ seller: undefined });
       renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
 
@@ -760,7 +760,41 @@ describe('PdfGenerationService', () => {
 
       const renderedElement = renderer.renderToStream.mock.calls[0][0];
       const props = renderedElement.props as Record<string, unknown>;
-      expect(props.seller).toEqual({ name: 'user-1' });
+      expect(props.seller).toEqual({ name: 'Vendedor sin nombre' });
+    });
+
+    it.each([
+      ['the wire fallback name equals the sellerUserId', 'user-1'],
+      ['the name is blank', '   '],
+    ])('prints «Vendedor sin nombre» when %s', async (_label, name: string) => {
+      const quotation = makeQuotationResponse({
+        seller: { id: 'user-1', name },
+      });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      await service.renderQuotationPdf(quotation as never, 'quotation-a4');
+
+      const renderedElement = renderer.renderToStream.mock.calls[0][0];
+      const props = renderedElement.props as Record<string, unknown>;
+      expect(props.seller).toEqual({ name: 'Vendedor sin nombre' });
+    });
+
+    it('prints a short COT- folio (never the UUID) in the props and the returned folio', async () => {
+      const quotation = makeQuotationResponse({
+        id: '3f9a1c2b-5d4e-4f60-8a71-0b2c3d4e5f60',
+      });
+      renderer.renderToStream.mockReturnValue(Readable.from(['pdf']));
+
+      const result = await service.renderQuotationPdf(
+        quotation as never,
+        'quotation-a4',
+      );
+
+      const renderedElement = renderer.renderToStream.mock.calls[0][0];
+      const props = renderedElement.props as QuotationDocumentProps;
+      expect(props.quotation.id).toBe('COT-3f9a1c2b');
+      expect(result.folio).toBe('COT-3f9a1c2b');
+      expect(JSON.stringify(props)).not.toContain('5d4e-4f60');
     });
 
     it('wraps renderer failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {

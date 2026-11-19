@@ -9,11 +9,11 @@
  * Pagination is natural: one wrapping `<Page>`; rows are `wrap={false}` so a
  * row never splits across pages.
  */
-import { Page, Text, View } from '@react-pdf/renderer';
+import { Image, Page, Text, View } from '@react-pdf/renderer';
 import type { ReactNode } from 'react';
 import { PAPER_SIZES } from '../../../pdf-generation.constants';
 import { A4_STYLES as s } from './a4-styles';
-import { A4_FONTS, toneColor, type A4Tone } from './tokens';
+import { A4_FONTS, px, toneColor, type A4Tone } from './tokens';
 
 export interface A4Continuation {
   /** Right-hand kicker of the repeated header (e.g. «Entregas y recepciones»). */
@@ -22,16 +22,47 @@ export interface A4Continuation {
   readonly brandSubtitle: string;
 }
 
-export interface A4PageProps {
+/** Brand name printed when the document does not provide one. */
+export const A4_DEFAULT_BRAND_NAME = 'HoundFe';
+
+/** Default logo frame width (pt); the height is always 36 artboard px. */
+const LOGO_SIZE = px(36);
+
+/** Business identity shared by header, continuation header and footer. */
+export interface A4Brand {
+  /** Business name; defaults to «HoundFe» when absent or blank. */
+  readonly brandName?: string;
+  /**
+   * Optional logo: a URL, data URI or packaged absolute file path. When
+   * absent the kit draws the «Logo» placeholder box.
+   */
+  readonly logoUrl?: string;
+  /** Logo width in pt (default square 36 px); wide wordmarks pass more. */
+  readonly logoWidth?: number;
+}
+
+function resolveBrandName(brandName: string | undefined): string {
+  const trimmed = brandName?.trim();
+  return trimmed ? trimmed : A4_DEFAULT_BRAND_NAME;
+}
+
+export interface A4PageProps extends A4Brand {
   readonly children: ReactNode;
-  /** Footer left text after «HoundFe ·» (e.g. «Corte de caja CC-1»). */
+  /** Footer left text after «<business name> ·» (e.g. «Corte de caja CC-1»). */
   readonly footerLabel: string;
   /** When set, pages 2+ repeat a compact header (fixed). */
   readonly continuation?: A4Continuation;
 }
 
 /** Wrapping A4 page: natural pagination, fixed footer, optional continuation. */
-export function A4Page({ children, footerLabel, continuation }: A4PageProps) {
+export function A4Page({
+  children,
+  footerLabel,
+  continuation,
+  brandName,
+  logoUrl,
+  logoWidth,
+}: A4PageProps) {
   return (
     <Page
       size={{ width: PAPER_SIZES.A4.width, height: PAPER_SIZES.A4.height }}
@@ -39,19 +70,32 @@ export function A4Page({ children, footerLabel, continuation }: A4PageProps) {
       wrap
     >
       <A4GoldMark />
-      {continuation ? <A4ContinuationHeader {...continuation} /> : null}
+      {continuation ? (
+        <A4ContinuationHeader
+          {...continuation}
+          brandName={brandName}
+          logoUrl={logoUrl}
+          logoWidth={logoWidth}
+        />
+      ) : null}
       {children}
-      <A4Footer label={footerLabel} />
+      <A4Footer label={footerLabel} brandName={brandName} />
     </Page>
   );
 }
 
 /** Fixed footer; page numbers come from react-pdf, never from static text. */
-export function A4Footer({ label }: { label: string }) {
+export function A4Footer({
+  label,
+  brandName,
+}: {
+  label: string;
+  brandName?: string;
+}) {
   return (
     <View fixed style={s.footer}>
       <Text style={s.footerText}>
-        <Text style={s.footerStrong}>HoundFe</Text>
+        <Text style={s.footerStrong}>{resolveBrandName(brandName)}</Text>
         {` · ${label}`}
       </Text>
       <Text
@@ -65,7 +109,7 @@ export function A4Footer({ label }: { label: string }) {
 }
 
 /** Header repeated on every page after the first (hidden on page 1). */
-export function A4ContinuationHeader(props: A4Continuation) {
+export function A4ContinuationHeader(props: A4Continuation & A4Brand) {
   return (
     <View
       fixed
@@ -76,6 +120,9 @@ export function A4ContinuationHeader(props: A4Continuation) {
               subtitle={props.brandSubtitle}
               kicker={props.kicker}
               folio={props.folio}
+              brandName={props.brandName}
+              logoUrl={props.logoUrl}
+              logoWidth={props.logoWidth}
             />
           </View>
         ) : null
@@ -92,29 +139,42 @@ export function A4GoldMark() {
   return <View fixed style={s.goldMark} />;
 }
 
-export interface A4PageHeaderProps {
+export interface A4PageHeaderProps extends A4Brand {
   readonly subtitle: string;
   readonly kicker: string;
   readonly folio: string;
-  readonly brandName?: string;
 }
 
-/** Logo placeholder box + brand on the left, kicker/folio on the right. */
+/**
+ * Logo (or the «Logo» placeholder box when none) + business name on the left,
+ * kicker/folio on the right. The image gets explicit width AND height so it
+ * also lays out inside the repeated (dynamic) continuation header.
+ */
 export function A4PageHeader({
   subtitle,
   kicker,
   folio,
-  brandName = 'HoundFe',
+  brandName,
+  logoUrl,
+  logoWidth = LOGO_SIZE,
 }: A4PageHeaderProps) {
   return (
     <View>
       <View style={s.header}>
         <View style={s.brand}>
-          <View style={s.logoBox}>
-            <Text style={s.logoText}>Logo</Text>
-          </View>
+          {logoUrl ? (
+            <Image
+              src={logoUrl}
+              style={[s.logoImage, { width: logoWidth }]}
+              cache={false}
+            />
+          ) : (
+            <View style={s.logoBox}>
+              <Text style={s.logoText}>Logo</Text>
+            </View>
+          )}
           <View>
-            <Text style={s.brandName}>{brandName}</Text>
+            <Text style={s.brandName}>{resolveBrandName(brandName)}</Text>
             <Text style={s.brandSub}>{subtitle}</Text>
           </View>
         </View>

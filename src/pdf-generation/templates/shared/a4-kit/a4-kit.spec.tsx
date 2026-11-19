@@ -6,6 +6,7 @@
  */
 import {
   Document,
+  Image,
   Page,
   Text,
   View,
@@ -25,6 +26,9 @@ import {
   A4_FONTS,
   A4_STYLES,
   LedgerTable,
+  formatA4Date,
+  formatA4DateTime,
+  formatA4Time,
   px,
   toneColor,
   type LedgerColumn,
@@ -156,6 +160,112 @@ describe('A4Footer', () => {
     expect(text(A4Footer({ label: 'Corte de caja CC-1' }))).toContain(
       'Corte de caja CC-1',
     );
+  });
+});
+
+describe('A4PageHeader logo and business name', () => {
+  const header = { subtitle: 'Doc', kicker: 'Recibo', folio: 'F-1' };
+
+  it('draws the «Logo» placeholder and «HoundFe» when nothing is given', () => {
+    const elements = walk(A4PageHeader(header));
+
+    expect(text(A4PageHeader(header))).toContain('Logo');
+    expect(text(A4PageHeader(header))).toContain('HoundFe');
+    expect(elements.some((element) => element.type === Image)).toBe(false);
+  });
+
+  it('draws the image (url or packaged path) instead of the placeholder', () => {
+    const element = A4PageHeader({
+      ...header,
+      brandName: 'Mascotas Felices',
+      logoUrl: '/srv/assets/logo.png',
+      logoWidth: 72,
+    });
+    const images = walk(element).filter((el) => el.type === Image);
+
+    expect(images).toHaveLength(1);
+    expect(images[0].props.src).toBe('/srv/assets/logo.png');
+    expect(images[0].props.style).toEqual([A4_STYLES.logoImage, { width: 72 }]);
+    expect(text(element)).toContain('Mascotas Felices');
+    expect(text(element)).not.toContain('Logo');
+    expect(text(element)).not.toContain('HoundFe');
+  });
+
+  it('falls back to «HoundFe» for a blank business name', () => {
+    expect(text(A4PageHeader({ ...header, brandName: '   ' }))).toContain(
+      'HoundFe',
+    );
+  });
+
+  it('uses the same business name in the footer and the continuation header', () => {
+    const named = text(A4Footer({ label: 'x', brandName: 'Mascotas Felices' }));
+    expect(named).toContain('Mascotas Felices');
+    expect(named).not.toContain('HoundFe');
+    expect(text(A4Footer({ label: 'x' }))).toContain('HoundFe');
+
+    const elements = walk(
+      A4Page({
+        footerLabel: 'x',
+        brandName: 'Mascotas Felices',
+        logoUrl: '/srv/assets/logo.png',
+        continuation: { kicker: 'Detalle', folio: 'F-1', brandSubtitle: 'Doc' },
+        children: null,
+      }),
+    );
+    const fixedRender = elements.find(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        typeof element.props.render === 'function',
+    );
+    const render = fixedRender?.props.render as (info: {
+      pageNumber: number;
+    }) => ReactNode;
+    const continued = render({ pageNumber: 2 });
+
+    expect(text(continued)).toContain('Mascotas Felices');
+    expect(text(continued)).not.toContain('HoundFe');
+    expect(
+      walk(continued).filter((element) => element.type === Image),
+    ).toHaveLength(1);
+    const footer = elements.find(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        typeof element.props.render !== 'function' &&
+        text(element.props.children as ReactNode).includes('x'),
+    );
+    expect(text(footer?.props.children as ReactNode)).toContain(
+      'Mascotas Felices',
+    );
+  });
+});
+
+describe('A4 date format (artboard 01-libro-mayor)', () => {
+  it('prints lowercase month, 24 h time and the CDMX zone by default', () => {
+    // 2026-01-15T18:05Z → 12:05 America/Mexico_City.
+    expect(formatA4DateTime('2026-01-15T18:05:00.000Z')).toBe(
+      '15 ene 2026, 12:05',
+    );
+    expect(formatA4Date('2026-01-15T18:05:00.000Z')).toBe('15 ene 2026');
+    expect(formatA4Time('2026-01-15T18:05:00.000Z')).toBe('12:05');
+  });
+
+  it('honours an explicit zone and never prints 24:00 or a dotted month', () => {
+    expect(formatA4Date('2026-12-31T00:00:00.000Z', 'UTC')).toBe('31 dic 2026');
+    expect(formatA4DateTime('2026-09-05T06:00:00.000Z', 'UTC')).toBe(
+      '05 sep 2026, 06:00',
+    );
+    expect(formatA4DateTime('2026-09-05T06:00:00.000Z', 'UTC')).not.toMatch(
+      /[A-Z.]/,
+    );
+    expect(formatA4Time('2026-01-15T06:00:00.000Z', 'UTC')).toBe('06:00');
+  });
+
+  it('returns unparseable input untouched', () => {
+    expect(formatA4DateTime('not-a-date')).toBe('not-a-date');
+    expect(formatA4Date('not-a-date')).toBe('not-a-date');
+    expect(formatA4Time('not-a-date')).toBe('not-a-date');
   });
 });
 

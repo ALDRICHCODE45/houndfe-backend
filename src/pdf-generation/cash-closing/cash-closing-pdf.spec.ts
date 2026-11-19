@@ -24,6 +24,7 @@ import {
 } from 'react';
 import {
   Document,
+  Image,
   Page,
   Text,
   View,
@@ -57,6 +58,7 @@ import type { CashSession } from '../../cash-register/domain/cash-register.types
 import {
   CashClosingA4Document,
   UNNAMED_USER_LABEL,
+  formatClosingFolio,
   summarizeCashHandovers,
 } from './cash-closing-a4.document';
 import { A4_COLORS } from '../templates/shared/a4-kit';
@@ -671,6 +673,78 @@ describe('CashClosingA4Document', () => {
     const continued = render({ pageNumber: 2 });
     expect(flattenText(continued)).toContain('Entregas y recepciones');
     expect(flattenText(continued)).toContain(FOLIO);
+  });
+
+  describe('printed folio (S4)', () => {
+    const OLD_UUID_FOLIO = 'CC-3f9a1c2b-5d4e-4f60-8a71-0b2c3d4e5f60';
+
+    it('shortens an old UUID-shaped folio to CC- + the first 8 hex chars', () => {
+      expect(formatClosingFolio(OLD_UUID_FOLIO)).toBe('CC-3f9a1c2b');
+      expect(formatClosingFolio(OLD_UUID_FOLIO.toUpperCase())).toBe(
+        'CC-3F9A1C2B',
+      );
+    });
+
+    it('prints any other folio verbatim (sequential CC-000124 and legacy ones)', () => {
+      expect(formatClosingFolio('CC-000124')).toBe('CC-000124');
+      expect(formatClosingFolio(FOLIO)).toBe(FOLIO);
+      // Looks like a UUID but has no CC- prefix / is not UUID-shaped.
+      expect(formatClosingFolio('3f9a1c2b-5d4e-4f60-8a71-0b2c3d4e5f60')).toBe(
+        '3f9a1c2b-5d4e-4f60-8a71-0b2c3d4e5f60',
+      );
+      expect(formatClosingFolio('CC-3f9a1c2b-extra')).toBe('CC-3f9a1c2b-extra');
+    });
+
+    it('prints the shortened folio everywhere in the document, never the UUID', () => {
+      const receipt = { ...makeReceipt(), folio: OLD_UUID_FOLIO };
+      const element = CashClosingA4Document({ receipt }) as unknown as {
+        props: { title: string };
+      };
+      const text = renderText(receipt);
+
+      expect(element.props.title).toBe('Corte de caja CC-3f9a1c2b');
+      expect(text).toContain('Corte de caja CC-3f9a1c2b');
+      expect(text).not.toContain('5d4e-4f60');
+      expect(text).not.toContain(OLD_UUID_FOLIO);
+    });
+
+    it('prints a sequential folio verbatim in header, footer and title', () => {
+      const receipt = { ...makeReceipt(), folio: 'CC-000124' };
+      const element = CashClosingA4Document({ receipt }) as unknown as {
+        props: { title: string };
+      };
+
+      expect(element.props.title).toBe('Corte de caja CC-000124');
+      expect(renderText(receipt)).toContain('CC-000124');
+    });
+  });
+
+  it('prints dates in the one A4 format (lowercase month, 24 h, CDMX)', () => {
+    const text = renderText();
+
+    // CLOSED_AT 2026-01-15T18:30Z → 12:30 in America/Mexico_City.
+    expect(text).toContain('15 ene 2026, 12:30');
+    expect(text).not.toMatch(/\b(ENE|FEB)\b/);
+  });
+
+  it('prints the business name (default HoundFe) in the footer and continuation header', () => {
+    const elements = collectElements(
+      CashClosingA4Document({ receipt: makeReceipt() }),
+    );
+    const footer = elements.find(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        typeof element.props.render !== 'function' &&
+        flattenText(element.props.children as ReactNode).includes(
+          'Corte de caja',
+        ),
+    );
+
+    expect(flattenText(footer?.props.children as ReactNode)).toContain(
+      'HoundFe',
+    );
+    expect(elements.some((element) => element.type === Image)).toBe(false);
   });
 
   it('renders Spanish audit labels, differences, custody and notes', () => {

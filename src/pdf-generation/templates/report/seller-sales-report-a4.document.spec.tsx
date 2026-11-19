@@ -4,16 +4,19 @@
  * rules (L5) asserted through the element tree. Yoga is mocked under Jest, so
  * page FIT is measured outside Jest; these tests pin structure.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   Document,
+  Image,
   Page,
   Text,
   View,
   renderToBuffer,
 } from '@react-pdf/renderer';
 import {
+  SELLER_REPORT_LOGO_PATH,
+  SELLER_REPORT_LOGO_WIDTH,
   SellerSalesReportA4Document,
   debtTone,
 } from './seller-sales-report-a4.document';
@@ -326,9 +329,29 @@ describe('SellerSalesReportA4Document', () => {
     const text = renderText(makeReport([confirmedRow(1)]));
 
     expect(text).toContain(
-      'Del 1 de enero de 2026 al 1 de febrero de 2026 (fecha final excluida)',
+      'Del 01 ene 2026 al 01 feb 2026 (fecha final excluida)',
     );
-    expect(text).toContain('Generado 01 MAR 2026, 06:00 (CDMX)');
+    expect(text).toContain('Generado 01 mar 2026, 06:00 (CDMX)');
+    expect(text).toContain('01 ene 2026, 12:31');
+    expect(text).not.toMatch(/\b(ENE|MAR)\b/);
+  });
+
+  it('prints the packaged logo through the kit header and business name', () => {
+    const report = makeReport([confirmedRow(1)]);
+    const images = elementsOf(report).filter((el) => el.type === Image);
+
+    expect(existsSync(SELLER_REPORT_LOGO_PATH)).toBe(true);
+    expect(SELLER_REPORT_LOGO_PATH).toMatch(
+      /assets[\\/]houndfe-logo-report\.png$/,
+    );
+    // One image in the page-1 header (continuation images are dynamic).
+    expect(images.length).toBeGreaterThanOrEqual(1);
+    expect(images[0].props.src).toBe(SELLER_REPORT_LOGO_PATH);
+    expect(flatStyle(images[0].props.style).width).toBe(
+      SELLER_REPORT_LOGO_WIDTH,
+    );
+    expect(renderText(report)).toContain('HoundFe');
+    expect(renderText(report)).not.toMatch(/\bLogo\b/);
   });
 });
 

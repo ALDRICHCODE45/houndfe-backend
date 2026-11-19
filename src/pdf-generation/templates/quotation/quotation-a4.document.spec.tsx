@@ -12,6 +12,7 @@
  */
 import {
   Document,
+  Image,
   Page,
   Text,
   View,
@@ -21,6 +22,7 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { A4_COLORS, A4TotalsBlock, LedgerTable } from '../shared/a4-kit';
 import {
   QuotationA4Document,
+  formatQuotationFolio,
   type QuotationDocumentProps,
 } from './quotation-a4.document';
 
@@ -410,6 +412,57 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     expect(
       texts({ ...baseProps, business: { companyName: 'HoundFe' } }),
     ).toContain('Logo');
+    // The logo comes from the kit header (no local header copy).
+    const images = treeOf().filter((el) => el.type === Image);
+    expect(images).toHaveLength(1);
+    expect(images[0].props.src).toBe(baseProps.business.logoUrl);
+  });
+
+  it('prints the business name in the header, continuation header and footer', () => {
+    const named: QuotationDocumentProps = {
+      ...baseProps,
+      business: { companyName: 'Mascotas Felices' },
+    };
+    const footer = treeOf(named).find(
+      (el) =>
+        el.type === View &&
+        el.props.fixed === true &&
+        typeof el.props.render !== 'function' &&
+        textOf(el.props.children as ReactNode).includes('Cotización'),
+    );
+    const fixedRender = treeOf(named).find(
+      (el) =>
+        el.type === View &&
+        el.props.fixed === true &&
+        typeof el.props.render === 'function',
+    );
+    const render = fixedRender?.props.render as (ctx: {
+      pageNumber: number;
+    }) => ReactNode;
+
+    expect(texts(named)).toContain('Mascotas Felices');
+    expect(textOf(footer?.props.children as ReactNode)).toBe(
+      `Mascotas Felices · Cotización ${baseProps.quotation.id}`,
+    );
+    expect(textOf(render({ pageNumber: 2 }))).toContain('Mascotas Felices');
+    expect(textOf(render({ pageNumber: 2 }))).not.toContain('HoundFe');
+  });
+
+  describe('folio', () => {
+    it('shortens a quotation UUID to COT- + the first 8 hex chars', () => {
+      expect(formatQuotationFolio('3f9a1c2b-1111-4222-8333-444455556666')).toBe(
+        'COT-3f9a1c2b',
+      );
+    });
+
+    it('prints the folio verbatim in the document the caller passes', () => {
+      const props: QuotationDocumentProps = {
+        ...baseProps,
+        quotation: { ...baseProps.quotation, id: 'COT-3f9a1c2b' },
+      };
+
+      expect(texts(props)).toContain('Folio #COT-3f9a1c2b');
+    });
   });
 
   it('renders a non-empty PDF buffer with PDF magic bytes', async () => {

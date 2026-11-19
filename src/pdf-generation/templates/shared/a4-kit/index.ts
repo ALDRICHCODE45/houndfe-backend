@@ -6,6 +6,13 @@ export { A4_COLORS, A4_FONTS, A4_PAGE_PADDING, px, toneColor } from './tokens';
 export type { A4Tone } from './tokens';
 export { A4_STYLES } from './a4-styles';
 export {
+  A4_TIME_ZONE,
+  formatA4Date,
+  formatA4DateTime,
+  formatA4Time,
+} from './a4-format';
+export {
+  A4_DEFAULT_BRAND_NAME,
   A4ContinuationHeader,
   A4Footer,
   A4GoldMark,
@@ -19,6 +26,7 @@ export {
   LedgerTable,
 } from './a4-kit';
 export type {
+  A4Brand,
   A4Continuation,
   A4KeyValueItem,
   A4MetaBarItem,

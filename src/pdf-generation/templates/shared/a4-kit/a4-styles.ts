@@ -53,6 +53,11 @@ export const A4_STYLES = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  logoImage: {
+    height: px(36),
+    marginRight: px(12),
+    objectFit: 'contain',
+  },
   logoText: {
     fontFamily: A4_FONTS.bold,
     fontSize: px(9),

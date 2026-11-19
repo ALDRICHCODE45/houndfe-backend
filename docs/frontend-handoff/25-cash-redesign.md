@@ -57,12 +57,6 @@ Errors: `401` (no/invalid token), `403 INSUFFICIENT_PERMISSIONS` (no `create:Cas
 
 ### 3.1 List item fields: register, cashier, difference (S7)
 
-### Closing folio format (pdf-a4-redesign T6)
-
-New closings get a **per-sucursal consecutive folio**: `CC-` + the sequence zero-padded to 6 digits (`CC-000001`, `CC-000124`); past `999999` it simply grows (`CC-1000000`), never truncated. Each sucursal has its own sequence starting at `CC-000001`, and concurrent closings in one sucursal never share a number.
-
-Closings created **before** this change keep their stored folio untouched, which is UUID-shaped (`CC-3f9a1c2b-7d4e-4b8a-9c01-5e6f7a8b9c0d`). There is no backfill: `GET /cash-closings` can return both shapes, so treat `folio` as an opaque string (the field is still unique per sucursal). The closing PDF shortens an old UUID folio to `CC-3f9a1c2b` when it prints it; the API value is unchanged.
-
 Each item of `GET /cash-closings` now also carries the register, the cashier and the cut's difference, so the list no longer needs `GET /cash-closings/:id` per row. Existing keys are unchanged.
 
 ```json
@@ -94,6 +88,12 @@ Each item of `GET /cash-closings` now also carries the register, the cashier and
 - Names here are current; the closing detail and PDF keep the names **frozen at close** (`snapshot.registerName`, `snapshot.cashierName`). If a register or user was renamed later, the list and the detail can differ.
 - `differenceCents` is the same "declared − expected" value as `comparison.declarationDifferenceCents` in §6 and as the session list's `differenceCents`. The verifier's difference (verified − declared) stays in the detail only.
 - Visibility, filters, order and paging are unchanged (§3, §4). The fields are filled with a fixed number of batched lookups per page (no per-row reads).
+
+### 3.2 Closing folio format (pdf-a4-redesign T6)
+
+New closings get a **per-sucursal consecutive folio**: `CC-` + the sequence zero-padded to 6 digits (`CC-000001`, `CC-000124`); past `999999` it simply grows (`CC-1000000`), never truncated. Each sucursal has its own sequence starting at `CC-000001`, and concurrent closings in one sucursal never share a number.
+
+Closings created **before** this change keep their stored folio untouched, which is UUID-shaped (`CC-3f9a1c2b-7d4e-4b8a-9c01-5e6f7a8b9c0d`). There is no backfill: `GET /cash-closings` can return both shapes, so treat `folio` as an opaque string (the field is still unique per sucursal). The closing PDF shortens an old UUID folio to `CC-3f9a1c2b` when it prints it; the API value is unchanged.
 
 ## 4. Real paging (S5)
 

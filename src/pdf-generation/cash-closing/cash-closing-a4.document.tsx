@@ -27,6 +27,7 @@ import {
   A4Page,
   A4PageHeader,
   A4Section,
+  formatA4DateTime,
   A4_COLORS,
   A4_FONTS,
   px,
@@ -43,8 +44,6 @@ import type {
   CashClosingReceiptSnapshot,
   CashHandoverTotals,
 } from './cash-closing-receipt.types';
-
-const CLOSING_TIME_ZONE = 'America/Mexico_City';
 
 /** Printed when an actor's name is not in the snapshot nor resolvable. */
 export const UNNAMED_USER_LABEL = 'Usuario sin nombre';
@@ -104,14 +103,28 @@ export function summarizeCashHandovers(
   };
 }
 
+const OLD_UUID_FOLIO =
+  /^CC-([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Printed folio. Old closings carry a UUID-shaped `CC-<uuid>` folio, which
+ * prints shortened to `CC-` + its first 8 hex characters (`CC-3f9a1c2b`); any
+ * other folio (e.g. the sequential `CC-000124`) prints verbatim.
+ */
+export function formatClosingFolio(folio: string): string {
+  const match = OLD_UUID_FOLIO.exec(folio);
+  return match ? `CC-${match[1]}` : folio;
+}
+
 export function CashClosingA4Document({
   receipt,
 }: CashClosingPdfDocumentProps) {
   const { snapshot } = receipt;
+  const folio = formatClosingFolio(receipt.folio);
 
   return (
     <Document
-      title={`Corte de caja ${receipt.folio}`}
+      title={`Corte de caja ${folio}`}
       author="HoundFe"
       creator="HoundFe"
       producer="HoundFe"
@@ -119,21 +132,21 @@ export function CashClosingA4Document({
       modificationDate={new Date(snapshot.closedAt)}
     >
       <A4Page
-        footerLabel={`Corte de caja ${receipt.folio}`}
+        footerLabel={`Corte de caja ${folio}`}
         continuation={{
           kicker: 'Entregas y recepciones',
-          folio: receipt.folio,
+          folio,
           brandSubtitle: 'Comprobante de corte de caja',
         }}
       >
         <A4PageHeader
           subtitle="Comprobante de corte de caja"
           kicker="Corte de caja"
-          folio={receipt.folio}
+          folio={folio}
         />
         <A4MetaBar
           items={[
-            { label: 'Cierre', value: formatInstant(snapshot.closedAt) },
+            { label: 'Cierre', value: formatA4DateTime(snapshot.closedAt) },
             {
               label: 'Caja',
               value: snapshot.registerName ?? 'Caja sin nombre',
@@ -195,16 +208,16 @@ function MetaSection({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
     },
     ...(snapshot.openedAt === null
       ? []
-      : [{ label: 'Apertura', value: formatInstant(snapshot.openedAt) }]),
-    { label: 'Conteo', value: formatInstant(snapshot.countedAt) },
+      : [{ label: 'Apertura', value: formatA4DateTime(snapshot.openedAt) }]),
+    { label: 'Conteo', value: formatA4DateTime(snapshot.countedAt) },
     {
       label: 'Verificación',
       value:
         snapshot.verifiedAt === null
           ? 'Pendiente'
-          : formatInstant(snapshot.verifiedAt),
+          : formatA4DateTime(snapshot.verifiedAt),
     },
-    { label: 'Cierre', value: formatInstant(snapshot.closedAt) },
+    { label: 'Cierre', value: formatA4DateTime(snapshot.closedAt) },
     { label: 'Fondo inicial', value: formatCurrency(snapshot.openingCents) },
   ];
   return (
@@ -364,7 +377,7 @@ function handoverRow(handover: CashClosingReceiptHandover): LedgerRowData {
       declared: {
         text: formatCurrency(handover.declaredCents),
         bold: true,
-        sub: formatInstant(handover.declaredAt),
+        sub: formatA4DateTime(handover.declaredAt),
       },
       received:
         handover.receivedCents === null
@@ -375,7 +388,7 @@ function handoverRow(handover: CashClosingReceiptHandover): LedgerRowData {
               sub:
                 handover.receivedAt === null
                   ? undefined
-                  : formatInstant(handover.receivedAt),
+                  : formatA4DateTime(handover.receivedAt),
             },
     },
   };
@@ -552,27 +565,4 @@ function formatReceived(amountCents: number, pendingCount: number): string {
     return base;
   }
   return `${base}${pendingCount === 1 ? ' (1 pendiente)' : ` (${pendingCount} pendientes)`}`;
-}
-
-function formatInstant(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  try {
-    return new Intl.DateTimeFormat('es-MX', {
-      timeZone: CLOSING_TIME_ZONE,
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    })
-      .format(date)
-      .replace(/\./g, '')
-      .toUpperCase();
-  } catch {
-    return date.toISOString().slice(0, 16).replace('T', ' ');
-  }
 }

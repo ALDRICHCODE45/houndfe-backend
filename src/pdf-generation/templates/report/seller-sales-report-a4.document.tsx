@@ -13,6 +13,7 @@
  * The seller is always printed by name.
  */
 import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
+import { resolve } from 'node:path';
 import {
   A4Page,
   A4PageHeader,
@@ -21,6 +22,8 @@ import {
   A4_FONTS,
   A4_STYLES,
   LedgerTable,
+  formatA4Date,
+  formatA4DateTime,
   px,
   toneColor,
   type A4Tone,
@@ -33,7 +36,19 @@ import type {
   SellerSalesReportResponseDto,
 } from '../../../analytics/dto/seller-sales-report-response.dto';
 
-const REPORT_TIME_ZONE = 'America/Mexico_City';
+/**
+ * Packaged local wordmark — `nest-cli.json` copies `pdf-generation/assets/**`
+ * to the same `dist` path, so this resolves in `src` (tests) and in `dist`.
+ */
+export const SELLER_REPORT_LOGO_PATH = resolve(
+  __dirname,
+  '..',
+  '..',
+  'assets',
+  'houndfe-logo-report.png',
+);
+/** The wordmark is 512×191 px: 36 px tall → ≈96.5 px wide (pt via `px`). */
+export const SELLER_REPORT_LOGO_WIDTH = px(36 * (512 / 191));
 const BRAND_SUBTITLE = 'Reporte de ventas';
 const KICKER = 'Vendedor';
 const FOLIO_CHARS_PER_LINE = 20;
@@ -83,8 +98,15 @@ export function SellerSalesReportA4Document({
       creationDate={new Date(report.generatedAt)}
       modificationDate={new Date(report.generatedAt)}
     >
-      <A4Page footerLabel={footerLabel} continuation={continuation}>
+      <A4Page
+        footerLabel={footerLabel}
+        continuation={continuation}
+        logoUrl={SELLER_REPORT_LOGO_PATH}
+        logoWidth={SELLER_REPORT_LOGO_WIDTH}
+      >
         <A4PageHeader
+          logoUrl={SELLER_REPORT_LOGO_PATH}
+          logoWidth={SELLER_REPORT_LOGO_WIDTH}
           subtitle={BRAND_SUBTITLE}
           kicker={KICKER}
           folio={report.seller.name}
@@ -99,7 +121,12 @@ export function SellerSalesReportA4Document({
           />
         </A4Section>
       </A4Page>
-      <A4Page footerLabel={footerLabel} continuation={continuation}>
+      <A4Page
+        footerLabel={footerLabel}
+        continuation={continuation}
+        logoUrl={SELLER_REPORT_LOGO_PATH}
+        logoWidth={SELLER_REPORT_LOGO_WIDTH}
+      >
         <A4Section
           title="Ventas canceladas"
           aside="por fecha de cancelación (informativas)"
@@ -120,7 +147,7 @@ function confirmedRow(r: SellerSalesReportConfirmedRowDto): LedgerRowData {
     key: r.id,
     cells: {
       folio: formatFolio(r.folio),
-      confirmedAt: formatInstant(r.confirmedAt),
+      confirmedAt: formatA4DateTime(r.confirmedAt),
       total: formatCurrency(r.totalCents),
       paid: formatCurrency(r.paidCents),
       debt: {
@@ -141,8 +168,8 @@ function canceledRow(r: SellerSalesReportCanceledRowDto): LedgerRowData {
     key: r.id,
     cells: {
       folio: formatFolio(r.folio),
-      confirmedAt: r.confirmedAt ? formatInstant(r.confirmedAt) : '—',
-      canceledAt: { text: formatInstant(r.canceledAt), tone: 'danger' },
+      confirmedAt: r.confirmedAt ? formatA4DateTime(r.confirmedAt) : '—',
+      canceledAt: { text: formatA4DateTime(r.canceledAt), tone: 'danger' },
       total: formatCurrency(r.totalCents),
     },
   };
@@ -155,16 +182,18 @@ function PeriodBar({ report }: { report: SellerSalesReportResponseDto }) {
       <Text style={A4_STYLES.metaBarText}>
         {'Del '}
         <Text style={A4_STYLES.metaBarValue}>
-          {formatDateOnly(report.from)}
+          {formatA4Date(`${report.from}T00:00:00Z`, 'UTC')}
         </Text>
         {' al '}
-        <Text style={A4_STYLES.metaBarValue}>{formatDateOnly(report.to)}</Text>
+        <Text style={A4_STYLES.metaBarValue}>
+          {formatA4Date(`${report.to}T00:00:00Z`, 'UTC')}
+        </Text>
         {' (fecha final excluida)'}
       </Text>
       <Text style={A4_STYLES.metaBarText}>
         {'Generado '}
         <Text style={A4_STYLES.metaBarValue}>
-          {formatInstant(report.generatedAt)}
+          {formatA4DateTime(report.generatedAt)}
         </Text>
         {' (CDMX)'}
       </Text>
@@ -295,36 +324,4 @@ function formatCurrency(cents: number): string {
   const [whole, decimals] = (Math.abs(cents) / 100).toFixed(2).split('.');
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${sign}$${grouped}.${decimals}`;
-}
-
-function formatInstant(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-  try {
-    return new Intl.DateTimeFormat('es-MX', {
-      timeZone: REPORT_TIME_ZONE,
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    })
-      .format(date)
-      .replace(/\./g, '')
-      .toUpperCase();
-  } catch {
-    return date.toISOString().slice(0, 16).replace('T', ' ');
-  }
-}
-
-function formatDateOnly(date: string): string {
-  return new Intl.DateTimeFormat('es-MX', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    timeZone: 'UTC',
-  }).format(new Date(`${date}T00:00:00Z`));
 }
