@@ -11,12 +11,9 @@
 export type {
   CashClosingPdfDocumentProps,
   CashClosingReceipt,
+  CashClosingReceiptHandover,
   CashClosingReceiptSnapshot,
   CashHandoverTotals,
-} from './cash-closing-receipt.types';
-export {
-  CASH_CLOSING_HANDOVERS_FIRST_PAGE,
-  CASH_CLOSING_HANDOVERS_PAGE,
 } from './cash-closing-receipt.types';
 export {
   CASH_CLOSING_SNAPSHOT_INVALID,
@@ -26,7 +23,8 @@ export {
 export {
   CashClosingA4Document,
   declarationVsExpectedCents,
-  paginateCashClosingHandovers,
+  UNNAMED_USER_LABEL,
+  differenceCell,
   summarizeCashHandovers,
   verificationVsDeclarationCents,
 } from './cash-closing-a4.document';

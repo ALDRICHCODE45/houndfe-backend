@@ -24,10 +24,10 @@ import type {
 import type {
   CashClosingSnapshot,
   CashSnapshotChannelLine,
-  CashSnapshotHandover,
 } from '../../cash-register/domain/cash-snapshot';
 import type {
   CashClosingReceipt,
+  CashClosingReceiptHandover,
   CashClosingReceiptSnapshot,
 } from './cash-closing-receipt.types';
 
@@ -178,7 +178,10 @@ function parseChannel(value: unknown, field: string): CashSnapshotChannelLine {
   };
 }
 
-function parseHandover(value: unknown, field: string): CashSnapshotHandover {
+function parseHandover(
+  value: unknown,
+  field: string,
+): CashClosingReceiptHandover {
   const raw = readObject(value, field);
   return {
     handoverId: readNonEmptyString(raw.handoverId, `${field}.handoverId`),
@@ -199,13 +202,23 @@ function parseHandover(value: unknown, field: string): CashSnapshotHandover {
     ),
     declaredAt: readIsoString(raw.declaredAt, `${field}.declaredAt`),
     receivedAt: readNullableIsoString(raw.receivedAt, `${field}.receivedAt`),
+    // pdf-a4-redesign T2 — optional frozen display names; absent on
+    // snapshots frozen before it (old snapshots still parse).
+    senderName: readOptionalText(raw.senderName, `${field}.senderName`),
+    receiverName: readOptionalText(raw.receiverName, `${field}.receiverName`),
+    receiptActorName: readOptionalText(
+      raw.receiptActorName,
+      `${field}.receiptActorName`,
+    ),
   };
 }
 
 function parseSnapshot(
   raw: Record<string, unknown>,
 ): CashClosingReceiptSnapshot {
-  const core: CashClosingSnapshot = {
+  const core: Omit<CashClosingSnapshot, 'handovers'> & {
+    handovers: CashClosingReceiptHandover[];
+  } = {
     sessionId: readNonEmptyString(raw.sessionId, 'snapshot.sessionId'),
     tenantId: readNonEmptyString(raw.tenantId, 'snapshot.tenantId'),
     registerId: readNonEmptyString(raw.registerId, 'snapshot.registerId'),

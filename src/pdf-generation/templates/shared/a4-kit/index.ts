@@ -1,0 +1,35 @@
+/**
+ * A4 kit barrel (pdf-a4-redesign T2). Additive: nothing here changes the
+ * legacy `SHARED_STYLES` consumers.
+ */
+export { A4_COLORS, A4_FONTS, A4_PAGE_PADDING, px, toneColor } from './tokens';
+export type { A4Tone } from './tokens';
+export { A4_STYLES } from './a4-styles';
+export {
+  A4ContinuationHeader,
+  A4Footer,
+  A4GoldMark,
+  A4KeyValueColumns,
+  A4MetaBar,
+  A4Page,
+  A4PageHeader,
+  A4Section,
+  A4TotalsBlock,
+  LedgerHeaderRow,
+  LedgerTable,
+} from './a4-kit';
+export type {
+  A4Continuation,
+  A4KeyValueItem,
+  A4MetaBarItem,
+  A4PageHeaderProps,
+  A4PageProps,
+  A4SectionProps,
+  A4TotalsBlockProps,
+  A4TotalsLine,
+  LedgerCell,
+  LedgerCellObject,
+  LedgerColumn,
+  LedgerRowData,
+  LedgerTableProps,
+} from './a4-kit';

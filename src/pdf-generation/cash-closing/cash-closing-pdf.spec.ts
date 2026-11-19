@@ -16,7 +16,12 @@
  *      `CLOSING` query — never a live sales/Prisma read.
  */
 import { readFileSync } from 'node:fs';
-import { Children, createElement, isValidElement, type ReactNode } from 'react';
+import {
+  createElement,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import {
   Document,
   Page,
@@ -50,12 +55,11 @@ import {
 } from '../../cash-register/domain/cash-snapshot';
 import type { CashSession } from '../../cash-register/domain/cash-register.types';
 import {
-  CASH_CLOSING_HANDOVERS_FIRST_PAGE,
-  CASH_CLOSING_HANDOVERS_PAGE,
   CashClosingA4Document,
-  paginateCashClosingHandovers,
+  UNNAMED_USER_LABEL,
   summarizeCashHandovers,
 } from './cash-closing-a4.document';
+import { A4_COLORS } from '../templates/shared/a4-kit';
 import {
   CASH_CLOSING_SNAPSHOT_INVALID,
   CashClosingSnapshotParseError,
@@ -80,6 +84,13 @@ const DOCUMENT_SOURCE = readFileSync(
   `${SOURCE_DIR}/cash-closing-a4.document.tsx`,
   'utf8',
 );
+const KIT_SOURCE = ['a4-kit.tsx', 'a4-styles.ts', 'tokens.ts']
+  .map((file) =>
+    readFileSync(`${SOURCE_DIR}/../templates/shared/a4-kit/${file}`, 'utf8'),
+  )
+  .join('\n');
+const UUID_PATTERN =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 const PDF_MAGIC = Buffer.from('%PDF', 'utf8');
 
@@ -256,6 +267,90 @@ function renderText(receipt = makeReceipt()): string {
   return flattenText(CashClosingA4Document({ receipt }));
 }
 
+type AnyElement = ReactElement<Record<string, unknown>>;
+
+/** Every element of the tree, expanding kit function components. */
+function collectElements(
+  node: ReactNode,
+  out: AnyElement[] = [],
+): AnyElement[] {
+  if (Array.isArray(node)) {
+    node.forEach((child) => collectElements(child as ReactNode, out));
+    return out;
+  }
+  if (!isValidElement<Record<string, unknown>>(node)) {
+    return out;
+  }
+  out.push(node);
+  if (typeof node.type === 'function' && !HOST_COMPONENTS.has(node.type)) {
+    const Component = node.type as (props: unknown) => ReactNode;
+    collectElements(Component(node.props), out);
+  } else {
+    collectElements(node.props.children as ReactNode, out);
+  }
+  return out;
+}
+
+function flatStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return Object.assign({}, ...(style as unknown[]).map(flatStyle)) as Record<
+      string,
+      unknown
+    >;
+  }
+  return typeof style === 'object' && style !== null
+    ? (style as Record<string, unknown>)
+    : {};
+}
+
+/** Merged style of the first Text whose flattened content equals `content`. */
+function textStyleOf(
+  receipt: ReturnType<typeof makeReceipt>,
+  content: string,
+): Record<string, unknown> {
+  const match = collectElements(CashClosingA4Document({ receipt })).find(
+    (element) =>
+      element.type === Text &&
+      flattenText(element.props.children as ReactNode).trim() === content,
+  );
+  if (match === undefined) {
+    throw new Error(`no Text with content "${content}"`);
+  }
+  return flatStyle(match.props.style);
+}
+
+/** All the extras a snapshot frozen BEFORE the optional names existed lacks. */
+function oldSnapshotDocument(): CashDocument {
+  return makeDocument({ registerName: 'Caja 1' });
+}
+
+/** A snapshot frozen at close AFTER pdf-a4-redesign T2 (names on handovers). */
+function newSnapshotDocument(): CashDocument {
+  const document = makeDocument();
+  const snapshot = document.snapshot as Record<string, CashJson>;
+  const handovers = (snapshot.handovers as Array<Record<string, CashJson>>).map(
+    (handover) => ({
+      ...handover,
+      senderName: 'Ana Cajera',
+      receiverName: handover.receiverUserId === null ? null : 'Rosa Recibe',
+      receiptActorName:
+        handover.receiptActorUserId === null ? null : 'Paco Confirma',
+    }),
+  );
+  return { ...document, snapshot: { ...snapshot, handovers } };
+}
+
+function makeManyHandoversDocument(count: number): CashDocument {
+  const document = newSnapshotDocument();
+  const snapshot = document.snapshot as Record<string, CashJson>;
+  const [template] = snapshot.handovers as Array<Record<string, CashJson>>;
+  const handovers = Array.from({ length: count }, (_, index) => ({
+    ...template,
+    handoverId: `handover-${index}`,
+  }));
+  return { ...document, snapshot: { ...snapshot, handovers } };
+}
+
 // ── Parser ───────────────────────────────────────────────────────────────
 
 describe('parseCashClosingReceipt', () => {
@@ -297,6 +392,45 @@ describe('parseCashClosingReceipt', () => {
     const receipt = parseCashClosingReceipt(serialized);
     expect(receipt.snapshot.folio).toBe(FOLIO);
     expect(receipt.snapshot.channels[0].expectedCents).toBe(35_000);
+  });
+
+  it('accepts OLD snapshots without handover names (names read as null)', () => {
+    const receipt = parseCashClosingReceipt(oldSnapshotDocument());
+
+    expect(receipt.snapshot.handovers).toHaveLength(2);
+    for (const handover of receipt.snapshot.handovers) {
+      expect(handover.senderName).toBeNull();
+      expect(handover.receiverName).toBeNull();
+      expect(handover.receiptActorName).toBeNull();
+    }
+  });
+
+  it('accepts NEW snapshots and keeps the frozen handover names', () => {
+    const receipt = parseCashClosingReceipt(newSnapshotDocument());
+
+    expect(receipt.snapshot.handovers[0]).toMatchObject({
+      senderUserId: CASHIER_ID,
+      senderName: 'Ana Cajera',
+      receiverName: 'Rosa Recibe',
+      receiptActorName: 'Paco Confirma',
+    });
+    expect(receipt.snapshot.handovers[1].receiverName).toBeNull();
+  });
+
+  it('rejects a handover name that is not text', () => {
+    const document = newSnapshotDocument();
+    const snapshot = document.snapshot as Record<string, CashJson>;
+    const handovers = [
+      ...(snapshot.handovers as Array<Record<string, CashJson>>),
+    ];
+    handovers[0] = { ...handovers[0], senderName: 42 };
+
+    expect(() =>
+      parseCashClosingReceipt({
+        ...document,
+        snapshot: { ...snapshot, handovers },
+      }),
+    ).toThrow(CashClosingSnapshotParseError);
   });
 
   it('preserves negative differences instead of clamping them', () => {
@@ -446,20 +580,6 @@ describe('parseCashClosingReceipt', () => {
 // ── Difference + custody helpers ─────────────────────────────────────────
 
 describe('closing receipt helpers', () => {
-  it('paginates handovers with a smaller first-page budget', () => {
-    expect(paginateCashClosingHandovers([])).toEqual([[]]);
-    expect(paginateCashClosingHandovers([1, 2, 3])).toEqual([[1, 2, 3]]);
-    expect(
-      paginateCashClosingHandovers(
-        Array.from({ length: 20 }, (_, index) => index),
-      ),
-    ).toEqual([
-      Array.from({ length: CASH_CLOSING_HANDOVERS_FIRST_PAGE }, (_, i) => i),
-      Array.from({ length: CASH_CLOSING_HANDOVERS_PAGE }, (_, i) => i + 5),
-      [19],
-    ]);
-  });
-
   it('separates FLOAT and WITHDRAWAL custody totals', () => {
     const totals = summarizeCashHandovers(frozenSnapshot().handovers);
 
@@ -485,8 +605,8 @@ describe('CashClosingA4Document', () => {
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('emits a Document titled with the folio and one A4 Page per chunk', () => {
-    const receipt = makeReceipt();
+  it('emits a Document titled with the folio and ONE wrapping A4 Page (natural pagination)', () => {
+    const receipt = parseCashClosingReceipt(makeManyHandoversDocument(19));
     const element = CashClosingA4Document({ receipt }) as unknown as {
       type: unknown;
       props: { title: string; children: ReactNode };
@@ -495,14 +615,62 @@ describe('CashClosingA4Document', () => {
     expect(element.type).toBe(Document);
     expect(element.props.title).toContain(FOLIO);
 
-    const pages = Children.toArray(element.props.children).filter(
-      (child) => isValidElement(child) && child.type === Page,
+    const pages = collectElements(element).filter(
+      (child) => child.type === Page,
     );
-    expect(pages).toHaveLength(
-      paginateCashClosingHandovers(receipt.snapshot.handovers).length,
-    );
-    const pageProps = (pages[0] as { props: { size: unknown } }).props;
+    // 19 handovers still render ONE <Page>: react-pdf paginates by itself.
+    expect(pages).toHaveLength(1);
+    const pageProps = pages[0].props as { size: unknown; wrap?: boolean };
     expect(pageProps.size).toEqual({ width: 595, height: 842 });
+    expect(pageProps.wrap).toBe(true);
+  });
+
+  it('prints real page numbers through a FIXED footer render prop (no static page text)', () => {
+    const elements = collectElements(
+      CashClosingA4Document({ receipt: makeReceipt() }),
+    );
+    const pageText = elements.find(
+      (element) =>
+        element.type === Text && typeof element.props.render === 'function',
+    );
+
+    expect(pageText).toBeDefined();
+    const render = pageText?.props.render as (info: {
+      pageNumber: number;
+      totalPages: number;
+    }) => string;
+    expect(render({ pageNumber: 2, totalPages: 3 })).toBe('Página 2 de 3');
+    // The footer container is fixed so it repeats on every physical page.
+    const footers = elements.filter(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        flattenText(element.props.children as ReactNode).includes('HoundFe'),
+    );
+    expect(footers.length).toBeGreaterThan(0);
+    // Nothing prints a hard-coded «Página i de n».
+    expect(renderText()).not.toMatch(/Página \d+ de \d+/);
+    expect(DOCUMENT_SOURCE).not.toMatch(/Página \$\{/);
+  });
+
+  it('repeats a continuation header only after page 1 (fixed render prop)', () => {
+    const header = collectElements(
+      CashClosingA4Document({ receipt: makeReceipt() }),
+    ).find(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        typeof element.props.render === 'function',
+    );
+
+    expect(header).toBeDefined();
+    const render = header?.props.render as (info: {
+      pageNumber: number;
+    }) => ReactNode;
+    expect(render({ pageNumber: 1 })).toBeNull();
+    const continued = render({ pageNumber: 2 });
+    expect(flattenText(continued)).toContain('Entregas y recepciones');
+    expect(flattenText(continued)).toContain(FOLIO);
   });
 
   it('renders Spanish audit labels, differences, custody and notes', () => {
@@ -510,36 +678,32 @@ describe('CashClosingA4Document', () => {
 
     // Header + opening float kept separate from custody withdrawals.
     expect(text).toContain('Comprobante de corte de caja');
-    expect(text).toContain('FONDO INICIAL (APERTURA)');
+    expect(text).toContain('Fondo inicial');
     expect(text).toContain('$500.00');
 
     // Channel table: expected / declared / verified + both differences.
-    expect(text).toContain('CANAL');
-    expect(text).toContain('ESPERADO');
-    expect(text).toContain('DECLARADO');
-    expect(text).toContain('VERIFICADO');
-    expect(text).toContain('DIF. DECL. − ESP.');
-    expect(text).toContain('DIF. VERIF. − DECL.');
+    expect(text).toContain('Canal');
+    expect(text).toContain('Esperado');
+    expect(text).toContain('Declarado');
+    expect(text).toContain('Verificado');
+    expect(text).toContain('Dif. decl. − esp.');
+    expect(text).toContain('Dif. verif. − decl.');
     expect(text).toContain('Efectivo');
     expect(text).toContain('Tarjeta');
 
     // Declaration-expected AND verification-declaration, never combined.
     expect(text).toContain('Diferencia declarado − esperado');
     expect(text).toContain('Diferencia verificado − declarado');
-    expect(text).toContain('-$10.00');
+    expect(text).toContain('$10.00 faltante');
 
-    // Stable IDs plus optional names from the snapshot (no live lookup).
-    expect(text).toContain(CASHIER_ID);
-    expect(text).toContain(VERIFIER_ID);
-    expect(text).toContain(CLOSER_ID);
+    // Names from the snapshot extras (no live lookup).
     expect(text).toContain('Ana Cajera');
     expect(text).toContain('Beto Encargado');
     expect(text).toContain('Carla Supervisora');
 
-    // Custody: FLOAT vs WITHDRAWAL, declared/received receiver + actor.
+    // Custody: FLOAT vs WITHDRAWAL.
     expect(text).toContain('Retiro');
     expect(text).toContain('Fondo (FLOAT)');
-    expect(text).toContain(RECEIVER_ID);
     expect(text).toContain('Custodia y entregas');
 
     // Discrepancy notes preserved verbatim.
@@ -549,6 +713,127 @@ describe('CashClosingA4Document', () => {
 
     // The frozen-snapshot provenance is stated.
     expect(text).toContain('corte congelado');
+  });
+
+  describe('people by name, never by UUID (pdf-a4-redesign T2/S1)', () => {
+    it('prints the frozen handover names for NEW snapshots', () => {
+      const text = renderText(parseCashClosingReceipt(newSnapshotDocument()));
+
+      expect(text).toContain('Ana Cajera');
+      expect(text).toContain('Rosa Recibe');
+      expect(text).toContain('Paco Confirma');
+      expect(text).not.toMatch(UUID_PATTERN);
+    });
+
+    it('prints «Usuario sin nombre» for OLD snapshots without any name and never a UUID', () => {
+      const text = renderText(parseCashClosingReceipt(oldSnapshotDocument()));
+
+      expect(text).toContain(UNNAMED_USER_LABEL);
+      expect(text).not.toMatch(UUID_PATTERN);
+      expect(text).not.toContain(CASHIER_ID);
+      expect(text).not.toContain(VERIFIER_ID);
+      expect(text).not.toContain(CLOSER_ID);
+      expect(text).not.toContain(RECEIVER_ID);
+      expect(text).not.toContain(SESSION_ID);
+      expect(text).not.toContain(REGISTER_ID);
+    });
+
+    it('never falls back to the register id when the register has no name', () => {
+      const document = makeDocument({});
+      const text = renderText(parseCashClosingReceipt(document));
+
+      expect(text).toContain('Caja sin nombre');
+      expect(text).not.toContain(REGISTER_ID);
+    });
+
+    it('shows a short session reference instead of the full session id', () => {
+      const text = renderText();
+
+      expect(text).toContain('SES-22222222');
+      expect(text).not.toContain(SESSION_ID);
+    });
+
+    it('keeps «—» for a handover without receiver or confirmer (not yet received)', () => {
+      const text = renderText(parseCashClosingReceipt(newSnapshotDocument()));
+
+      expect(text).toContain('—');
+      expect(text).toContain('Pendiente');
+    });
+  });
+
+  describe('cash differences (palette L5: warning amber, never red)', () => {
+    function amountDocument(
+      expected: number,
+      declared: number,
+      verified: number | null,
+    ): ReturnType<typeof makeReceipt> {
+      const snapshot = createCashClosingSnapshot({
+        session: makeSession(),
+        folio: FOLIO,
+        expectedCents: expected,
+        declaredCents: declared,
+        verifiedCents: verified,
+        verifierUserId: verified === null ? null : VERIFIER_ID,
+        channels: [
+          {
+            channelKey: 'CASH',
+            channelLabel: 'Efectivo',
+            method: 'CASH',
+            expectedCents: expected,
+            declaredCents: declared,
+            verifiedCents: verified,
+            differenceCents: declared - expected,
+          },
+        ],
+        handovers: [],
+        countedAt: COUNTED_AT,
+        verifiedAt: verified === null ? null : VERIFIED_AT,
+        closedAt: CLOSED_AT,
+        closedByUserId: CLOSER_ID,
+      });
+      return parseCashClosingReceipt(makeDocument({}, snapshot));
+    }
+
+    it('writes «$X faltante» in the warning colour', () => {
+      const receipt = amountDocument(10_000, 5_000, 5_000);
+
+      expect(renderText(receipt)).toContain('$50.00 faltante');
+      const style = textStyleOf(receipt, '$50.00 faltante');
+      expect(style.color).toBe(A4_COLORS.warning);
+      expect(style.color).toBe('#805511');
+    });
+
+    it('writes «$X sobrante» in the warning colour (not green, not red)', () => {
+      const receipt = amountDocument(10_000, 10_500, 10_500);
+
+      expect(renderText(receipt)).toContain('$5.00 sobrante');
+      expect(textStyleOf(receipt, '$5.00 sobrante').color).toBe('#805511');
+    });
+
+    it('prints «Sin diferencia» uncoloured (ink), never a signed zero', () => {
+      const receipt = amountDocument(10_000, 10_000, 10_000);
+
+      expect(renderText(receipt)).toContain('Sin diferencia');
+      expect(textStyleOf(receipt, 'Sin diferencia').color).toBe(A4_COLORS.ink);
+    });
+
+    it('prints «Sin verificar» when the cut was never verified', () => {
+      const receipt = amountDocument(10_000, 10_000, null);
+
+      expect(renderText(receipt)).toContain('Sin verificar');
+    });
+
+    it('never uses the danger red for differences, and gold only for the mark', () => {
+      expect(DOCUMENT_SOURCE).not.toMatch(/#b42318|danger/i);
+      expect(DOCUMENT_SOURCE).not.toMatch(/#f6bb13|gold/i);
+      expect(KIT_SOURCE.match(/A4_COLORS\.gold/g)).toHaveLength(1);
+    });
+
+    it('marks a pending handover reception «Pendiente» in the warning colour', () => {
+      const receipt = parseCashClosingReceipt(newSnapshotDocument());
+
+      expect(textStyleOf(receipt, 'Pendiente').color).toBe(A4_COLORS.warning);
+    });
   });
 
   describe('session opening time (cash-redesign-reads T2/S7)', () => {
@@ -625,11 +910,14 @@ describe('CashClosingA4Document', () => {
   });
 
   it('uses built-in Helvetica with no remote assets or fonts', () => {
-    expect(DOCUMENT_SOURCE).toContain("fontFamily: 'Helvetica'");
+    expect(KIT_SOURCE).toContain("regular: 'Helvetica'");
+    expect(KIT_SOURCE).toContain("bold: 'Helvetica-Bold'");
     expect(DOCUMENT_SOURCE).not.toContain('getModernFontFamily');
     expect(DOCUMENT_SOURCE).not.toContain('registerModernFont');
     expect(DOCUMENT_SOURCE).not.toContain('https://');
     expect(DOCUMENT_SOURCE).not.toContain('Image');
+    expect(KIT_SOURCE).not.toContain('https://');
+    expect(KIT_SOURCE).not.toContain('registerModernFont');
   });
 });
 

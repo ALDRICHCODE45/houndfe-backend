@@ -19,7 +19,22 @@
  * normalized to `string | null` — never guessed — and are used ONLY for
  * display. No live lookup or catalog read ever touches this receipt.
  */
-import type { CashClosingSnapshot } from '../../cash-register/domain/cash-snapshot';
+import type {
+  CashClosingSnapshot,
+  CashSnapshotHandover,
+} from '../../cash-register/domain/cash-snapshot';
+
+/**
+ * Handover as PARSED for the PDF: the optional frozen display names
+ * (pdf-a4-redesign T2) are normalized to `string | null`. `null` means the
+ * snapshot has no name for that actor — the template prints «Usuario sin
+ * nombre», never the user id.
+ */
+export interface CashClosingReceiptHandover extends CashSnapshotHandover {
+  readonly senderName: string | null;
+  readonly receiverName: string | null;
+  readonly receiptActorName: string | null;
+}
 
 /**
  * Frozen snapshot plus the agreed optional presentation extras.
@@ -28,6 +43,8 @@ import type { CashClosingSnapshot } from '../../cash-register/domain/cash-snapsh
  * did not offer it", never "look it up live".
  */
 export interface CashClosingReceiptSnapshot extends CashClosingSnapshot {
+  /** Handovers with their optional frozen actor names (old snapshots: null). */
+  readonly handovers: readonly CashClosingReceiptHandover[];
   /** Human label for the register captured at closing time, if offered. */
   readonly registerName: string | null;
   /** Cashier display name captured at closing time, if offered. */
@@ -68,10 +85,6 @@ export interface CashClosingReceipt {
 export interface CashClosingPdfDocumentProps {
   readonly receipt: CashClosingReceipt;
 }
-
-/** Per-page handover pagination budgets (rows per page). */
-export const CASH_CLOSING_HANDOVERS_FIRST_PAGE = 5;
-export const CASH_CLOSING_HANDOVERS_PAGE = 14;
 
 /** Custody totals split by `FLOAT` (retained) vs `WITHDRAWAL` (leaves). */
 export interface CashHandoverTotals {

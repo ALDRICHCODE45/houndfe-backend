@@ -1,36 +1,53 @@
 /**
- * cash-register-closing / T5 (S1,S2,S7) — printable A4 closing receipt.
+ * cash-register-closing / T5 (S1,S2,S7) + pdf-a4-redesign T2 (S1-S3) —
+ * printable A4 closing receipt on the shared A4 kit («libro mayor» artboard).
  *
  * Renders one frozen `CashClosingSnapshot` into an audit-ready PDF. Design
  * rules enforced here:
  *
  *   - Built-in Helvetica only: no font registration, no remote URL, no
  *     branding asset fetch. Deterministic offline rendering.
+ *   - ONE wrapping `<Page>`: react-pdf paginates naturally; the footer is
+ *     fixed with real `Página X de Y` numbers and pages 2+ repeat a compact
+ *     header. No manual chunking, no static page text.
  *   - Declared vs expected AND verified vs declared are two INDEPENDENT
  *     difference columns. They are never collapsed into one number.
+ *   - Differences print the word («$50.00 faltante» / «$5.00 sobrante») in
+ *     the warning colour, «Sin diferencia» uncoloured — never red.
  *   - Combined totals are labelled as a cut summary, never as "physical
  *     cash" or profit; the cash channel is called out as the pooled drawer.
  *   - Opening float is shown separately from custody FLOAT/WITHDRAWAL.
- *   - Actor rows show the stable user id (plus the snapshot's name when it
- *     offers one). Nothing is looked up live.
- *   - Handovers paginate across explicit pages with a repeated table header
- *     and a `Página X de Y` footer.
+ *   - People are printed by NAME. A user id (UUID) is never printed: an
+ *     actor without a resolvable name reads «Usuario sin nombre».
  */
-import { Document, Page, StyleSheet, Text, View } from '@react-pdf/renderer';
-import { PAPER_SIZES } from '../pdf-generation.constants';
-import { SHARED_STYLES } from '../templates/shared/styles';
-import type { CashSnapshotHandover } from '../../cash-register/domain/cash-snapshot';
+import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
-  CASH_CLOSING_HANDOVERS_FIRST_PAGE,
-  CASH_CLOSING_HANDOVERS_PAGE,
-  type CashClosingPdfDocumentProps,
-  type CashClosingReceiptSnapshot,
-  type CashHandoverTotals,
+  A4KeyValueColumns,
+  A4MetaBar,
+  A4Page,
+  A4PageHeader,
+  A4Section,
+  A4_COLORS,
+  A4_FONTS,
+  px,
+  LedgerTable,
+  type A4KeyValueItem,
+  type LedgerCell,
+  type LedgerColumn,
+  type LedgerRowData,
+} from '../templates/shared/a4-kit';
+import type { CashSnapshotHandover } from '../../cash-register/domain/cash-snapshot';
+import type {
+  CashClosingPdfDocumentProps,
+  CashClosingReceiptHandover,
+  CashClosingReceiptSnapshot,
+  CashHandoverTotals,
 } from './cash-closing-receipt.types';
 
-export { CASH_CLOSING_HANDOVERS_FIRST_PAGE, CASH_CLOSING_HANDOVERS_PAGE };
-
 const CLOSING_TIME_ZONE = 'America/Mexico_City';
+
+/** Printed when an actor's name is not in the snapshot nor resolvable. */
+export const UNNAMED_USER_LABEL = 'Usuario sin nombre';
 
 /** declared − expected for one channel or the cut totals. */
 export function declarationVsExpectedCents(
@@ -87,42 +104,10 @@ export function summarizeCashHandovers(
   };
 }
 
-/**
- * Chunk handovers into pages: the summary page carries a smaller first
- * budget (channels + totals share the page). An empty list still yields one
- * (empty) page so the template always has a page to render.
- */
-export function paginateCashClosingHandovers<T>(
-  handovers: readonly T[],
-): T[][] {
-  if (handovers.length === 0) {
-    return [[]];
-  }
-
-  const pages: T[][] = [];
-  let budget = CASH_CLOSING_HANDOVERS_FIRST_PAGE;
-  let current: T[] = [];
-
-  for (const handover of handovers) {
-    if (current.length >= budget) {
-      pages.push(current);
-      current = [];
-      budget = CASH_CLOSING_HANDOVERS_PAGE;
-    }
-    current.push(handover);
-  }
-
-  pages.push(current);
-  return pages;
-}
-
 export function CashClosingA4Document({
   receipt,
 }: CashClosingPdfDocumentProps) {
   const { snapshot } = receipt;
-  const handoverPages = paginateCashClosingHandovers(snapshot.handovers);
-  const totalPages = handoverPages.length;
-  const hasHandovers = snapshot.handovers.length > 0;
 
   return (
     <Document
@@ -133,385 +118,290 @@ export function CashClosingA4Document({
       creationDate={new Date(snapshot.closedAt)}
       modificationDate={new Date(snapshot.closedAt)}
     >
-      {handoverPages.map((rows, index) => (
-        <Page
-          key={`closing-${index}`}
-          size={{ width: PAPER_SIZES.A4.width, height: PAPER_SIZES.A4.height }}
-          style={[SHARED_STYLES.modern.page, styles.page]}
-        >
-          {index === 0 ? (
-            <ClosingSummary receipt={receipt} />
-          ) : (
-            <ContinuationHeader receipt={receipt} />
-          )}
-
-          <HandoverSection rows={rows} empty={!hasHandovers} />
-
-          {index === totalPages - 1 ? (
-            <DiscrepancyNotes snapshot={snapshot} />
-          ) : null}
-
-          <Text style={styles.footer}>
-            {`Página ${index + 1} de ${totalPages}`}
-          </Text>
-        </Page>
-      ))}
+      <A4Page
+        footerLabel={`Corte de caja ${receipt.folio}`}
+        continuation={{
+          kicker: 'Entregas y recepciones',
+          folio: receipt.folio,
+          brandSubtitle: 'Comprobante de corte de caja',
+        }}
+      >
+        <A4PageHeader
+          subtitle="Comprobante de corte de caja"
+          kicker="Corte de caja"
+          folio={receipt.folio}
+        />
+        <A4MetaBar
+          items={[
+            { label: 'Cierre', value: formatInstant(snapshot.closedAt) },
+            {
+              label: 'Caja',
+              value: snapshot.registerName ?? 'Caja sin nombre',
+            },
+          ]}
+        />
+        <MetaSection snapshot={snapshot} />
+        <ChannelSection snapshot={snapshot} />
+        <CustodySection snapshot={snapshot} />
+        <HandoverSection snapshot={snapshot} />
+        <DiscrepancyNotes snapshot={snapshot} />
+        <Signatures snapshot={snapshot} />
+        <Text style={styles.provenance}>
+          Documento generado a partir del corte congelado. No se recalcula con
+          movimientos, pagos ni cancelaciones posteriores.
+        </Text>
+      </A4Page>
     </Document>
   );
 }
 
-function ClosingSummary({ receipt }: CashClosingPdfDocumentProps) {
-  const { snapshot } = receipt;
-  return (
-    <View>
-      <BrandHeader receipt={receipt} />
-      <MetaCard snapshot={snapshot} />
-      <OpeningFloat snapshot={snapshot} />
-      <ChannelSection snapshot={snapshot} />
-      <TotalsSection snapshot={snapshot} />
-      <CustodySummary snapshot={snapshot} />
-      <Text style={styles.provenance}>
-        Documento generado a partir del corte congelado. No se recalcula con
-        movimientos, pagos ni cancelaciones posteriores.
-      </Text>
-    </View>
-  );
+/** Short, human-friendly session reference — never the full session id. */
+function sessionRef(sessionId: string): string {
+  return `SES-${sessionId.split('-')[0].slice(0, 8).toUpperCase()}`;
 }
 
-function ContinuationHeader({ receipt }: CashClosingPdfDocumentProps) {
-  return (
-    <View style={styles.headerRow}>
-      <View>
-        <Text style={SHARED_STYLES.modern.header.companyName}>HoundFe</Text>
-        <Text style={SHARED_STYLES.modern.header.companySub}>
-          Comprobante de corte de caja
-        </Text>
-      </View>
-      <View
-        style={[SHARED_STYLES.modern.cardCompact, { alignItems: 'flex-end' }]}
-      >
-        <Text style={SHARED_STYLES.modern.header.metaTitle}>
-          ENTREGAS Y RECEPCIONES
-        </Text>
-        <Text style={styles.metaFolio}>{receipt.folio}</Text>
-      </View>
-    </View>
-  );
-}
-
-function BrandHeader({ receipt }: CashClosingPdfDocumentProps) {
-  return (
-    <View style={styles.headerRow}>
-      <View>
-        <Text style={SHARED_STYLES.modern.header.companyName}>HoundFe</Text>
-        <Text style={SHARED_STYLES.modern.header.companySub}>
-          Comprobante de corte de caja
-        </Text>
-      </View>
-      <View
-        style={[SHARED_STYLES.modern.cardCompact, { alignItems: 'flex-end' }]}
-      >
-        <Text style={SHARED_STYLES.modern.header.metaTitle}>CORTE DE CAJA</Text>
-        <Text style={styles.metaFolio}>{receipt.folio}</Text>
-        <Text style={SHARED_STYLES.modern.header.metaDate}>
-          {`Cierre ${formatInstant(receipt.snapshot.closedAt)}`}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
-function MetaCard({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
-  return (
-    <View style={[SHARED_STYLES.modern.card, styles.metaCard]}>
-      <Field
-        label="Caja"
-        value={snapshot.registerName ?? snapshot.registerId}
-      />
-      <Field label="Sesión" value={snapshot.sessionId} />
-      <Field
-        label="Cajero"
-        actor={{ name: snapshot.cashierName, id: snapshot.cashierUserId }}
-      />
-      <Field
-        label="Verificador"
-        actor={
-          snapshot.verifiedCents === null
-            ? null
-            : { name: snapshot.verifierName, id: snapshot.verifierUserId }
-        }
-      />
-      <Field
-        label="Cerró"
-        actor={{ name: snapshot.closedByName, id: snapshot.closedByUserId }}
-      />
-      {snapshot.openedAt === null ? null : (
-        <Field label="Apertura" value={formatInstant(snapshot.openedAt)} />
-      )}
-      <Field label="Conteo" value={formatInstant(snapshot.countedAt)} />
-      <Field
-        label="Verificación"
-        value={
-          snapshot.verifiedAt === null
-            ? 'Pendiente'
-            : formatInstant(snapshot.verifiedAt)
-        }
-      />
-      <Field label="Cierre" value={formatInstant(snapshot.closedAt)} />
-    </View>
-  );
-}
-
-function Field({
-  label,
-  value,
-  actor,
-}: {
-  label: string;
-  value?: string;
-  actor?: { name: string | null; id: string | null } | null;
-}) {
-  return (
-    <View style={styles.field}>
-      <Text style={styles.metaLabel}>{label}</Text>
-      {actor === undefined ? (
-        <Text style={styles.metaValue}>{value}</Text>
-      ) : (
-        <ActorValue actor={actor} />
-      )}
-    </View>
-  );
-}
-
-function ActorValue({
-  actor,
-}: {
-  actor: { name: string | null; id: string | null } | null;
-}) {
-  if (actor === null || actor.id === null) {
-    return <Text style={styles.metaValue}>Sin verificar</Text>;
+/** Name when known; otherwise a fixed label — an id is never printed. */
+function actorLabel(name: string | null, userId: string | null): string {
+  if (userId === null) {
+    return '—';
   }
-  if (actor.name === null) {
-    return <Text style={styles.metaValue}>{actor.id}</Text>;
-  }
+  return name ?? UNNAMED_USER_LABEL;
+}
+
+function chunkColumns<T>(items: readonly T[], columns: number): T[][] {
+  const size = Math.ceil(items.length / columns);
+  return Array.from({ length: columns }, (_, index) =>
+    items.slice(index * size, (index + 1) * size),
+  ).filter((column) => column.length > 0);
+}
+
+function MetaSection({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
+  const items: A4KeyValueItem[] = [
+    { label: 'Sesión', value: sessionRef(snapshot.sessionId) },
+    {
+      label: 'Cajero',
+      value: actorLabel(snapshot.cashierName, snapshot.cashierUserId),
+    },
+    {
+      label: 'Verificador',
+      value:
+        snapshot.verifiedCents === null
+          ? 'Sin verificar'
+          : actorLabel(snapshot.verifierName, snapshot.verifierUserId),
+    },
+    {
+      label: 'Cerró',
+      value: actorLabel(snapshot.closedByName, snapshot.closedByUserId),
+    },
+    ...(snapshot.openedAt === null
+      ? []
+      : [{ label: 'Apertura', value: formatInstant(snapshot.openedAt) }]),
+    { label: 'Conteo', value: formatInstant(snapshot.countedAt) },
+    {
+      label: 'Verificación',
+      value:
+        snapshot.verifiedAt === null
+          ? 'Pendiente'
+          : formatInstant(snapshot.verifiedAt),
+    },
+    { label: 'Cierre', value: formatInstant(snapshot.closedAt) },
+    { label: 'Fondo inicial', value: formatCurrency(snapshot.openingCents) },
+  ];
   return (
-    <View>
-      <Text style={styles.metaValue}>{actor.name}</Text>
-      <Text style={styles.metaId}>{actor.id}</Text>
-    </View>
+    <A4Section
+      title="Datos del corte"
+      hint="Fondo inicial (apertura): se cuenta una sola vez y se reporta por separado de los retiros de custodia."
+    >
+      <A4KeyValueColumns columns={chunkColumns(items, 3)} />
+    </A4Section>
   );
 }
 
-function OpeningFloat({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
-  return (
-    <View style={[SHARED_STYLES.modern.card, { marginBottom: 12 }]}>
-      <Text style={styles.sectionLabel}>FONDO INICIAL (APERTURA)</Text>
-      <Text style={styles.openingValue}>
-        {formatCurrency(snapshot.openingCents)}
-      </Text>
-      <Text style={styles.notice}>
-        Se cuenta una sola vez y se reporta por separado de los retiros de
-        custodia.
-      </Text>
-    </View>
-  );
-}
+const CHANNEL_COLUMNS: readonly LedgerColumn[] = [
+  { key: 'channel', label: 'Canal', flex: 1.6 },
+  { key: 'expected', label: 'Esperado', flex: 1.25, align: 'right' },
+  { key: 'declared', label: 'Declarado', flex: 1.25, align: 'right' },
+  { key: 'verified', label: 'Verificado', flex: 1.25, align: 'right' },
+  { key: 'declDiff', label: 'Dif. decl. − esp.', flex: 1.25, align: 'right' },
+  {
+    key: 'verifDiff',
+    label: 'Dif. verif. − decl.',
+    flex: 1.25,
+    align: 'right',
+  },
+];
 
 function ChannelSection({
   snapshot,
 }: {
   snapshot: CashClosingReceiptSnapshot;
 }) {
+  const rows: LedgerRowData[] = snapshot.channels.map((channel) => ({
+    key: channel.channelKey,
+    cells: {
+      channel: channel.channelLabel,
+      expected: formatCurrency(channel.expectedCents),
+      declared: formatCurrency(channel.declaredCents),
+      verified: formatOptionalCurrency(channel.verifiedCents),
+      declDiff: differenceCell(
+        declarationVsExpectedCents(
+          channel.expectedCents,
+          channel.declaredCents,
+        ),
+      ),
+      verifDiff: differenceCell(
+        verificationVsDeclarationCents(
+          channel.declaredCents,
+          channel.verifiedCents,
+        ),
+      ),
+    },
+  }));
+  const total: LedgerRowData = {
+    key: 'total',
+    cells: {
+      channel: 'Totales del corte',
+      expected: { text: formatCurrency(snapshot.expectedCents), bold: true },
+      declared: { text: formatCurrency(snapshot.declaredCents), bold: true },
+      verified: {
+        text: formatOptionalCurrency(snapshot.verifiedCents),
+        bold: true,
+      },
+      declDiff: differenceCell(
+        declarationVsExpectedCents(
+          snapshot.expectedCents,
+          snapshot.declaredCents,
+        ),
+        'Diferencia declarado − esperado',
+      ),
+      verifDiff: differenceCell(
+        verificationVsDeclarationCents(
+          snapshot.declaredCents,
+          snapshot.verifiedCents,
+        ),
+        'Diferencia verificado − declarado',
+      ),
+    },
+  };
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Detalle por canal</Text>
-      <Text style={styles.notice}>
-        El canal Efectivo agrupa el total físico del cajón; los demás canales se
-        reportan por separado.
-      </Text>
-      <View style={styles.tableHeader}>
-        <Text style={[styles.headerCell, styles.colChannel]}>CANAL</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>ESPERADO</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>DECLARADO</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>VERIFICADO</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>
-          DIF. DECL. − ESP.
-        </Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>
-          DIF. VERIF. − DECL.
-        </Text>
-      </View>
-      {snapshot.channels.length === 0 ? (
-        <Text style={styles.empty}>Sin canales registrados en el corte.</Text>
-      ) : (
-        snapshot.channels.map((channel) => (
-          <View key={channel.channelKey} style={styles.row} wrap={false}>
-            <Text style={[styles.cell, styles.colChannel]}>
-              {channel.channelLabel}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatCurrency(channel.expectedCents)}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatCurrency(channel.declaredCents)}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatOptionalCurrency(channel.verifiedCents)}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatCurrency(
-                declarationVsExpectedCents(
-                  channel.expectedCents,
-                  channel.declaredCents,
-                ),
-              )}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatOptionalCurrency(
-                verificationVsDeclarationCents(
-                  channel.declaredCents,
-                  channel.verifiedCents,
-                ),
-              )}
-            </Text>
-          </View>
-        ))
-      )}
-    </View>
+    <A4Section
+      title="Detalle por canal"
+      aside="Cierre: totales del corte en la última fila"
+      hint="El canal Efectivo agrupa el total físico del cajón; los demás canales se reportan por separado."
+    >
+      <LedgerTable
+        columns={CHANNEL_COLUMNS}
+        rows={rows}
+        total={total}
+        emptyText="Sin canales registrados en el corte."
+      />
+    </A4Section>
   );
 }
 
-function TotalsSection({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
-  return (
-    <View style={[SHARED_STYLES.modern.card, { marginBottom: 12 }]}>
-      <Text style={styles.sectionLabel}>TOTALES DEL CORTE</Text>
-      <Row label="Esperado" value={formatCurrency(snapshot.expectedCents)} />
-      <Row label="Declarado" value={formatCurrency(snapshot.declaredCents)} />
-      <Row
-        label="Verificado"
-        value={formatOptionalCurrency(snapshot.verifiedCents)}
-      />
-      <Row
-        label="Diferencia declarado − esperado"
-        value={formatCurrency(
-          declarationVsExpectedCents(
-            snapshot.expectedCents,
-            snapshot.declaredCents,
-          ),
-        )}
-      />
-      <Row
-        label="Diferencia verificado − declarado"
-        value={formatOptionalCurrency(
-          verificationVsDeclarationCents(
-            snapshot.declaredCents,
-            snapshot.verifiedCents,
-          ),
-        )}
-      />
-    </View>
-  );
-}
-
-function CustodySummary({
+function CustodySection({
   snapshot,
 }: {
   snapshot: CashClosingReceiptSnapshot;
 }) {
   const totals = summarizeCashHandovers(snapshot.handovers);
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Custodia y entregas</Text>
-      <Text style={styles.notice}>
-        El fondo retenido (FLOAT) inicia la siguiente apertura; los retiros
-        (WITHDRAWAL) salen del cajón. No se suman entre sí ni con el fondo
-        inicial.
-      </Text>
-      <Row
-        label="Retiros declarados"
-        value={formatCurrency(totals.withdrawalDeclaredCents)}
+    <A4Section
+      title="Custodia y entregas"
+      hint="El fondo retenido (FLOAT) inicia la siguiente apertura; los retiros (WITHDRAWAL) salen del cajón. No se suman entre sí ni con el fondo inicial."
+    >
+      <A4KeyValueColumns
+        columns={[
+          [
+            {
+              label: 'Retiros declarados',
+              value: formatCurrency(totals.withdrawalDeclaredCents),
+            },
+            {
+              label: 'Retiros recibidos',
+              value: formatReceived(
+                totals.withdrawalReceivedCents,
+                totals.withdrawalPendingCount,
+              ),
+            },
+          ],
+          [
+            {
+              label: 'Fondo retenido declarado',
+              value: formatCurrency(totals.floatDeclaredCents),
+            },
+            {
+              label: 'Fondo retenido recibido',
+              value: formatReceived(
+                totals.floatReceivedCents,
+                totals.floatPendingCount,
+              ),
+            },
+          ],
+        ]}
       />
-      <Row
-        label="Retiros recibidos"
-        value={formatReceived(
-          totals.withdrawalReceivedCents,
-          totals.withdrawalPendingCount,
-        )}
-      />
-      <Row
-        label="Fondo retenido declarado"
-        value={formatCurrency(totals.floatDeclaredCents)}
-      />
-      <Row
-        label="Fondo retenido recibido"
-        value={formatReceived(
-          totals.floatReceivedCents,
-          totals.floatPendingCount,
-        )}
-      />
-    </View>
+    </A4Section>
   );
 }
 
+const HANDOVER_COLUMNS: readonly LedgerColumn[] = [
+  { key: 'kind', label: 'Tipo', flex: 0.95 },
+  { key: 'sender', label: 'Entrega', flex: 1.45 },
+  { key: 'receiver', label: 'Recibe', flex: 1.45 },
+  { key: 'actor', label: 'Confirma', flex: 1.45 },
+  { key: 'declared', label: 'Declarado', flex: 1.25, align: 'right' },
+  { key: 'received', label: 'Recibido', flex: 1.25, align: 'right' },
+];
+
+function handoverRow(handover: CashClosingReceiptHandover): LedgerRowData {
+  return {
+    key: handover.handoverId,
+    cells: {
+      kind: handoverKindLabel(handover.kind),
+      sender: actorLabel(handover.senderName, handover.senderUserId),
+      receiver: actorLabel(handover.receiverName, handover.receiverUserId),
+      actor: actorLabel(handover.receiptActorName, handover.receiptActorUserId),
+      declared: {
+        text: formatCurrency(handover.declaredCents),
+        bold: true,
+        sub: formatInstant(handover.declaredAt),
+      },
+      received:
+        handover.receivedCents === null
+          ? { text: 'Pendiente', tone: 'warning', bold: true }
+          : {
+              text: formatCurrency(handover.receivedCents),
+              bold: true,
+              sub:
+                handover.receivedAt === null
+                  ? undefined
+                  : formatInstant(handover.receivedAt),
+            },
+    },
+  };
+}
+
 function HandoverSection({
-  rows,
-  empty,
+  snapshot,
 }: {
-  rows: CashSnapshotHandover[];
-  empty: boolean;
+  snapshot: CashClosingReceiptSnapshot;
 }) {
+  const count = snapshot.handovers.length;
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Entregas y recepciones</Text>
-      <View style={styles.tableHeader}>
-        <Text style={[styles.headerCell, styles.colKind]}>TIPO</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>DECLARADO</Text>
-        <Text style={[styles.headerCell, styles.colMoney]}>RECIBIDO</Text>
-        <Text style={[styles.headerCell, styles.colActor]}>ENTREGA</Text>
-        <Text style={[styles.headerCell, styles.colActor]}>RECIBE</Text>
-        <Text style={[styles.headerCell, styles.colActor]}>CONFIRMA</Text>
-        <Text style={[styles.headerCell, styles.colDate]}>DECLARADO EN</Text>
-        <Text style={[styles.headerCell, styles.colDate]}>RECIBIDO EN</Text>
-      </View>
-      {empty ? (
-        <Text style={styles.empty}>
-          Sin movimientos de custodia registrados en el corte.
-        </Text>
-      ) : (
-        rows.map((handover) => (
-          <View key={handover.handoverId} style={styles.row} wrap={false}>
-            <Text style={[styles.cell, styles.colKind]}>
-              {handoverKindLabel(handover.kind)}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {formatCurrency(handover.declaredCents)}
-            </Text>
-            <Text style={[styles.cell, styles.colMoney]}>
-              {handover.receivedCents === null
-                ? 'Pendiente'
-                : formatCurrency(handover.receivedCents)}
-            </Text>
-            <Text style={[styles.cell, styles.colActor]}>
-              {handover.senderUserId}
-            </Text>
-            <Text style={[styles.cell, styles.colActor]}>
-              {handover.receiverUserId ?? '—'}
-            </Text>
-            <Text style={[styles.cell, styles.colActor]}>
-              {handover.receiptActorUserId ?? '—'}
-            </Text>
-            <Text style={[styles.cell, styles.colDate]}>
-              {formatInstant(handover.declaredAt)}
-            </Text>
-            <Text style={[styles.cell, styles.colDate]}>
-              {handover.receivedAt === null
-                ? 'Pendiente'
-                : formatInstant(handover.receivedAt)}
-            </Text>
-          </View>
-        ))
-      )}
-    </View>
+    <A4Section
+      title="Entregas y recepciones"
+      aside={
+        count === 0
+          ? undefined
+          : `${count} ${count === 1 ? 'registro' : 'registros'}`
+      }
+    >
+      <LedgerTable
+        columns={HANDOVER_COLUMNS}
+        rows={snapshot.handovers.map(handoverRow)}
+        emptyText="Sin movimientos de custodia registrados en el corte."
+      />
+    </A4Section>
   );
 }
 
@@ -521,8 +411,7 @@ function DiscrepancyNotes({
   snapshot: CashClosingReceiptSnapshot;
 }) {
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Notas de diferencia</Text>
+    <A4Section title="Notas de diferencia">
       <Note
         label="Declaración"
         value={snapshot.declarationNotes}
@@ -538,19 +427,15 @@ function DiscrepancyNotes({
         value={snapshot.closingNotes}
         empty="Sin notas de cierre."
       />
-    </View>
+    </A4Section>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>{label}</Text>
-      <Text style={styles.summaryValue}>{value}</Text>
-    </View>
-  );
-}
-
+/**
+ * Label + text are FLAT siblings inside the section (no wrapper View): the
+ * label's `minPresenceAhead` only moves it to the next page when it has a
+ * previous sibling to break away from, so a label never ends a page alone.
+ */
 function Note({
   label,
   value,
@@ -561,181 +446,90 @@ function Note({
   empty: string;
 }) {
   return (
-    <View style={styles.noteRow}>
-      <Text style={styles.metaLabel}>{label}</Text>
+    <>
+      <View minPresenceAhead={44}>
+        <Text style={styles.noteLabel}>{label}</Text>
+      </View>
       <Text style={styles.noteValue}>{value ?? empty}</Text>
+    </>
+  );
+}
+
+function Signatures({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
+  return (
+    <View style={styles.signatures} wrap={false} minPresenceAhead={24}>
+      <Text style={styles.signature}>
+        {`Cajero · ${actorLabel(snapshot.cashierName, snapshot.cashierUserId)}`}
+      </Text>
+      <Text style={styles.signature}>
+        {snapshot.verifiedCents === null
+          ? 'Verificador · Sin verificar'
+          : `Verificador · ${actorLabel(snapshot.verifierName, snapshot.verifierUserId)}`}
+      </Text>
     </View>
   );
 }
 
-const palette = SHARED_STYLES.modern.palette;
+const palette = A4_COLORS;
 
 const styles = StyleSheet.create({
-  page: {
-    // Built-in family only — deterministic offline render (no font CDN).
-    fontFamily: 'Helvetica',
-    paddingBottom: 40,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  metaCard: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 12,
-  },
-  field: {
-    width: '50%',
-    marginBottom: 8,
-    paddingRight: 8,
-  },
-  metaLabel: {
-    fontSize: 7.5,
-    fontWeight: 700,
-    color: palette.gray,
-    letterSpacing: 0.4,
+  noteLabel: {
+    paddingTop: px(8),
+    fontFamily: A4_FONTS.bold,
+    fontSize: px(10.5),
+    letterSpacing: px(10.5) * 0.06,
     textTransform: 'uppercase',
-  },
-  metaValue: {
-    fontSize: 9,
-    fontWeight: 600,
-    color: palette.ink,
-    marginTop: 1,
-  },
-  metaId: {
-    fontSize: 7.5,
-    color: palette.grayLight,
-  },
-  metaFolio: {
-    fontSize: 10,
-    fontWeight: 700,
-    color: palette.ink,
-    marginTop: 3,
-  },
-  sectionLabel: {
-    fontSize: 8,
-    fontWeight: 700,
-    color: palette.gray,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  openingValue: {
-    fontSize: 18,
-    fontWeight: 700,
-    color: palette.accent,
-    marginTop: 2,
-  },
-  section: {
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    fontSize: 9,
-    fontWeight: 700,
-    color: palette.ink,
-    marginBottom: 4,
-  },
-  notice: {
-    fontSize: 7.5,
-    color: palette.gray,
-    lineHeight: 1.4,
-    marginBottom: 4,
-  },
-  tableHeader: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: palette.border,
-    borderBottomStyle: 'solid',
-    paddingBottom: 4,
-    marginBottom: 2,
-  },
-  headerCell: {
-    fontSize: 6.5,
-    fontWeight: 700,
-    color: palette.gray,
-    letterSpacing: 0.2,
-    textTransform: 'uppercase',
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderBottomWidth: 1,
-    borderBottomColor: palette.surface,
-    borderBottomStyle: 'solid',
-    paddingVertical: 4,
-  },
-  cell: {
-    fontSize: 7,
-    color: palette.inkSoft,
-  },
-  colChannel: {
-    flex: 1.6,
-    paddingRight: 4,
-  },
-  colKind: {
-    flex: 1.4,
-    paddingRight: 4,
-  },
-  colActor: {
-    flex: 1.6,
-    paddingRight: 4,
-  },
-  colDate: {
-    flex: 1.5,
-    paddingRight: 4,
-  },
-  colMoney: {
-    flex: 1.2,
-    textAlign: 'right',
-    paddingRight: 4,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginBottom: 2,
-  },
-  summaryLabel: {
-    fontSize: 8.5,
-    color: palette.gray,
-  },
-  summaryValue: {
-    fontSize: 9,
-    fontWeight: 600,
-    color: palette.ink,
-  },
-  noteRow: {
-    marginBottom: 6,
+    color: palette.muted,
   },
   noteValue: {
-    fontSize: 8.5,
-    color: palette.inkSoft,
-    marginTop: 1,
+    fontSize: px(12),
+    paddingTop: px(2),
+    paddingBottom: px(8),
+    borderBottomWidth: px(1),
+    borderBottomColor: palette.border,
+    borderBottomStyle: 'solid',
+    lineHeight: 1.4,
+    color: palette.ink,
   },
-  empty: {
-    fontSize: 8.5,
-    color: palette.gray,
-    fontStyle: 'italic',
-    marginTop: 4,
+  signatures: { flexDirection: 'row', marginTop: px(46) },
+  signature: {
+    flex: 1,
+    marginRight: px(26),
+    paddingTop: px(5),
+    borderTopWidth: px(1),
+    borderTopColor: palette.strong,
+    borderTopStyle: 'solid',
+    fontSize: px(10.5),
+    color: palette.muted,
   },
   provenance: {
-    fontSize: 7,
-    color: palette.gray,
+    fontSize: px(10),
     fontStyle: 'italic',
-    marginTop: 4,
-  },
-  footer: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    textAlign: 'center',
-    fontSize: 7.5,
-    color: palette.grayLight,
+    color: palette.muted,
+    marginTop: px(12),
+    lineHeight: 1.4,
   },
 });
+
+/**
+ * Cash difference: «$X faltante» / «$X sobrante» in the warning colour with
+ * the word written (never red); «Sin diferencia» uncoloured; `—` when the
+ * cut was never independently verified.
+ */
+export function differenceCell(cents: number | null, sub?: string): LedgerCell {
+  if (cents === null) {
+    return { text: '—', sub };
+  }
+  if (cents === 0) {
+    return { text: 'Sin diferencia', sub };
+  }
+  return {
+    text: `${formatCurrency(Math.abs(cents))} ${cents < 0 ? 'faltante' : 'sobrante'}`,
+    tone: 'warning',
+    bold: true,
+    sub,
+  };
+}
 
 function handoverKindLabel(kind: CashSnapshotHandover['kind']): string {
   return kind === 'FLOAT' ? 'Fondo (FLOAT)' : 'Retiro';
