@@ -1,29 +1,24 @@
 /**
- * QuotationA4Document — template unit tests (T046 / WU4).
+ * QuotationA4Document — template unit tests (T046 / WU4, pdf-a4-redesign T4).
  *
- * What we verify:
- *   - Renders a non-empty PDF buffer with the PDF magic bytes (the
- *     `@react-pdf/renderer` Yoga layout is real here — no mocks).
- *   - The header carries the "COTIZACIÓN" title (spec scenario
- *     "quotation-a4 header renders 'COTIZACIÓN'").
- *   - The footer has NO payment lines ("Pagado", "Cambio", payment
- *     method) and NO `paymentStatus` field on the document (spec
- *     scenario "quotation-a4 footer has no payment lines").
- *   - The expiry line renders "Válido hasta: DD/MM/YYYY" when
- *     `expiresAt` is set, and "Sin fecha de expiración" when null.
- *   - Items render through the modern line-less `ItemsList` (no grid
- *     table) with product name + variant and the per-line amount.
- *   - Totals render the three expected rows (Subtotal, Descuentos,
- *     Total) — no Pagado / Deuda / Cambio.
+ * The template composes the shared A4 kit («libro mayor»). Yoga is mocked
+ * under Jest, so page FIT is measured outside Jest; these tests pin the
+ * element tree: every printed field, the fixed footer render prop
+ * («Página X de Y»), the totals lines, and the L5 colour rules (single
+ * accent, discounts in ink, never red).
+ *
+ * Also verified through the real renderer: a non-empty PDF buffer with the
+ * PDF magic bytes, offline logo decoding, and no payment surface.
  */
-import { renderToBuffer } from '@react-pdf/renderer';
 import {
-  Children,
-  isValidElement,
-  type JSXElementConstructor,
-  type ReactElement,
-  type ReactNode,
-} from 'react';
+  Document,
+  Page,
+  Text,
+  View,
+  renderToBuffer,
+} from '@react-pdf/renderer';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { A4_COLORS, A4TotalsBlock, LedgerTable } from '../shared/a4-kit';
 import {
   QuotationA4Document,
   type QuotationDocumentProps,
@@ -71,120 +66,317 @@ const baseProps: QuotationDocumentProps = {
   },
 };
 
-type TotalsProps = QuotationDocumentProps['totals'];
-type FunctionElement<Props> = ReactElement<Props, (props: Props) => ReactNode>;
+// ── Element-tree helpers (Yoga is mocked; we read the tree, not pixels) ──
 
-function hasTotalsProps(props: unknown): props is TotalsProps {
-  return (
-    typeof props === 'object' &&
-    props !== null &&
-    'subtotalCents' in props &&
-    'discountCents' in props &&
-    'totalCents' in props &&
-    'includedIvaCents' in props
-  );
+type AnyElement = ReactElement<Record<string, unknown>>;
+const HOST = new Set<unknown>([Document, Page, Text, View]);
+
+function isComposite(type: unknown): type is (props: unknown) => ReactNode {
+  return typeof type === 'function' && !HOST.has(type);
 }
 
-function isFunctionComponent<Props>(
-  type: string | JSXElementConstructor<Props>,
-): type is (props: Props) => ReactNode {
-  if (typeof type !== 'function') {
-    return false;
+/** Depth-first walk that expands our own / kit function components. */
+function walk(node: ReactNode, out: AnyElement[] = []): AnyElement[] {
+  if (Array.isArray(node)) {
+    node.forEach((child) => walk(child as ReactNode, out));
+    return out;
   }
-
-  const prototype: unknown = type.prototype;
-  return !(
-    typeof prototype === 'object' &&
-    prototype !== null &&
-    'isReactComponent' in prototype
-  );
-}
-
-function findTotalsElement(node: ReactNode): FunctionElement<TotalsProps> {
-  const pending = Children.toArray(node);
-
-  while (pending.length > 0) {
-    const candidate = pending.shift();
-    if (!isValidElement(candidate)) {
-      continue;
-    }
-
-    if (
-      hasTotalsProps(candidate.props) &&
-      isFunctionComponent(candidate.type)
-    ) {
-      return candidate as FunctionElement<TotalsProps>;
-    }
-
-    if (isValidElement<{ children?: ReactNode }>(candidate)) {
-      pending.push(...Children.toArray(candidate.props.children));
-    }
+  if (!isValidElement<Record<string, unknown>>(node)) {
+    return out;
   }
-
-  throw new Error('Expected Totals function element');
+  out.push(node);
+  if (isComposite(node.type)) {
+    walk(node.type(node.props), out);
+  } else {
+    walk(node.props.children as ReactNode, out);
+  }
+  return out;
 }
 
-function textContent(node: ReactNode): string {
+function textOf(node: ReactNode): string {
+  if (Array.isArray(node)) return node.map(textOf).join('');
   if (typeof node === 'string' || typeof node === 'number') {
     return String(node);
   }
-  if (!isValidElement<{ children?: ReactNode }>(node)) {
-    return '';
-  }
-  return Children.toArray(node.props.children).map(textContent).join('');
+  if (!isValidElement<{ children?: ReactNode }>(node)) return '';
+  if (isComposite(node.type)) return textOf(node.type(node.props));
+  return textOf(node.props.children);
 }
 
-function totalsChildTexts(includedIvaCents: number | null): string[] {
-  const document = QuotationA4Document({
+function treeOf(props: QuotationDocumentProps = baseProps): AnyElement[] {
+  return walk(QuotationA4Document(props));
+}
+
+/** Every static text node of the document, in order. */
+function texts(props: QuotationDocumentProps = baseProps): string[] {
+  return treeOf(props)
+    .filter((el) => el.type === Text && !('render' in el.props))
+    .map((el) => textOf(el.props.children as ReactNode))
+    .filter((value) => value !== '');
+}
+
+function flattenStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return Object.assign(
+      {},
+      ...(style.map(flattenStyle) as object[]),
+    ) as Record<string, unknown>;
+  }
+  return typeof style === 'object' && style !== null
+    ? (style as Record<string, unknown>)
+    : {};
+}
+
+function colorsOf(tree: AnyElement[]): string[] {
+  return tree.flatMap((el) => {
+    const style = flattenStyle(el.props.style);
+    return Object.entries(style)
+      .filter(([key]) => /color$/i.test(key))
+      .map(([, value]) => String(value));
+  });
+}
+
+function totalsLines(includedIvaCents: number | null) {
+  const props: QuotationDocumentProps = {
     ...baseProps,
     totals: { ...baseProps.totals, includedIvaCents },
-  });
-  const totalsElement = findTotalsElement(document);
-  const renderedTotals = totalsElement.type(totalsElement.props);
-
-  if (!isValidElement<{ children?: ReactNode }>(renderedTotals)) {
-    throw new Error('Expected Totals to return a React element');
-  }
-
-  return Children.toArray(renderedTotals.props.children).map(textContent);
+  };
+  const block = treeOf(props).find((el) => el.type === A4TotalsBlock);
+  if (!block) throw new Error('Expected an A4TotalsBlock');
+  return block.props as {
+    lines: { label: string; value: string; tone?: string }[];
+    total: { label?: string; value: string };
+  };
 }
 
 // ── WU3 — T3.1: IVA incluido aggregate row ──────────────────────────────
 
 describe('QuotationA4Document — IVA incluido row (WU3 / T3.1)', () => {
-  it('renders exactly one positive IVA row before the divider', () => {
-    const rows = totalsChildTexts(1600);
+  it('renders exactly one positive IVA line before the Total', () => {
+    const { lines, total } = totalsLines(1600);
 
-    expect(rows).toEqual([
+    expect(lines.map((l) => `${l.label}${l.value}`)).toEqual([
       'Subtotal$250.00',
       'Descuentos-$25.00',
       'IVA incluido$16.00',
-      '',
-      'TOTAL$225.00',
     ]);
-    expect(rows.filter((row) => row.startsWith('IVA incluido'))).toHaveLength(
-      1,
+    expect(total).toEqual({ value: '$225.00' });
+    expect(
+      lines.map((l) => l.label).filter((l) => l === 'IVA incluido'),
+    ).toHaveLength(1);
+    expect(JSON.stringify(lines)).not.toMatch(
+      /IVA_16|IVA_0|STANDARD|ZERO_RATED/,
     );
-    expect(rows.join(' ')).not.toMatch(/IVA_16|IVA_0|STANDARD|ZERO_RATED/);
   });
 
-  it('renders exactly one known-zero IVA row', () => {
-    expect(totalsChildTexts(0)).toEqual([
+  it('renders exactly one known-zero IVA line', () => {
+    expect(totalsLines(0).lines.map((l) => `${l.label}${l.value}`)).toEqual([
       'Subtotal$250.00',
       'Descuentos-$25.00',
       'IVA incluido$0.00',
-      '',
-      'TOTAL$225.00',
     ]);
   });
 
-  it('omits the IVA row when the aggregate is unavailable', () => {
-    expect(totalsChildTexts(null)).toEqual([
+  it('omits the IVA line when the aggregate is unavailable', () => {
+    expect(totalsLines(null).lines.map((l) => `${l.label}${l.value}`)).toEqual([
       'Subtotal$250.00',
       'Descuentos-$25.00',
-      '',
-      'TOTAL$225.00',
     ]);
+  });
+});
+
+// ── pdf-a4-redesign T4: fields on the shared A4 kit ─────────────────────
+
+describe('QuotationA4Document — printed fields (kit composition)', () => {
+  it('prints the header kicker, folio, brand subtitle and meta bar', () => {
+    const printed = texts().join('|');
+
+    expect(printed).toContain('Cotización');
+    expect(printed).toContain(`Folio #${baseProps.quotation.id}`);
+    expect(printed).toContain('Punto de Venta');
+    expect(printed).toContain('Fecha 20 jul 2026');
+    expect(printed).toContain('Vendedor Ana Vendedora');
+  });
+
+  it('omits the Vendedor item when the seller is null', () => {
+    expect(texts({ ...baseProps, seller: null }).join('|')).not.toContain(
+      'Vendedor',
+    );
+  });
+
+  it('prints the customer name and email under «Cliente»', () => {
+    const printed = texts();
+
+    expect(printed).toContain('Cliente');
+    expect(printed).toContain('María López');
+    expect(printed).toContain('maria@example.com');
+  });
+
+  it('falls back to «Público en General» and drops a missing email', () => {
+    const printed = texts({
+      ...baseProps,
+      customer: { name: null, email: null },
+    });
+
+    expect(printed).toContain('Público en General');
+    expect(printed.join('|')).not.toContain('@');
+  });
+
+  it('passes the line items to the ledger with name, variant, qty × unit and amount', () => {
+    const table = treeOf().find((el) => el.type === LedgerTable);
+    const { rows, columns, emptyText } = table?.props as {
+      rows: { cells: Record<string, unknown> }[];
+      columns: { key: string; label: string }[];
+      emptyText: string;
+    };
+
+    expect(columns.map((c) => c.label)).toEqual([
+      'Descripción',
+      'Cantidad × precio',
+      'Importe',
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].cells).toEqual({
+      description: {
+        text: 'Collar clásico',
+        bold: true,
+        sub: 'Mediano / Negro',
+      },
+      qty: '2 × $125.00',
+      amount: { text: '$225.00', bold: true },
+    });
+    expect(emptyText).toBe('---');
+    // The rendered ledger carries the same strings.
+    expect(texts().join('|')).toContain('Mediano / Negro');
+  });
+
+  it('keeps zero-item quotations renderable with the «---» placeholder', () => {
+    const printed = texts({ ...baseProps, items: [] });
+    expect(printed).toContain('---');
+  });
+
+  it('prints the no-expiry closing line when expiresAt is null', () => {
+    const printed = texts();
+
+    expect(printed).toContain('Sin fecha de expiración');
+    expect(printed).toContain('Gracias por confiar en HoundFe');
+    expect(printed).toContain(
+      'Este comprobante no constituye una factura fiscal.',
+    );
+    expect(printed.join('|')).not.toContain('Válido hasta');
+  });
+
+  it('prints the expiry in the meta bar and the closing line when set', () => {
+    const printed = texts({
+      ...baseProps,
+      quotation: {
+        ...baseProps.quotation,
+        expiresAt: '2026-12-31T00:00:00.000Z',
+      },
+    });
+
+    expect(printed).toContain('Válido hasta 31 dic 2026');
+    expect(printed).toContain('Válido hasta: 31 dic 2026');
+    expect(printed).not.toContain('Sin fecha de expiración');
+  });
+});
+
+describe('QuotationA4Document — real pagination footer', () => {
+  it('uses the kit page with the fixed «Cotización <folio>» footer label', () => {
+    const footer = treeOf().find(
+      (el) =>
+        el.type === View &&
+        el.props.fixed === true &&
+        typeof el.props.render !== 'function' &&
+        textOf(el.props.children as ReactNode).includes('HoundFe'),
+    );
+
+    expect(footer).toBeDefined();
+    expect(textOf(footer?.props.children as ReactNode)).toContain(
+      `HoundFe · Cotización ${baseProps.quotation.id}`,
+    );
+  });
+
+  it('renders «Página X de Y» through the render prop, not static text', () => {
+    const pageText = treeOf().find(
+      (el) => el.type === Text && typeof el.props.render === 'function',
+    );
+    const render = pageText?.props.render as (ctx: {
+      pageNumber: number;
+      totalPages: number;
+    }) => string;
+
+    expect(render({ pageNumber: 2, totalPages: 3 })).toBe('Página 2 de 3');
+    expect(texts().join('|')).not.toMatch(/Página \d+ de \d+/);
+  });
+
+  it('repeats a continuation header on pages 2+ only', () => {
+    const fixedRender = treeOf().find(
+      (el) =>
+        el.type === View &&
+        el.props.fixed === true &&
+        typeof el.props.render === 'function',
+    );
+    const render = fixedRender?.props.render as (ctx: {
+      pageNumber: number;
+    }) => ReactNode;
+
+    expect(render({ pageNumber: 1 })).toBeNull();
+    const continuation = textOf(render({ pageNumber: 2 }));
+    expect(continuation).toContain(`Folio #${baseProps.quotation.id}`);
+    expect(continuation).toContain('Cotización');
+  });
+
+  it('wraps naturally on one A4 page', () => {
+    const page = treeOf().find((el) => el.type === Page);
+
+    expect(page?.props.wrap).toBe(true);
+  });
+});
+
+describe('QuotationA4Document — palette rules (L5)', () => {
+  it('colours «Total» with the single accent and never uses red/warning/success', () => {
+    const tree = treeOf();
+    const colors = colorsOf(tree);
+
+    // «Total» label and amount render in the accent.
+    const totalTexts = tree.filter(
+      (el) =>
+        el.type === Text &&
+        (textOf(el.props.children as ReactNode) === 'Total' ||
+          textOf(el.props.children as ReactNode) === '$225.00') &&
+        flattenStyle(el.props.style).color === A4_COLORS.accent,
+    );
+    expect(totalTexts).toHaveLength(2);
+
+    expect(colors).not.toContain(A4_COLORS.danger);
+    expect(colors).not.toContain(A4_COLORS.warning);
+    expect(colors).not.toContain(A4_COLORS.success);
+    expect(colors.join(' ')).not.toMatch(/#f00\b|#ff0000|red/i);
+  });
+
+  it('prints discounts as «-$X» in ink, never red', () => {
+    const { lines } = totalsLines(null);
+    const discount = lines.find((l) => l.label === 'Descuentos');
+
+    expect(discount?.value).toBe('-$25.00');
+    expect(discount?.tone ?? 'ink').toBe('ink');
+
+    const discountText = treeOf().find(
+      (el) =>
+        el.type === Text &&
+        textOf(el.props.children as ReactNode) === '-$25.00',
+    );
+    expect(flattenStyle(discountText?.props.style).color).toBe(A4_COLORS.ink);
+  });
+
+  it('shows a zero discount as a plain $0.00 (no sign)', () => {
+    const printed = texts({
+      ...baseProps,
+      totals: { ...baseProps.totals, discountCents: 0 },
+    });
+    expect(printed).toContain('$0.00');
+    expect(printed).not.toContain('-$0.00');
   });
 });
 
@@ -204,6 +396,22 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     }
   });
 
+  it('keeps printing the business logo and falls back to the kit header without one', () => {
+    const imageCount = (props: QuotationDocumentProps) =>
+      treeOf(props).filter((el) => typeof el.props.src === 'string').length;
+
+    expect(imageCount(baseProps)).toBe(1);
+    expect(
+      imageCount({
+        ...baseProps,
+        business: { companyName: 'HoundFe' },
+      }),
+    ).toBe(0);
+    expect(
+      texts({ ...baseProps, business: { companyName: 'HoundFe' } }),
+    ).toContain('Logo');
+  });
+
   it('renders a non-empty PDF buffer with PDF magic bytes', async () => {
     const buffer = await renderToBuffer(<QuotationA4Document {...baseProps} />);
 
@@ -212,53 +420,14 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('renders items through the modern quotation items list (no grid table)', async () => {
-    // Source-level guarantee — the pilot intentionally drops the shared
-    // `LineItemsTable` grid in favor of the quotation-specific, line-less
-    // `ItemsList`. If a future refactor swaps the rendering block, this
-    // test fails loudly so the redesigned visual contract stays intact.
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(
-      `${__dirname}/quotation-a4.document.tsx`,
-      'utf8',
-    );
-    expect(source).toContain('<ItemsList items={items} />');
-    expect(source).not.toContain('<LineItemsTable');
-  });
-
-  it('renders the modern header with the COTIZACIÓN meta card', async () => {
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(
-      `${__dirname}/quotation-a4.document.tsx`,
-      'utf8',
-    );
-    expect(source).toContain('SHARED_STYLES.modern.header');
-    expect(source).toContain('COTIZACIÓN');
-  });
-
-  it('renders the seller display name in the header meta card', async () => {
-    // Spec: the assignable seller must appear on the quotation A4 PDF.
-    // Source-level guarantee — the header renders a `VENDEDOR` line fed
-    // from the `sellerName` prop (resolved from `seller.name`).
-    const buffer = await renderToBuffer(<QuotationA4Document {...baseProps} />);
-    expect(buffer.length).toBeGreaterThan(0);
-
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(
-      `${__dirname}/quotation-a4.document.tsx`,
-      'utf8',
-    );
-    expect(source).toContain('VENDEDOR {sellerName}');
-    expect(source).toContain('sellerName={seller?.name ?? null}');
-  });
-
-  it('renders without a VENDEDOR line when seller is null', async () => {
-    const propsNoSeller: QuotationDocumentProps = {
-      ...baseProps,
-      seller: null,
-    };
+  it('renders without seller, customer, logo and expiry', async () => {
     const buffer = await renderToBuffer(
-      <QuotationA4Document {...propsNoSeller} />,
+      <QuotationA4Document
+        {...baseProps}
+        seller={null}
+        customer={{ name: null, email: null }}
+        business={{ companyName: 'HoundFe' }}
+      />,
     );
     expect(buffer.length).toBeGreaterThan(0);
   });
@@ -276,63 +445,12 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     expect(typeAssertion).not.toHaveProperty('payments');
   });
 
-  it('does not include "Pagado", "Cambio", or payment-method labels in the rendered JSX', async () => {
-    // Spec scenario "quotation-a4 footer has no payment lines" — a
-    // hard source-level check on the JSX so a future copy-paste from
-    // receipt-a4.document.tsx cannot reintroduce them. Comments are
-    // allowed (they describe the contract); rendered JSX must be
-    // payment-free.
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(
-      `${__dirname}/quotation-a4.document.tsx`,
-      'utf8',
-    );
+  it('prints no payment lines ("Pagado", "Cambio", payment methods)', () => {
+    // Spec scenario "quotation-a4 footer has no payment lines" — checked on
+    // what the tree actually prints (static text + the footer render prop).
+    const printed = texts().join('|');
 
-    // Strip all block + line comments before checking — we care about
-    // what the user sees, not what the file documents.
-    const stripped = source
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/.*$/gm, '');
-
-    expect(stripped).not.toMatch(/Pagado/);
-    expect(stripped).not.toMatch(/Cambio/);
-    // `payment` would be a JSX prop name like `paymentMethod` — also
-    // forbidden in this template.
-    expect(stripped).not.toMatch(/payment/i);
-  });
-
-  it('renders the expiry footer line when expiresAt is set', async () => {
-    // The text is rendered into the PDF stream — we can't easily
-    // assert on raw text without a PDF parser, so we exercise the
-    // rendering path with both branches and verify the buffer is
-    // produced (smoke) plus a source-level guarantee for the labels.
-    const propsWithExpiry: QuotationDocumentProps = {
-      ...baseProps,
-      quotation: {
-        ...baseProps.quotation,
-        expiresAt: '2026-12-31T00:00:00.000Z',
-      },
-    };
-
-    const buffer = await renderToBuffer(
-      <QuotationA4Document {...propsWithExpiry} />,
-    );
-    expect(buffer.length).toBeGreaterThan(0);
-
-    const { readFileSync } = await import('node:fs');
-    const source = readFileSync(
-      `${__dirname}/quotation-a4.document.tsx`,
-      'utf8',
-    );
-    expect(source).toContain('Válido hasta:');
-    expect(source).toContain('Sin fecha de expiración');
-  });
-
-  it('renders the no-expiry fallback when expiresAt is null', async () => {
-    const buffer = await renderToBuffer(<QuotationA4Document {...baseProps} />);
-    expect(buffer.length).toBeGreaterThan(0);
-    // Source-level guarantee — the JSX renders either branch based
-    // on the truthy check. The branch coverage is exercised by the
-    // renderToBuffer call itself.
+    expect(printed).not.toMatch(/Pagado|Cambio|Deuda|Efectivo|Tarjeta/);
+    expect(printed).not.toMatch(/payment/i);
   });
 });

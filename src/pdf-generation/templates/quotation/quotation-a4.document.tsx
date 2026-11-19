@@ -1,37 +1,49 @@
 /**
  * QuotationA4Document — A4 PDF template for the `quotation-a4` format key.
  *
- * PILOT — redesigned with the modern Stripe/Shopify-style token set
- * (`SHARED_STYLES.modern`). The receipt templates (receipt-a4 / receipt-
- * ticket) are untouched and keep the legacy shared tokens; this template
- * is the only consumer of the `modern` namespace.
+ * pdf-a4-redesign T4: rebuilt on the shared A4 kit («libro mayor» artboard,
+ * page «Cotización» of design/pdf-a4-redesign/01-libro-mayor.html). One
+ * wrapping page with natural pagination and the kit's fixed footer
+ * («Página X de Y» through react-pdf's `render` prop).
  *
- * Visible contract (unchanged from the legacy layout):
- *   - Header title "COTIZACIÓN" + folio (quotation id) + creation date.
- *   - Seller display name ("VENDEDOR …") in the header meta card.
- *   - Customer name AND email (the email travels with the PDF send).
- *   - Line items with product name + variant; discount lines are folded
- *     into the per-line quantity/unit subtotal (see `ItemsList`).
- *   - Totals: Subtotal / Descuentos rows + a highlighted grand TOTAL card
- *     (no IVA row — IVA is informational here, the total already includes it).
- *   - Footer: expiry line ("Válido hasta: …" / "Sin fecha de expiración"),
- *     "Gracias por confiar en HoundFe", and the fiscal disclaimer.
+ * Visible contract (every field the legacy layout printed is kept):
+ *   - Header: «Cotización» kicker + folio (the quotation id the caller
+ *     passes) + the business logo when `business.logoUrl` is set.
+ *   - Meta bar: «Fecha», «Vendedor» (only when a seller is known) and
+ *     «Válido hasta» (only when an expiry was set).
+ *   - Cliente: name («Público en General» when absent) and email.
+ *   - Productos: ledger table — product name + variant, `qty × unit`, and
+ *     the line amount (discount lines stay folded into the amount).
+ *   - Totals: Subtotal / Descuentos / IVA incluido (only when the aggregate
+ *     is known — a known zero still renders) and the accent «Total».
+ *   - Closing: expiry line («Válido hasta: …» / «Sin fecha de expiración»),
+ *     «Gracias por confiar en HoundFe» and the fiscal disclaimer.
  *
- * Font handling: the page binds to `getModernFontFamily()` so a font-CDN
- * outage degrades to Helvetica instead of failing the render (react-pdf
- * throws on unreachable font weights — see `templates/shared/modern-font.ts`).
+ * Palette (L5): the single accent (#173968) is only used by the kit for
+ * titles and «Total»; discounts print as «-$X» in ink — never red.
  *
  * Spec coverage:
  *   - `quotations/send-and-pdf/spec.md` PDF Preview for Quotation.
  *   - `pdf-generation/delta.md` Quotation-A4 Format Registration.
  */
-import { Document, Image, Page, Text, View } from '@react-pdf/renderer';
-import { PAPER_SIZES } from '../../pdf-generation.constants';
+import { Document, Image, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
-  getModernFontFamily,
-  SHARED_STYLES,
-  type LineItem,
-} from '../shared';
+  A4_COLORS,
+  A4_FONTS,
+  A4_STYLES,
+  A4MetaBar,
+  A4Page,
+  A4PageHeader,
+  A4Section,
+  A4TotalsBlock,
+  LedgerTable,
+  px,
+  type A4MetaBarItem,
+  type A4TotalsLine,
+  type LedgerColumn,
+  type LedgerRowData,
+} from '../shared/a4-kit';
+import type { LineItem } from '../shared';
 
 /**
  * View-model for the Quotation A4 template. Mirrors `ReceiptDocumentProps`
@@ -76,6 +88,14 @@ export interface QuotationDocumentProps {
   };
 }
 
+const SUBTITLE = 'Punto de Venta';
+
+const ITEM_COLUMNS: readonly LedgerColumn[] = [
+  { key: 'description', label: 'Descripción', flex: 5 },
+  { key: 'qty', label: 'Cantidad × precio', flex: 2.4, align: 'right' },
+  { key: 'amount', label: 'Importe', flex: 2, align: 'right' },
+];
+
 export function QuotationA4Document({
   business,
   quotation,
@@ -84,247 +104,232 @@ export function QuotationA4Document({
   items,
   totals,
 }: QuotationDocumentProps) {
+  const folio = `Folio #${quotation.id}`;
+
   return (
-    <Document title={`Cotización ${quotation.id}`}>
-      <Page
-        size={{ width: PAPER_SIZES.A4.width, height: PAPER_SIZES.A4.height }}
-        style={[
-          SHARED_STYLES.modern.page,
-          // Runtime font family — cascades to every Text on the page.
-          { fontFamily: getModernFontFamily() },
-        ]}
+    <Document
+      title={`Cotización ${quotation.id}`}
+      author="HoundFe"
+      creator="HoundFe"
+      producer="HoundFe"
+    >
+      <A4Page
+        footerLabel={`Cotización ${quotation.id}`}
+        continuation={{
+          kicker: 'Cotización',
+          folio,
+          brandSubtitle: SUBTITLE,
+        }}
       >
-        <View>
-          <QuotationHeader
-            logoUrl={business.logoUrl}
-            companyName={business.companyName}
-            folio={quotation.id}
-            date={quotation.date}
-            sellerName={seller?.name ?? null}
-          />
-
-          <CustomerCard customer={customer} />
-
-          <ItemsList items={items} />
-
-          <Totals {...totals} />
-
-          <Footer expiresAt={quotation.expiresAt} />
-        </View>
-      </Page>
+        <QuotationHeader logoUrl={business.logoUrl} folio={folio} />
+        <A4MetaBar
+          items={metaItems(quotation.date, seller, quotation.expiresAt)}
+        />
+        <CustomerSection customer={customer} />
+        <ItemsSection items={items} />
+        <Totals {...totals} />
+        <Closing expiresAt={quotation.expiresAt} />
+      </A4Page>
     </Document>
   );
 }
 
 /**
- * Header — brand block on the left (logo + company name + "Punto de Venta"),
- * and a light-gray meta card on the right carrying COTIZACIÓN / FOLIO / FECHA
- * / VENDEDOR.
+ * Page header. The kit header only draws the «Logo» placeholder box; when the
+ * business has a logo we keep printing it (legacy field) in that same box,
+ * reusing the kit styles. Without a logo the stock kit header is used.
  */
 function QuotationHeader({
   logoUrl,
-  companyName,
   folio,
-  date,
-  sellerName,
 }: {
   logoUrl?: string;
-  companyName: string;
   folio: string;
-  date: string;
-  sellerName: string | null;
 }) {
+  if (!logoUrl) {
+    return (
+      <A4PageHeader subtitle={SUBTITLE} kicker="Cotización" folio={folio} />
+    );
+  }
   return (
-    <View style={SHARED_STYLES.modern.header.row}>
-      <View style={SHARED_STYLES.modern.header.brandRow}>
-        {logoUrl ? (
-          <Image
-            src={logoUrl}
-            style={SHARED_STYLES.modern.header.logo}
-            cache={false}
-          />
-        ) : null}
-        <View>
-          <Text style={SHARED_STYLES.modern.header.companyName}>
-            {companyName}
-          </Text>
-          <Text style={SHARED_STYLES.modern.header.companySub}>
-            Punto de Venta
-          </Text>
+    <View>
+      <View style={A4_STYLES.header}>
+        <View style={A4_STYLES.brand}>
+          <View style={styles.logoFrame}>
+            <Image src={logoUrl} style={styles.logoImage} cache={false} />
+          </View>
+          <View>
+            <Text style={A4_STYLES.brandName}>HoundFe</Text>
+            <Text style={A4_STYLES.brandSub}>{SUBTITLE}</Text>
+          </View>
         </View>
-      </View>
-
-      <View style={SHARED_STYLES.modern.cardCompact}>
-        <Text style={SHARED_STYLES.modern.header.metaTitle}>COTIZACIÓN</Text>
-        <Text style={SHARED_STYLES.modern.header.metaFolio}>
-          FOLIO #{folio}
-        </Text>
-        <Text style={SHARED_STYLES.modern.header.metaDate}>
-          FECHA {formatDateEsMX(date)}
-        </Text>
-        {sellerName ? (
-          <Text style={SHARED_STYLES.modern.header.metaDate}>
-            VENDEDOR {sellerName}
-          </Text>
-        ) : null}
+        <View style={A4_STYLES.docMeta}>
+          <Text style={A4_STYLES.kicker}>Cotización</Text>
+          <Text style={A4_STYLES.folio}>{folio}</Text>
+        </View>
       </View>
     </View>
   );
 }
 
-/**
- * Customer card — light-gray surface with the "Cliente" eyebrow label, the
- * name (or "Público en General"), and the email when present.
- */
-function CustomerCard({
+function metaItems(
+  date: string,
+  seller: { name: string } | null,
+  expiresAt: string | null,
+): A4MetaBarItem[] {
+  const items: A4MetaBarItem[] = [{ label: 'Fecha', value: formatDate(date) }];
+  if (seller?.name) {
+    items.push({ label: 'Vendedor', value: seller.name });
+  }
+  if (expiresAt) {
+    items.push({ label: 'Válido hasta', value: formatDate(expiresAt) });
+  }
+  return items;
+}
+
+/** Cliente — name («Público en General» when absent) and email when present. */
+function CustomerSection({
   customer,
 }: {
   customer: { name: string | null; email: string | null };
 }) {
   return (
-    <View
-      style={[
-        SHARED_STYLES.modern.card,
-        SHARED_STYLES.modern.customer.block,
-      ]}
-    >
-      <Text style={SHARED_STYLES.modern.eyebrow}>Cliente</Text>
-      <Text style={SHARED_STYLES.modern.customer.name}>
-        {customer.name ?? 'Público en General'}
-      </Text>
-      {customer.email ? (
-        <Text style={SHARED_STYLES.modern.customer.email}>
-          {customer.email}
-        </Text>
-      ) : null}
-    </View>
+    <A4Section title="Cliente">
+      <View style={styles.party} wrap={false}>
+        <View style={styles.partyColumn}>
+          <Text style={styles.partyName}>
+            {customer.name ?? 'Público en General'}
+          </Text>
+        </View>
+        <View style={styles.partyColumnLast}>
+          {customer.email ? (
+            <Text style={styles.partyEmail}>{customer.email}</Text>
+          ) : null}
+        </View>
+      </View>
+    </A4Section>
   );
 }
 
-/**
- * Items list — one row per line item, separated by vertical rhythm instead
- * of table grid lines. Left: product name + variant. Right: `qty × unit`
- * and the bold line total.
- */
-function ItemsList({ items }: { items: LineItem[] }) {
+/** Productos — ledger table; header repeats when the table spans pages. */
+function ItemsSection({ items }: { items: LineItem[] }) {
+  const rows: LedgerRowData[] = items.map((item, index) => ({
+    key: `${item.productName}-${index}`,
+    cells: {
+      description: {
+        text: item.productName,
+        bold: true,
+        sub: item.variantName ?? undefined,
+      },
+      qty: `${formatQuantity(item.quantity)} × ${formatCurrency(item.unitPriceCents)}`,
+      amount: { text: formatCurrency(item.subtotalCents), bold: true },
+    },
+  }));
+
   return (
-    <View style={SHARED_STYLES.modern.items.block}>
-      <Text style={SHARED_STYLES.modern.eyebrow}>Productos</Text>
-
-      {items.length === 0 ? (
-        <Text style={SHARED_STYLES.modern.items.empty}>---</Text>
-      ) : (
-        items.map((item, index) => (
-          <View
-            key={`${item.productName}-${index}`}
-            style={SHARED_STYLES.modern.items.row}
-          >
-            <View>
-              <Text style={SHARED_STYLES.modern.items.productName}>
-                {item.productName}
-              </Text>
-              {item.variantName ? (
-                <Text style={SHARED_STYLES.modern.items.productVariant}>
-                  {item.variantName}
-                </Text>
-              ) : null}
-            </View>
-            <View>
-              <Text style={SHARED_STYLES.modern.items.qtyLine}>
-                {formatQuantity(item.quantity)} ×{' '}
-                {formatCurrency(item.unitPriceCents)}
-              </Text>
-              <Text style={SHARED_STYLES.modern.items.lineTotal}>
-                {formatCurrency(item.subtotalCents)}
-              </Text>
-            </View>
-          </View>
-        ))
-      )}
-    </View>
+    <A4Section title="Productos">
+      <LedgerTable columns={ITEM_COLUMNS} rows={rows} emptyText="---" />
+    </A4Section>
   );
 }
 
 /**
- * Totals — Subtotal / Descuentos as plain rows, a subtle divider, then the
- * grand TOTAL on a highlighted card (the document's focal point, 24pt 800).
+ * Totals — Subtotal / Descuentos as ink lines and the accent «Total».
  *
- * WU3 (T3.1): one `IVA incluido` aggregate row appears before the divider
- * when `includedIvaCents` is not `null`. The row displays the monetary zero
- * when the aggregate is exactly 0 (e.g. all ZERO_RATED_0 lines). The
- * condition uses strict `!== null` — a naive truthy check would incorrectly
- * suppress the zero-value row. No per-line or per-classification IVA rows.
+ * WU3 (T3.1): one `IVA incluido` aggregate line appears when
+ * `includedIvaCents` is not `null`. The row displays the monetary zero when
+ * the aggregate is exactly 0 (e.g. all ZERO_RATED_0 lines). The condition
+ * uses strict `!== null` — a naive truthy check would suppress the zero row.
+ * No per-line or per-classification IVA rows.
  */
 function Totals({
   subtotalCents,
   discountCents,
   totalCents,
   includedIvaCents,
-}: {
-  subtotalCents: number;
-  discountCents: number;
-  totalCents: number;
-  includedIvaCents: number | null;
-}) {
+}: QuotationDocumentProps['totals']) {
+  const lines: A4TotalsLine[] = [
+    { label: 'Subtotal', value: formatCurrency(subtotalCents) },
+    {
+      label: 'Descuentos',
+      value:
+        discountCents > 0
+          ? `-${formatCurrency(discountCents)}`
+          : formatCurrency(discountCents),
+    },
+  ];
+  if (includedIvaCents !== null) {
+    lines.push({
+      label: 'IVA incluido',
+      value: formatCurrency(includedIvaCents),
+    });
+  }
   return (
-    <View style={SHARED_STYLES.modern.totals.block}>
-      <View style={SHARED_STYLES.modern.totals.row}>
-        <Text style={SHARED_STYLES.modern.totals.label}>Subtotal</Text>
-        <Text style={SHARED_STYLES.modern.totals.value}>
-          {formatCurrency(subtotalCents)}
-        </Text>
-      </View>
-      <View style={SHARED_STYLES.modern.totals.row}>
-        <Text style={SHARED_STYLES.modern.totals.label}>Descuentos</Text>
-        <Text style={SHARED_STYLES.modern.totals.value}>
-          {discountCents > 0
-            ? `-${formatCurrency(discountCents)}`
-            : formatCurrency(discountCents)}
-        </Text>
-      </View>
-
-      {includedIvaCents !== null && (
-        <View style={SHARED_STYLES.modern.totals.row}>
-          <Text style={SHARED_STYLES.modern.totals.label}>IVA incluido</Text>
-          <Text style={SHARED_STYLES.modern.totals.value}>
-            {formatCurrency(includedIvaCents)}
-          </Text>
-        </View>
-      )}
-
-      <View style={SHARED_STYLES.modern.totals.divider} />
-
-      <View style={SHARED_STYLES.modern.totals.totalCard}>
-        <Text style={SHARED_STYLES.modern.totals.totalLabel}>TOTAL</Text>
-        <Text style={SHARED_STYLES.modern.totals.totalValue}>
-          {formatCurrency(totalCents)}
-        </Text>
-      </View>
-    </View>
+    <A4TotalsBlock
+      lines={lines}
+      total={{ value: formatCurrency(totalCents) }}
+    />
   );
 }
 
-/**
- * Footer — expiry line (when set), thank-you line, and the fiscal disclaimer
- * in small gray type.
- */
-function Footer({ expiresAt }: { expiresAt: string | null }) {
+/** Closing — expiry line, thank-you line and the fiscal disclaimer. */
+function Closing({ expiresAt }: { expiresAt: string | null }) {
   return (
-    <View>
-      <Text style={SHARED_STYLES.modern.footer.expiry}>
+    <View style={styles.closing} wrap={false}>
+      <Text style={styles.closingStrong}>
         {expiresAt
-          ? `Válido hasta: ${formatDateEsMX(expiresAt)}`
+          ? `Válido hasta: ${formatDate(expiresAt)}`
           : 'Sin fecha de expiración'}
       </Text>
-      <Text style={SHARED_STYLES.modern.footer.thanks}>
-        Gracias por confiar en HoundFe
-      </Text>
-      <Text style={SHARED_STYLES.modern.footer.disclaimer}>
-        Este comprobante no constituye una factura fiscal.
-      </Text>
+      <Text>Gracias por confiar en HoundFe</Text>
+      <Text>Este comprobante no constituye una factura fiscal.</Text>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  logoFrame: {
+    width: px(36),
+    height: px(36),
+    borderWidth: px(1.5),
+    borderColor: A4_COLORS.strong,
+    borderStyle: 'solid',
+    marginRight: px(12),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoImage: { width: px(30), height: px(30), objectFit: 'contain' },
+  party: { flexDirection: 'row', marginTop: px(2) },
+  partyColumn: {
+    flex: 1,
+    paddingRight: px(22),
+    paddingVertical: px(6),
+    borderBottomWidth: px(1),
+    borderBottomColor: A4_COLORS.border,
+    borderBottomStyle: 'solid',
+  },
+  partyColumnLast: {
+    flex: 1,
+    paddingVertical: px(7),
+    borderBottomWidth: px(1),
+    borderBottomColor: A4_COLORS.border,
+    borderBottomStyle: 'solid',
+  },
+  partyName: {
+    fontFamily: A4_FONTS.bold,
+    fontSize: px(14),
+    color: A4_COLORS.ink,
+  },
+  partyEmail: { fontSize: px(12.5), color: A4_COLORS.ink },
+  closing: {
+    marginTop: px(34),
+    alignItems: 'center',
+    fontSize: px(11),
+    lineHeight: 1.5,
+    color: A4_COLORS.muted,
+  },
+  closingStrong: { fontFamily: A4_FONTS.bold, color: A4_COLORS.ink },
+});
 
 /**
  * Format cents as a fixed-decimal currency string. We avoid Intl.NumberFormat
@@ -348,13 +353,13 @@ function formatQuantity(qty: number): string {
 }
 
 /**
- * Format an ISO timestamp as a short Spanish date, e.g. `06 AGO 2026`.
+ * Format an ISO timestamp as a short Spanish date, e.g. `06 ago 2026`.
  *
  * Rendered in UTC so a quote date never shifts by the server's time zone
  * (an expiry set to midnight UTC would otherwise display as the previous
  * day in UTC-negative zones). Falls back to the raw input when unparseable.
  */
-function formatDateEsMX(iso: string): string {
+function formatDate(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
     return iso;
@@ -368,7 +373,7 @@ function formatDateEsMX(iso: string): string {
     })
       .format(date)
       .replace(/\./g, '')
-      .toUpperCase();
+      .toLowerCase();
   } catch {
     // Older Node builds without full ICU data fall back to ISO date.
     return date.toISOString().slice(0, 10);
