@@ -1,23 +1,23 @@
 /**
- * Deterministic pagination, render/structural and user-facing output tests.
+ * Seller sales report A4 on the shared kit (pdf-a4-redesign T5, S2): fields,
+ * notices, fixed footer render prop, repeated ledger header and the palette
+ * rules (L5) asserted through the element tree. Yoga is mocked under Jest, so
+ * page FIT is measured outside Jest; these tests pin structure.
  */
 import { readFileSync } from 'node:fs';
-import { Children, isValidElement, type ReactNode } from 'react';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   Document,
-  Image,
   Page,
   Text,
   View,
   renderToBuffer,
 } from '@react-pdf/renderer';
 import {
-  SELLER_REPORT_FIRST_PAGE_BUDGET,
-  SELLER_REPORT_PAGE_BUDGET,
   SellerSalesReportA4Document,
-  paginateSellerReportCanceled,
-  paginateSellerReportConfirmed,
+  debtTone,
 } from './seller-sales-report-a4.document';
+import { A4_COLORS } from '../shared/a4-kit';
 import type {
   SellerSalesReportCanceledRowDto,
   SellerSalesReportConfirmedRowDto,
@@ -92,73 +92,63 @@ function makeReport(
   };
 }
 
-/** react-pdf host components: recurse their children instead of invoking. */
-const HOST_COMPONENTS = new Set<unknown>([Document, Page, Text, View, Image]);
+type AnyElement = ReactElement<Record<string, unknown>>;
+const HOST = new Set<unknown>([Document, Page, Text, View]);
 
-/** Flatten a rendered react-pdf element tree into its visible text. */
-function flattenText(node: ReactNode): string {
-  if (Array.isArray(node)) return node.map(flattenText).join('');
+/** Expand function components; collect every element in document order. */
+function walk(node: ReactNode, out: AnyElement[] = []): AnyElement[] {
+  if (Array.isArray(node)) {
+    node.forEach((child) => walk(child as ReactNode, out));
+    return out;
+  }
+  if (!isValidElement<Record<string, unknown>>(node)) {
+    return out;
+  }
+  out.push(node);
+  if (typeof node.type === 'function' && !HOST.has(node.type)) {
+    walk((node.type as (props: unknown) => ReactNode)(node.props), out);
+  } else {
+    walk(node.props.children as ReactNode, out);
+  }
+  return out;
+}
+
+/** Visible text (strings are joined with a space; callers normalise). */
+function textOf(node: ReactNode): string {
+  if (Array.isArray(node)) return node.map(textOf).join('');
   if (!isValidElement<{ children?: ReactNode }>(node)) {
     return typeof node === 'string' ? `${node} ` : '';
   }
-  if (typeof node.type === 'function' && !HOST_COMPONENTS.has(node.type)) {
-    const Component = node.type as (props: unknown) => ReactNode;
-    return flattenText(Component(node.props));
+  if (typeof node.type === 'function' && !HOST.has(node.type)) {
+    return textOf((node.type as (props: unknown) => ReactNode)(node.props));
   }
-  return flattenText(node.props.children);
+  return textOf(node.props.children);
 }
 
 function renderText(report: SellerSalesReportResponseDto): string {
-  return flattenText(SellerSalesReportA4Document({ report }));
+  return textOf(SellerSalesReportA4Document({ report })).replace(/\s+/g, ' ');
 }
 
-describe('seller report pagination', () => {
-  it('keeps an empty confirmed section on a single empty page', () => {
-    expect(paginateSellerReportConfirmed([])).toEqual([[]]);
-  });
+function flatStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return Object.assign({}, ...(style as unknown[]).map(flatStyle)) as Record<
+      string,
+      unknown
+    >;
+  }
+  return (style as Record<string, unknown>) ?? {};
+}
 
-  it('keeps an empty canceled section on a single empty page', () => {
-    expect(paginateSellerReportCanceled([])).toEqual([[]]);
-  });
+function elementsOf(report: SellerSalesReportResponseDto): AnyElement[] {
+  return walk(SellerSalesReportA4Document({ report }));
+}
 
-  it('never drops, duplicates or reorders confirmed rows across pages', () => {
-    const rows = Array.from({ length: 1000 }, (_, index) =>
-      confirmedRow(index),
-    );
-    const pages = paginateSellerReportConfirmed(rows);
-
-    expect(pages.flat()).toEqual(rows);
-    expect(pages[0].length).toBeLessThanOrEqual(
-      SELLER_REPORT_FIRST_PAGE_BUDGET,
-    );
-    for (const page of pages.slice(1)) {
-      expect(page.length).toBeLessThanOrEqual(SELLER_REPORT_PAGE_BUDGET);
-    }
-  });
-
-  it('never drops, duplicates or reorders canceled rows across pages', () => {
-    const rows = Array.from({ length: 1000 }, (_, index) => canceledRow(index));
-    const pages = paginateSellerReportCanceled(rows);
-
-    expect(pages.flat()).toEqual(rows);
-    for (const page of pages) {
-      expect(page.length).toBeLessThanOrEqual(SELLER_REPORT_PAGE_BUDGET);
-    }
-  });
-
-  it('spreads long folios across more pages than short folios', () => {
-    const short = Array.from({ length: 200 }, (_, index) =>
-      confirmedRow(index, `A-${index}`),
-    );
-    const long = Array.from({ length: 200 }, (_, index) =>
-      confirmedRow(index, 'FOLIO-EXTENSO-'.repeat(8)),
-    );
-
-    expect(paginateSellerReportConfirmed(long).length).toBeGreaterThan(
-      paginateSellerReportConfirmed(short).length,
-    );
-  });
-});
+/** Colours of the leaf Text elements whose own string content is `value`. */
+function colorOf(report: SellerSalesReportResponseDto, value: string) {
+  return elementsOf(report)
+    .filter((el) => el.type === Text && el.props.children === value)
+    .map((el) => flatStyle(el.props.style).color);
+}
 
 describe('SellerSalesReportA4Document', () => {
   it('renders a non-empty PDF buffer with PDF magic bytes', async () => {
@@ -171,54 +161,154 @@ describe('SellerSalesReportA4Document', () => {
     expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
   });
 
-  it('uses the shared modern tokens with the built-in Helvetica family', () => {
-    expect(SOURCE).toContain('SHARED_STYLES.modern');
-    expect(SOURCE).toContain("fontFamily: 'Helvetica'");
-    expect(SOURCE).not.toContain('getModernFontFamily');
+  it('renders a 1000-row report as a real PDF (natural pagination)', async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) =>
+      confirmedRow(index),
+    );
+    const buffer = await renderToBuffer(
+      <SellerSalesReportA4Document report={makeReport(rows)} />,
+    );
+
+    expect(buffer.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)).toBe(true);
+  }, 120_000);
+
+  it('composes the shared A4 kit with no remote assets or legacy styles', () => {
+    expect(SOURCE).toContain("from '../shared/a4-kit'");
+    expect(SOURCE).toContain('A4Page');
+    expect(SOURCE).toContain('LedgerTable');
+    expect(SOURCE).not.toContain('SHARED_STYLES');
     expect(SOURCE).not.toContain('registerModernFont');
-  });
-
-  it('resolves the packaged logo from a runtime dirname path, never a remote URL', () => {
-    expect(SOURCE).toContain('resolve(');
-    expect(SOURCE).toContain('__dirname');
-    expect(SOURCE).toContain('houndfe-logo-report.png');
     expect(SOURCE).not.toContain('https://');
-    expect(SOURCE).not.toContain('LOGO_URL');
   });
 
-  it('renders exactly one Page per computed confirmed + canceled chunk', () => {
+  it('uses natural pagination: one wrapping A4 page per section, any row count', () => {
+    const pages = (rowCount: number) =>
+      elementsOf(
+        makeReport(Array.from({ length: rowCount }, (_, i) => confirmedRow(i))),
+      ).filter((el) => el.type === Page);
+
+    for (const rendered of [pages(1), pages(300)]) {
+      // Confirmed + canceled sections; react-pdf decides the physical breaks.
+      expect(rendered).toHaveLength(2);
+      for (const page of rendered) {
+        expect(page.props.wrap).toBe(true);
+        expect(page.props.size).toEqual({ width: 595, height: 842 });
+      }
+    }
+  });
+
+  it('repeats the ledger header (fixed) and keeps every row unbreakable', () => {
     const report = makeReport(
-      Array.from({ length: 40 }, (_, index) => confirmedRow(index)),
+      Array.from({ length: 5 }, (_, i) => confirmedRow(i + 1)),
       [canceledRow(1)],
     );
-    const element = SellerSalesReportA4Document({ report }) as unknown as {
-      props: { children: ReactNode };
-    };
-    const pages = Children.toArray(element.props.children).filter(
-      (child) => isValidElement(child) && child.type === Page,
+    const elements = elementsOf(report);
+    const rows = elements.filter(
+      (el) =>
+        el.type === View &&
+        el.props.wrap === false &&
+        !el.props.minPresenceAhead,
+    );
+    const fixed = elements.filter(
+      (el) => el.type === View && el.props.fixed === true && !el.props.render,
     );
 
-    expect(pages).toHaveLength(
-      paginateSellerReportConfirmed(report.confirmed.rows).length +
-        paginateSellerReportCanceled(report.canceled.rows).length,
-    );
+    // 5 confirmed + 1 canceled rows, plus the «Ventas netas» strip.
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+    // per section page: gold mark + footer + ledger header
+    expect(fixed).toHaveLength(6);
   });
 
-  it('renders Spanish labels, translated statuses and no technical markers', () => {
+  it('has a fixed footer with real page numbers and the seller name', () => {
+    const report = makeReport();
+    const numbered = elementsOf(report).filter(
+      (el) => el.type === Text && typeof el.props.render === 'function',
+    );
+
+    expect(numbered).toHaveLength(2);
+    for (const el of numbered) {
+      const render = el.props.render as (info: {
+        pageNumber: number;
+        totalPages: number;
+      }) => string;
+      expect(render({ pageNumber: 2, totalPages: 7 })).toBe('Página 2 de 7');
+    }
+    const text = renderText(report);
+    expect(text).toContain('HoundFe · Reporte de ventas · Vendedor Uno');
+    expect(text).not.toMatch(/Página \d+ de \d+/);
+  });
+
+  it('repeats a compact header (hidden on page 1) naming the seller', () => {
+    const header = elementsOf(makeReport()).find(
+      (el) =>
+        el.type === View &&
+        el.props.fixed === true &&
+        typeof el.props.render === 'function',
+    );
+    const render = header?.props.render as (info: {
+      pageNumber: number;
+    }) => ReactNode;
+
+    expect(render({ pageNumber: 1 })).toBeNull();
+    expect(textOf(render({ pageNumber: 2 }))).toContain('Vendedor Uno');
+  });
+
+  it('prints every field, column and notice the report had before', () => {
     const rows = (['PAID', 'PARTIAL', 'CREDIT'] as const).map((status, i) =>
       confirmedRow(i + 1, `A-${i + 1}`, status),
     );
     const text = renderText(makeReport(rows, [canceledRow(1)]));
 
-    expect(text).toContain('Resumen · ventas confirmadas');
-    expect(text).toContain('Ventas confirmadas · por fecha de confirmación');
-    expect(text).toContain(
-      'Ventas canceladas · por fecha de cancelación (informativas)',
-    );
+    for (const expected of [
+      'Resumen · ventas confirmadas',
+      'Ventas',
+      'Cobrado',
+      'Saldo pendiente',
+      'Ticket promedio',
+      'Ventas netas',
+      '$10,000.00',
+      'Ventas confirmadas',
+      'por fecha de confirmación',
+      'Ventas canceladas',
+      'por fecha de cancelación (informativas)',
+      'Folio',
+      'Confirmada',
+      'Cancelada',
+      'Total',
+      'Pagado',
+      'Saldo',
+      'Estado',
+      'A-1',
+      'C-00001',
+      'Este reporte se atribuye al vendedor asignado actualmente a cada venta. Si una venta cambió de vendedor, se muestra bajo el vendedor actual; el historial de reasignaciones no se reconstruye.',
+      'Los importes de pagado y saldo reflejan el estado actual de cada venta, no flujos por fecha de pago.',
+      'Las ventas canceladas se incluyen solo como referencia y no se suman a los totales de ventas confirmadas.',
+    ]) {
+      expect(text).toContain(expected);
+    }
     expect(text).toMatch(/Pagada.*Parcial.*A crédito/s);
     expect(text).not.toMatch(
       /CURRENT_SELLER|CURRENT|confirmedAt|canceledAt|\[from, to\)/,
     );
+  });
+
+  it('prints the seller by name and never a raw UUID', () => {
+    const text = renderText(makeReport());
+
+    expect(text).toContain('Vendedor Uno');
+    expect(text).not.toContain(SELLER_ID);
+    expect(text).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+  });
+
+  it('shows the folio placeholder and the empty-section notices', () => {
+    const withoutFolio = renderText(makeReport([confirmedRow(1, null)]));
+    const empty = renderText(makeReport([], []));
+
+    expect(withoutFolio).toContain('—');
+    expect(empty).toContain('Sin ventas confirmadas en el periodo.');
+    expect(empty).toContain('Sin ventas canceladas en el periodo.');
   });
 
   it('groups money with es-MX separators and two decimals', () => {
@@ -238,6 +328,60 @@ describe('SellerSalesReportA4Document', () => {
     expect(text).toContain(
       'Del 1 de enero de 2026 al 1 de febrero de 2026 (fecha final excluida)',
     );
-    expect(text).toContain('Generado 01 MAR 2026, 06:00');
+    expect(text).toContain('Generado 01 MAR 2026, 06:00 (CDMX)');
+  });
+});
+
+describe('seller report palette (L5)', () => {
+  it('maps the Saldo tone: warning when > 0, success when zero', () => {
+    expect(debtTone(1)).toBe('warning');
+    expect(debtTone(560_000)).toBe('warning');
+    expect(debtTone(0)).toBe('success');
+    expect(A4_COLORS.warning).toBe('#805511');
+    expect(A4_COLORS.success).toBe('#236044');
+  });
+
+  it('colours Saldo cells warning when owed and success when settled', () => {
+    const owed = confirmedRow(1, 'A-1', 'PARTIAL');
+    owed.debtCents = 56_000;
+    const settled = confirmedRow(2, 'A-2', 'PAID');
+    settled.debtCents = 0;
+    const report = makeReport([owed, settled]);
+
+    expect(colorOf(report, '$560.00')).toEqual([A4_COLORS.warning]);
+    expect(colorOf(report, '$0.00')).toEqual([A4_COLORS.success]);
+  });
+
+  it('keeps Total / Pagado in ink and never red on confirmed sales', () => {
+    const report = makeReport([confirmedRow(1, 'A-1', 'PARTIAL')]);
+    const colours = elementsOf(report)
+      .filter((el) => el.type === Text)
+      .map((el) => flatStyle(el.props.style).color);
+
+    expect(colorOf(report, '$100.01')).toEqual([A4_COLORS.ink]);
+    expect(colorOf(report, '$40.00')).toEqual([A4_COLORS.ink]);
+    expect(colours).not.toContain(A4_COLORS.danger);
+  });
+
+  it('uses red only for the cancellation date of canceled sales', () => {
+    const report = makeReport([confirmedRow(1)], [canceledRow(1)]);
+    const red = elementsOf(report).filter(
+      (el) =>
+        el.type === Text &&
+        flatStyle(el.props.style).color === A4_COLORS.danger,
+    );
+
+    expect(red).toHaveLength(1);
+    expect(textOf(red[0].props.children as ReactNode).trim()).toMatch(
+      /^\d{2} \w{3} 2026, \d{2}:\d{2}$/,
+    );
+  });
+
+  it('colours the Saldo pendiente KPI by the same rule', () => {
+    const settled = makeReport();
+    settled.confirmed.summary.outstandingDebtCents = 0;
+
+    expect(colorOf(makeReport(), '$6,000.00')).toEqual([A4_COLORS.warning]);
+    expect(colorOf(settled, '$0.00')).toContain(A4_COLORS.success);
   });
 });
