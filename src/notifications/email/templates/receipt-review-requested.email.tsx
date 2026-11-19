@@ -4,7 +4,8 @@
  *
  * One email per NEW receipt the chatbot uploads. Same HoundFe brand tokens
  * and Spanish copy as the time-off template. It never attaches or links the
- * file: staff open it in the system, behind the review permission.
+ * file: staff open it in the system, behind the review permission. No customer
+ * name or phone (contract §6.3, R10): the order folio identifies the sale.
  */
 import {
   Body,
@@ -44,11 +45,12 @@ const FONT_STACK =
 
 export interface ReceiptReviewRequestedEmailProps {
   saleFolio: string | null;
-  customerName: string | null;
   declaredAmountCents: number | null;
   extractedAmountCents: number | null;
   debtCents: number;
   mismatchFlagged: boolean;
+  /** N18: the receipt destination is not an active business account. */
+  destinationMismatch?: boolean;
   appBaseUrl?: string;
 }
 
@@ -86,17 +88,16 @@ const VALUE_STYLE = {
 
 export function ReceiptReviewRequestedEmail({
   saleFolio,
-  customerName,
   declaredAmountCents,
   extractedAmountCents,
   debtCents,
   mismatchFlagged,
+  destinationMismatch = false,
   appBaseUrl,
 }: ReceiptReviewRequestedEmailProps) {
   const subject = composeSubject(saleFolio);
   const rows: Array<[string, string]> = [
     ['Pedido', saleFolio ?? 'Sin folio'],
-    ['Cliente', customerName ?? 'Sin cliente registrado'],
     ['Monto declarado', formatCents(declaredAmountCents)],
     ['Monto leído del comprobante', formatCents(extractedAmountCents)],
     ['Saldo pendiente del pedido', formatCents(debtCents)],
@@ -200,6 +201,19 @@ export function ReceiptReviewRequestedEmail({
                 >
                   No coincide con el saldo: verifica el monto antes de
                   confirmar.
+                </Text>
+              ) : null}
+              {destinationMismatch ? (
+                <Text
+                  style={{
+                    color: BRAND.alert,
+                    fontSize: '14px',
+                    fontWeight: 700,
+                    margin: mismatchFlagged ? '8px 0 0' : 0,
+                  }}
+                >
+                  ⚠ El destinatario del comprobante no coincide con la cuenta
+                  del negocio: verifica que el pago llegó antes de confirmar.
                 </Text>
               ) : null}
             </Section>

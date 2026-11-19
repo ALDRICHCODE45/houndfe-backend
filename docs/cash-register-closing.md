@@ -226,6 +226,7 @@ enforced separately from holding a permission.
 | `/cash-sessions/:id/close` | `POST` | `create:CashClosing` | Close |
 | `/cash-handovers/:id/receive` | `POST` | `update:CashHandover` | Recipient confirms |
 | `/cash-handovers/custody` | `GET` | `read:CashHandover` | Recipient's pending handovers + eligible FLOAT |
+| `/cash-handovers/recipients?kind=WITHDRAWAL\|FLOAT` | `GET` | `create:CashHandover` | Eligible handover recipients (`feat/cash-redesign-reads`) |
 | `/cash-closings` | `GET` | `read:CashClosing` | Paginated history |
 | `/cash-closings/:id` | `GET` | `read:CashClosing` | Immutable detail |
 | `/cash-closings/:id/pdf` | `GET` | `read:CashClosing` | Frozen receipt |
@@ -259,9 +260,10 @@ permission; releasing a drawer does not require granting receipt permission.
 `POST .../cash-in|cash-out` → `{ id, sessionId, kind, deltaCents, occurredAt }`
 `POST .../handovers` and `/cash-handovers/:id/receive` → `{ id, sessionId, kind, declaredCents, receivedCents, senderUserId, receiverUserId, receiptActorUserId, declaredAt, receivedAt, notes, receiptNotes }`
 `GET /cash-handovers/custody` → `{ pendingHandovers: { items, page, limit, total }, eligibleFloat: { items, page, limit, total } }`
+`GET /cash-handovers/recipients` → `{ items: [{ userId, displayName, roleName }] }` (active sucursal members whose role grants `update:CashHandover`, including `manage:all`; the caller is excluded for `kind=WITHDRAWAL`; sorted by `displayName`; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 `POST .../release-drawer` → `{ sessionId, drawerReleasedAt }`
 `POST .../close` and `GET /cash-closings/:id` → `{ id, sessionId, folio, createdAt, snapshot }`
-`GET /cash-closings` → `{ items: [{ id, sessionId, folio, createdAt }], page, limit, total }`
+`GET /cash-closings` → `{ items: [{ id, sessionId, folio, createdAt, register: { id, name|null }|null, cashier: { userId, displayName|null }|null, differenceCents|null }], page, limit, total }` (`register`/`cashier` are the closed session's, with current names; `differenceCents` is the frozen declared − expected cash difference from the snapshot; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 
 `CashSessionProjection`:
 `{ id, tenantId, registerId, status, cashierUserId, openingCents, frozenAt|null, drawerReleasedAt|null, blind }`
@@ -864,10 +866,14 @@ only `FLOAT` items expose `sourceRegisterId`/`sourceDrawerReleasedAt`.
 
 `{ sessionId, tenantId, registerId, folio, cashierUserId, openingCents,
 expectedCents, declaredCents, verifiedCents|null, verifierUserId|null, channels[],
-handovers[], countedAt, verifiedAt|null, closedAt, closedByUserId, registerName,
-cashierName, verifierName, closedByName, declarationNotes, verificationNotes,
-comparison, closingNotes }`
+handovers[], countedAt, verifiedAt|null, closedAt, closedByUserId, openedAt|null,
+registerName, cashierName, verifierName, closedByName, declarationNotes,
+verificationNotes, comparison, closingNotes }`
 
+`openedAt` is the session's opening time, frozen by CLOSE (cash-redesign-reads
+T2). Snapshots frozen before that do not store it; reads return `openedAt: null`
+for them and never derive it from the live session (the cut is frozen; the stored
+row is not rewritten). The PDF shows "Apertura" only when it is present.
 `countedAt` is the original declaration's timestamp, not a later annotation's.
 `closingNotes` is frozen by CLOSE and consumed directly by the receipt parser.
 
@@ -1021,17 +1027,23 @@ Rules:
   timestamps **with an explicit timezone** (local wall-clock strings are
   rejected; `from` inclusive, `to` exclusive). `GET /cash-sessions` also filters
   by `cashierUserId` (UUID) and accepts `pendingOnly=true|false`
-  (`COUNTING`/`SUBMITTED` only). Unknown query keys are rejected with `400`.
+  (`COUNTING`/`SUBMITTED` only), `status` (any of `OPEN|COUNTING|SUBMITTED|CLOSED`,
+  repeated param or comma list) and `drawerOpen=true|false`
+  (`drawerReleasedAt` null / not null). All filters narrow: `pendingOnly` and
+  `status` intersect. Unknown query keys are rejected with `400`.
 - `GET /cash-handovers/custody` shares the same `page` / `limit` bounds and
   strict unsigned-decimal grammar, but exposes no filters: it is always scoped
   to the authenticated recipient.
 - On the sessions list, `cashierUserId` is applied before permission visibility.
   Without `read:CashSessionAudit`, results remain scoped to the caller: filtering
   by another cashier returns no rows rather than ignoring the filter.
-- The shared closing-list DTO accepts and validates `cashierUserId`, but the
-  closing query does not apply it. Do not use it to filter closing history.
+- `GET /cash-closings` also filters by `cashierUserId`: the closed session's
+  cashier (fixed on `feat/cash-redesign-reads`; earlier builds ignored it).
   Without audit permission, the closings list is scoped to closings closed by
   the caller or belonging to the caller's sessions.
+- Lists are ordered newest first (`openedAt` / `createdAt`), ties by `id`
+  descending. With unconditional grants they filter, count and page in the
+  database; conditional grants keep per-row filtering before the count.
 
 ## Closing PDF
 
@@ -1130,9 +1142,11 @@ bounded independent rechecks, including the follow-up OPEN_SESSION context fix:
 8. Verification and closing require discrepancy explanations for every channel,
    including noncash. The first blind declaration still persists without them.
 
-The release-drawer permission mapping is also aligned. Current session/closing
-lists load tenant-matching rows before permission filtering in memory; large
-histories need performance evaluation before production rollout.
+The release-drawer permission mapping is also aligned. Since
+`feat/cash-redesign-reads`, session/closing lists page and count in the
+database when the caller's cash grants are unconditional; only conditional
+grants (none are emitted by the app today) still load tenant-matching rows and
+filter per row in memory.
 
 ## Verification evidence and limits
 

@@ -137,6 +137,15 @@ enum SaleCancelReason {
   OUT_OF_STOCK
   DUPLICATE_SALE
   OTHER
+  // pay-in-store-pickup / T1 — system-only reason written by the hold
+  // expiry sweep (T2). Never accepted from staff or bot cancel requests.
+  HOLD_EXPIRED
+}
+
+// pay-in-store-pickup / T1 — how the customer said they will pay. Null on
+// every sale that never declared an intent (POS and legacy bot sales).
+enum SalePaymentIntent {
+  IN_STORE
 }
 
 enum SalePaymentMethod {
@@ -244,11 +253,15 @@ enum PaymentMethodCategory {
 // Quotation lifecycle states. Distinct from Sale (which uses
 // DRAFT/CONFIRMED/CANCELED) because a quotation is a pre-sale pricing
 // document — it goes DRAFT → SENT → EXPIRED/CANCELLED, never CONFIRMED.
+// CONVERTED_TO_SALE (quotation-sale-conversion / T1) — terminal: a DRAFT or
+// SENT quotation became a POS DRAFT sale; `Quotation.convertedSaleId` links
+// it. Appended last so every existing row and default keeps its value.
 enum QuotationStatus {
   DRAFT
   SENT
   EXPIRED
   CANCELLED
+  CONVERTED_TO_SALE
 }
 
 // Reason captured when a quotation is cancelled. Mirrors SaleCancelReason
@@ -526,6 +539,29 @@ model Tenant {
   cashClosings  CashClosing[]
   cashCommands  CashCommand[]
 
+  // human-intervention / unit 2 — common chatbot request inbox.
+  chatbotRequests             ChatbotRequest[]
+  chatbotCustomerGroups       ChatbotCustomerGroup[]
+  chatbotRequestFolioCounter  ChatbotRequestFolioCounter?
+  staffCommandReceipts        StaffCommandReceipt[]
+  chatbotBotReceipts          ChatbotBotReceipt[]
+  chatbotFeedItems            ChatbotFeedItem[]
+  chatbotFeedRetention        ChatbotFeedRetention?
+  realtimeEvents              RealtimeEvent[]
+  realtimeEventRetention      RealtimeEventRetention?
+  // human-intervention / unit 9 — conversation mirror and its media.
+  chatbotConversations        ChatbotConversation[]
+  conversationMedia           ConversationMedia[]
+  // human-intervention / unit 11 — live conversation sessions.
+  chatbotLiveSessions         ChatbotLiveSession[]
+  chatbotSessionTemplates     ChatbotSessionTemplate[]
+  scheduledSlotCounters       ScheduledSlotCounter[]
+  // human-intervention / unit 6 — in-app notices.
+  notifications               Notification[]
+  // human-intervention / unit 7a — chatbot attention settings and their audit.
+  chatbotAttentionSettings        ChatbotAttentionSettings?
+  chatbotAttentionSettingsEvents  ChatbotAttentionSettingsEvent[]
+
   @@index([isActive, catalogPublished, name])
       @@map("tenants")
 }
@@ -539,6 +575,10 @@ model ServiceCredential {
   isActive   Boolean   @default(true)
   lastUsedAt DateTime?
   rateLimit  Int       @default(60)
+  // Per-route-class budgets per minute, e.g. {"write": 600} (R2, §10.1). A
+  // missing or invalid class falls back to its default; `rateLimit` stays the
+  // budget of the routes that have no class.
+  rateLimits Json?
   createdAt  DateTime  @default(now())
   revokedAt  DateTime?
 
@@ -1492,6 +1532,18 @@ model Sale {
   globalPriceListId      String?
   priceListExplicitlySet Boolean @default(false)
 
+  // pay-in-store-pickup / T1 — counter-payment hold of a bot PICKUP sale.
+  // `paymentIntent` IN_STORE + `holdExpiresAt` set by the bot route; staff
+  // move the deadline per sale (`holdVersion` is the compare-and-set token).
+  // `holdReminderAt` = expiry − 3 h, null when the hold is 3 h or shorter.
+  // `holdStage`: 0 none, 1 reminded, 2 expired (written by the T2 sweep).
+  // Sales without an intent keep every hold column NULL/0 (no backfill).
+  paymentIntent  SalePaymentIntent?
+  holdExpiresAt  DateTime?
+  holdReminderAt DateTime?
+  holdStage      Int               @default(0) @db.SmallInt
+  holdVersion    Int               @default(0)
+
   // Relations
   tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user               User                  @relation("SaleCashier", fields: [userId], references: [id], onDelete: Restrict)
@@ -1510,6 +1562,11 @@ model Sale {
   promotionVetoes    SalePromotionVeto[]
   promotionOptIns    SalePromotionOptIn[]
   promotionUsages    PromotionUsage[]
+  // quotation-sale-conversion / T1 — back-relation of
+  // `Quotation.convertedSaleId` (the quotation this draft sale came from).
+  sourceQuotation    Quotation?            @relation("QuotationConvertedSale")
+  // pay-in-store-pickup / T3 — sale-level bot feed items (sale.pickup_*).
+  chatbotFeedItems   ChatbotFeedItem[]
       // delivery-routes / WU1 — back-relation for DeliveryRouteStop.sale.
       // onDelete: Restrict on the FK side (design ADR-2) so a Sale cannot be
       // hard-deleted while referenced by any route stop.
@@ -1760,6 +1817,7 @@ model ReceiptEvidence {
   sale        Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
   tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   confirmedBy User?  @relation("ReceiptReviewer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+  chatbotRequest ChatbotRequest?
 
   @@unique([tenantId, saleId, idempotencyKey])
   @@index([tenantId, saleId])
@@ -1904,6 +1962,9 @@ model User {
   cashHandoversCreated    CashHandover[] @relation("CashHandoverCreator")
   cashHandoversReceivedBy CashHandover[] @relation("CashHandoverReceiver")
   cashClosings          CashClosing[]  @relation("CashClosingActor")
+  // human-intervention / unit 6 — own in-app notices and delivery preferences.
+  notifications           Notification[]
+  notificationPreference  NotificationPreference?
 
   @@map("users")
 }
@@ -1943,6 +2004,21 @@ model AuthRateBucket {
 
   @@index([windowStart])
   @@map("auth_rate_buckets")
+}
+
+// Bot route budget (R2, §10.1): one row per (credential, route class), shared
+// by every replica. The window is anchored at its first request and reset in
+// place, like AuthRateBucket. No credential FK: counting must not lock or
+// block `service_credentials`.
+model ServiceRateBucket {
+  credentialId String
+  routeClass   String
+  count        Int
+  windowStart  DateTime @db.Timestamp(3)
+
+  @@id([credentialId, routeClass])
+  @@index([windowStart])
+  @@map("service_rate_buckets")
 }
 
 // ============================================================================
@@ -2048,6 +2124,7 @@ model Customer {
 
   addresses          CustomerAddress[]
   promotionCustomers PromotionCustomer[]
+  chatbotRequests    ChatbotRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2386,12 +2463,21 @@ model Quotation {
   manuallyEnded          Boolean                @default(false)
   customerNotes          String?                @db.VarChar(280)
   taxRate                Float                  @default(0.16)
+  // quotation-sale-conversion / T1 — the POS DRAFT sale created from this
+  // quotation. Unique: one quotation ↔ at most one sale. The status flip to
+  // CONVERTED_TO_SALE and this link are written in ONE row update (CAS), so
+  // the quotation row is the single concurrency anchor. SetNull: discarding
+  // the draft sale leaves the quotation CONVERTED_TO_SALE with a null link,
+  // which the conversion treats as convertible again.
+  convertedSaleId        String?                @unique
+  convertedAt            DateTime?
   tenantId               String
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
   // Relations
   tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  convertedSale   Sale?                     @relation("QuotationConvertedSale", fields: [convertedSaleId], references: [id], onDelete: SetNull)
   seller          User                      @relation("QuotationSeller", fields: [sellerUserId], references: [id], onDelete: Restrict)
   customer        Customer?                 @relation(fields: [customerId], references: [id], onDelete: SetNull)
   globalPriceList GlobalPriceList?          @relation(fields: [globalPriceListId], references: [id], onDelete: SetNull)
@@ -3118,6 +3204,8 @@ model HumanDecision {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  chatbotRequest ChatbotRequest?
+
   @@unique([tenantId, source, sourceRequestId])
   @@unique([tenantId, source, supersedesDecisionId])
   @@index([tenantId, status, createdAt, id])
@@ -3489,6 +3577,7 @@ model DeliveryZoneRequest {
 
   tenant     Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   validation DeliveryZoneValidation? @relation(fields: [validationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  chatbotRequest ChatbotRequest?
 
   @@unique([tenantId, source, sourceRequestId])
   @@index([validationId, status])
@@ -3631,4 +3720,790 @@ model TenantOpeningHours {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_opening_hours")
+}
+
+// human-intervention / unit 7a (contract §5.4, §5.5): one row per tenant with
+// the chatbot attention hours (kept apart from `TenantOpeningHours`: pickup and
+// chat are different schedules), closed dates, SLA minutes per subtype, the
+// receipt close margin and the stored-only scheduling/template fields. No row
+// means the defaults (version 0, `defaultSettings()`). `version` is the CAS of
+// `PUT /chatbot-settings` and the `slaPolicyVersion` stamped on every request
+// deadline computed from it. CHECKs are migration-authoritative.
+model ChatbotAttentionSettings {
+  tenantId                  String                  @id
+  version                   Int                     @default(1)
+  timeZone                  String
+  days                      Json
+  closedDates               String[]
+  // S11: `{ "YYYY-MM-DD": "reason" }`, keys a subset of `closedDates`.
+  closedDateReasons         Json                    @default("{}")
+  slas                      Json
+  windowWarningMinutes      Int
+  templateName              String?
+  templateCostText          String
+  enabledSubtypes           ChatbotRequestSubtype[]
+  receiptCloseMarginMinutes Int
+  // Unit 11 slice 2 (S16 1a): seconds to wait for `session-ack STARTED`
+  // before a claim reverts; CHECK 30..600 (migration-authoritative).
+  startTimeoutSeconds       Int                     @default(120)
+  // Unit 11 slice 2 (S16 8): language code of `template.requested`.
+  templateLanguageCode      String                  @default("es_MX")
+  schedulingEnabled         Boolean
+  slotMinutes               Int
+  slotsOffered              Int
+  maxScheduledPerSlot       Int
+  updatedById               String?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_attention_settings")
+}
+
+// Audit of every settings write (PUT and apply-to-all), one row per tenant
+// and write. `data` holds the changed field names and, for apply-to-all, the
+// source tenant; never customer text.
+model ChatbotAttentionSettingsEvent {
+  id               String   @id @default(uuid())
+  tenantId         String
+  type             String
+  actorUserId      String?
+  actorDisplayName String?
+  fromVersion      Int
+  toVersion        Int
+  data             Json     @default("{}")
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("chatbot_attention_settings_events")
+}
+
+// ============================================================================
+// CHATBOT REQUEST INBOX (human-intervention / unit 2 — contract §2, §6.2, §10.1)
+// ============================================================================
+// One row per human request coming from the bot. It owns *how* a request is
+// handled (inbox status, assignee, deadlines, audit); wrapped legacy tables
+// (`human_decisions`, `delivery_zone_requests`, `receipt_evidences`) stay the
+// source of truth of *what* was decided. Staff commands are a CAS on
+// `version` (R4: never the wrapped row's version). State consistency, the
+// subtype -> wrapped-link mapping, and the partial indexes (open-only sweep,
+// counters, open dedup, closed history) and the keep-forever/append-only
+// triggers are migration-authoritative because
+// Prisma's DSL cannot express them. Actor columns are copied names, not user
+// FKs, so the audit survives user deletion (§6.2). See
+// docs/chatbot-requests-model.md.
+
+enum ChatbotRequestKind {
+  DECISION
+  CLARIFICATION
+  CONVERSATION
+}
+
+enum ChatbotRequestSubtype {
+  RESTOCK
+  EXPIRATION
+  DELIVERY_ZONE
+  TRANSFER_RECEIPT
+  TALK_TO_HUMAN
+  COMPLAINT
+  UNKNOWN_QUESTION
+  DISCOUNT
+}
+
+enum ChatbotRequestStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+}
+
+enum ChatbotRequestCancelReason {
+  CUSTOMER_WITHDREW
+  SUPERSEDED
+  AUTO_RESOLVED
+  STAFF
+}
+
+enum ChatbotRequestStaffCancelReason {
+  DUPLICATE
+  NOT_ACTIONABLE
+  CUSTOMER_UNREACHABLE
+  OTHER
+}
+
+enum ChatbotRequestEventType {
+  CREATED
+  MERGED
+  CLAIMED
+  RELEASED
+  AUTO_RELEASED
+  REASSIGNED
+  RESOLVED
+  REPLIED
+  TEMPLATE_SENT
+  FINISHED
+  CANCELLED
+  RESCHEDULED
+  CUSTOMER_LINKED
+  SLA_MILESTONE
+  DELIVERY_OUTCOME
+}
+
+enum ChatbotRequestActorKind {
+  USER
+  SERVICE
+  SYSTEM
+}
+
+model ChatbotRequest {
+  id       String @id @default(uuid())
+  tenantId String
+  // Per-tenant counter (`chatbot_request_folio_counters`), shown as S-000123.
+  folio    Int
+  version  Int    @default(1)
+
+  kind    ChatbotRequestKind
+  subtype ChatbotRequestSubtype
+  status  ChatbotRequestStatus @default(NEW)
+
+  // Customer: `customerKey` is the canonical E.164 grouping key (R1), or
+  // "unknown:<id>" for legacy rows without a customer. `ambiguousCustomer`
+  // marks a key that matched more than one Customer (customerId stays NULL).
+  customerId        String?
+  phoneCountryCode  String?
+  phone             String?
+  customerKey       String
+  ambiguousCustomer Boolean @default(false)
+  conversationRef   String?
+
+  assigneeUserId      String?
+  assigneeDisplayName String?
+  claimedAt           DateTime?
+
+  // Absolute, recomputable instants (§5.4). `nextSlaCheckAt` drives the sweep
+  // and is NULL once the request is closed.
+  claimDeadlineAt   DateTime?
+  resolveDeadlineAt DateTime?
+  overdueAt         DateTime?
+  slaPolicyVersion  Int?
+  nextSlaCheckAt    DateTime?
+
+  // `whatsappWindowClosesAt` is normally `lastCustomerMessageAt` + 24 h but
+  // stores whatever Meta reports; the CHECK only keeps both NULL or both set.
+  lastCustomerMessageAt   DateTime?
+  whatsappWindowClosesAt  DateTime?
+  scheduledFor            DateTime?
+  requiresTemplateAtStart Boolean   @default(false)
+  needsReschedule         Boolean   @default(false)
+  // Why `needsReschedule` is set: CLOSED_DATE | HOURS_CHANGED (CHECK in the
+  // migration, written and cleared together with the flag); NULL when not flagged.
+  needsRescheduleReason   String?
+  // Unit 14 (§4.9): the scheduled-conversation sweep's durable cursor. Stage 0 =
+  // the reminder is due at `scheduleDueAt` (scheduledFor - 10 min), 1 = the
+  // "solicitud nueva" notice is due (scheduledFor), 2 = nothing left (due NULL).
+  // Migration-only partial index `chatbot_requests_schedule_due_idx`
+  // ("scheduleDueAt") WHERE "scheduleDueAt" IS NOT NULL (the sweep reads only
+  // due rows), and the partial unique `chatbot_requests_open_scheduled_uq`
+  // ("tenantId", "customerKey", "subtype") WHERE "scheduledFor" IS NOT NULL AND
+  // status IN ('NEW','IN_PROGRESS') (one open scheduled request per customer
+  // and subtype, Q4).
+  // S20 (6): monotonic per request; 1 at booking, +1 on every reschedule and on
+  // the cancel of a scheduled request. Carried by both feed items and answers.
+  scheduleVersion         Int       @default(0)
+  scheduleStage           Int       @default(0) @db.SmallInt
+  scheduleDueAt           DateTime?
+
+  // Bot-written, untrusted plain text (§6.1).
+  summary  String  @db.VarChar(140)
+  needs    String? @db.VarChar(1000)
+  context  Json?
+  dedupKey String?
+
+  // Exactly the link its subtype requires (CHECK `wrapped_link`).
+  humanDecisionId       String? @unique
+  deliveryZoneRequestId String? @unique
+  receiptEvidenceId     String? @unique
+
+  // A staff clarification reply stores `{action: 'REPLY', replyId, text}` here
+  // (unit 10); migration-only unique index `chatbot_requests_reply_id_uq` on
+  // ("tenantId", resolution->>'replyId') WHERE that is not null (20261112050000).
+  resolution            Json?
+  resolvedAt            DateTime?
+  resolvedByActorId     String?
+  resolvedByDisplayName String?
+  cancelledAt           DateTime?
+  cancelReason          ChatbotRequestCancelReason?
+  staffCancelReason     ChatbotRequestStaffCancelReason?
+  // `resolvedAt` or `cancelledAt` (CHECK), for the history list.
+  closedAt              DateTime?
+
+  // Idempotent intake (same pattern as human_decisions). Wrapper/backfill rows
+  // have no credential or bot hash.
+  source                String
+  sourceRequestId       String
+  canonicalRequestHash  String?
+  submittedCredentialId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  customer            Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  // NO ACTION: deleting a wrapped row alone must not erase the request and
+  // its audit, while a tenant cascade still removes both in one statement.
+  humanDecision       HumanDecision?       @relation(fields: [humanDecisionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveryZoneRequest DeliveryZoneRequest? @relation(fields: [deliveryZoneRequestId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  receiptEvidence     ReceiptEvidence?     @relation(fields: [receiptEvidenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  events              ChatbotRequestEvent[]
+  feedItems           ChatbotFeedItem[]
+  liveSessions        ChatbotLiveSession[]
+  sessionTemplates    ChatbotSessionTemplate[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, folio])
+  @@unique([tenantId, source, sourceRequestId])
+  @@index([tenantId, customerKey, status])
+  @@index([customerId])
+  // §3.8 history filters; the main history order index is partial (migration).
+  @@index([tenantId, subtype, closedAt(sort: Desc)])
+  @@index([tenantId, resolvedByActorId, closedAt(sort: Desc)])
+  // Migration-only partial index (20261112060000_chatbot_requests_counts_index):
+  // `chatbot_requests_open_unassigned_idx` ("tenantId") WHERE status IN ('NEW',
+  // 'IN_PROGRESS') AND "assigneeUserId" IS NULL — the index-only scan behind the
+  // inbox `counts.unassigned` subquery (its predicate must stay textually the
+  // store's OPEN fragment plus `assigneeUserId IS NULL`).
+  @@map("chatbot_requests")
+}
+
+// Append-only audit (§6.2): no `updatedAt`. The migration trigger
+// `chatbot_request_events_append_only` rejects UPDATE and direct DELETE; only
+// the tenant cascade removes rows.
+model ChatbotRequestEvent {
+  id               String                  @id @default(uuid())
+  tenantId         String
+  requestId        String
+  type             ChatbotRequestEventType
+  actorKind        ChatbotRequestActorKind
+  actorId          String?
+  actorDisplayName String?
+  fromStatus       ChatbotRequestStatus?
+  toStatus         ChatbotRequestStatus?
+  version          Int
+  // Small and never customer text (§12.6).
+  data             Json                    @default("{}")
+  createdAt        DateTime                @default(now())
+
+  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Migration-only (20261111070000_chatbot_sla_sweep; Prisma's DSL cannot express
+  // a partial expression index): `chatbot_request_events_sla_milestone_uq`, UNIQUE
+  // ("tenantId", "requestId", data->>'clock', data->>'milestone', data->>'cycle')
+  // WHERE "type" = 'SLA_MILESTONE'. It is the durable "milestone reached once" the
+  // SLA sweep inserts against with ON CONFLICT DO NOTHING.
+  @@index([tenantId, requestId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("chatbot_request_events")
+}
+
+// Denormalized inbox group (§10.1): one row per customer with open requests,
+// written in the same transaction as every command so the grouped inbox reads
+// without GROUP BY. The row is deleted when `openCount` reaches 0 (CHECK > 0).
+model ChatbotCustomerGroup {
+  tenantId     String
+  customerKey  String
+  mostUrgentAt DateTime?
+  openCount    Int
+  hasOverdue   Boolean   @default(false)
+  updatedAt    DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, customerKey])
+  @@index([tenantId, mostUrgentAt, customerKey])
+  @@map("chatbot_customer_groups")
+}
+
+model ChatbotRequestFolioCounter {
+  tenantId   String   @id
+  lastNumber Int      @default(0)
+  updatedAt  DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_request_folio_counters")
+}
+
+// Staff command idempotency (§6.5, §12.12): one row per `(tenant, actor,
+// Idempotency-Key)`. Same `commandHash` replays `responseSnapshot`; another
+// hash is 409 IDEMPOTENCY_CONFLICT. Only successful commands are stored. Kept
+// like `CashCommand`; `(tenantId, createdAt)` serves a future purge.
+model StaffCommandReceipt {
+  tenantId         String
+  actorId          String
+  idempotencyKey   String
+  commandHash      String
+  responseSnapshot Json
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, actorId, idempotencyKey])
+  @@index([tenantId, createdAt])
+  @@map("staff_command_receipts")
+}
+
+// Bot idempotency receipts (unit 5, §3.1, §3.2, §3.4): one row per
+// `(tenant, kind, Idempotency-Key)` for the bot writes that leave no request
+// row of their own to replay from: a create that MERGED into an open request,
+// and every customer cancel. Same `commandHash` replays `responseSnapshot`;
+// another hash is 409 IDEMPOTENCY_CONFLICT. Only successful writes are stored.
+model ChatbotBotReceipt {
+  tenantId         String
+  kind             String
+  idempotencyKey   String
+  commandHash      String
+  requestId        String?
+  responseSnapshot Json
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, kind, idempotencyKey])
+  @@index([tenantId, createdAt])
+  @@map("chatbot_bot_receipts")
+}
+
+// Bot feed (unit 5, slice 5b; contract §3.3): what the chatbot pulls with a
+// cursor. `cursor` is a global bigserial, so it only orders within a tenant;
+// enqueuers hold a per-tenant advisory lock from the insert to the commit, so
+// within a tenant cursor order is commit order and a reader never skips an
+// item. `ackedAt` is set only by a terminal outcome: DEFERRED_WINDOW_CLOSED and
+// DEFERRED_HUMAN_SESSION record `outcome` and leave the item pending.
+// `attemptId` + `evidenceHash` are the idempotency identity of the last
+// outcome. Retention: 30 days.
+model ChatbotFeedItem {
+  cursor            BigInt    @id @default(autoincrement())
+  tenantId          String
+  deliveryId        String    @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // Exactly one of `requestId` / `saleId` is set (CHECK
+  // `chatbot_feed_items_subject_chk`, migration-only): request items, or the
+  // sale-level items of a pay-in-store hold (pay-in-store-pickup / T3).
+  requestId         String?
+  saleId            String?
+  type              String
+  conversationRef   String?
+  payload           Json
+  createdAt         DateTime  @default(now())
+  ackedAt           DateTime?
+  outcome           String?
+  attemptId         String?
+  evidenceHash      String?
+  attemptedAt       DateTime?
+  providerMessageId String?
+
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request ChatbotRequest? @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  // Tenant-consistent: the item's tenant must own the sale.
+  sale    Sale?           @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Migration-only (20261111070000_chatbot_sla_sweep; partial index, not
+  // expressible in Prisma's DSL): `chatbot_feed_items_overdue_notice_uq`, UNIQUE
+  // ("tenantId", "requestId") WHERE "type" = 'request.overdue_notice' — at most one
+  // overdue notice per request; the sweep inserts with ON CONFLICT DO NOTHING.
+  // Migration-only (20261112050000_clarification_replies):
+  // `chatbot_feed_items_clarification_answer_uq`, UNIQUE ("tenantId", "requestId")
+  // WHERE "type" = 'request.answered' AND payload->>'kind' = 'CLARIFICATION' — at
+  // most one staff clarification answer per request (unit 10).
+  // Migration-only (20261118020000_sale_feed_items):
+  // `chatbot_feed_items_sale_hold_uq`, UNIQUE ("tenantId", "saleId", "type",
+  // (payload->>'holdVersion')) WHERE "saleId" IS NOT NULL — one
+  // `sale.pickup_*` item per sale, type and hold version.
+  @@index([tenantId, cursor])
+  @@index([tenantId, requestId])
+  @@index([createdAt])
+  @@map("chatbot_feed_items")
+}
+
+// Highest cursor the retention purge removed for a tenant: a cursor below it
+// may have skipped items, so the feed answers 410 CURSOR_EXPIRED.
+model ChatbotFeedRetention {
+  tenantId            String @id
+  purgedThroughCursor BigInt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chatbot_feed_retention")
+}
+
+// ============================================================================
+// NOTIFICATIONS (human-intervention / unit 6 — contract §5.1, §5.2, §10.1 R3/R8)
+// ============================================================================
+// In-app notices of the chatbot request inbox, one row per (user, event).
+// Recipients come from permissions, never from `NotificationSettings`, so this
+// module does not depend on its master switch (R8). `payload` is small and
+// never carries customer data: folio and subtype only (§6.3). `dedupKey` makes
+// a producer retry or a sweep re-run idempotent per user. `requestId` is a
+// plain column (no FK): rows are retained 90 days and the request is kept
+// forever, and the FK would add a lock on `chatbot_requests`. The partial
+// "unread" index is migration-authoritative (Prisma cannot express it). See
+// docs/notifications-model.md.
+model Notification {
+  id        String    @id @default(uuid())
+  tenantId  String
+  userId    String
+  type      String
+  requestId String?
+  payload   Json      @default("{}")
+  dedupKey  String?
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, userId, dedupKey])
+  @@index([tenantId, userId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// Per-person delivery preferences; they follow the person across tenants. No
+// row means the defaults (email and sound on). In-app notices cannot be turned
+// off (design §3).
+model NotificationPreference {
+  userId       String   @id
+  emailEnabled Boolean  @default(true)
+  soundEnabled Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("notification_preferences")
+}
+
+// ============================================================================
+// REALTIME (human-intervention / unit 8 — contract §5.3, §10.1 R5/R6/R7/R12)
+// ============================================================================
+// Durable, tenant-scoped log behind `GET /realtime/stream` (SSE). `id` is the
+// replay cursor (the SSE `id:` and `Last-Event-ID`). Every writer takes the
+// per-tenant advisory lock `realtime:<tenantId>` before the insert and holds it
+// to the commit, so within a tenant id order is commit order and a reader that
+// saw id N never skips an id below it. Request events are written by the
+// DEFERRED constraint trigger `chatbot_request_events_realtime` on
+// `chatbot_request_events` (so the event commits with the change that caused it
+// and the lock is the last one a transaction takes); notification events are
+// written by the notifications code. `userId` NULL = everyone with
+// `read:ChatbotRequest`; otherwise only that person. `payload` holds ids and
+// numbers only (never customer data): the row each recipient sees is built at
+// delivery time. Retention 24 h (the purge raises `RealtimeEventRetention`).
+// The partial index `realtime_events_user_idx` (tenantId, userId, id) WHERE
+// "userId" IS NOT NULL is migration-authoritative (Prisma cannot express it).
+// Read and written with raw SQL naming `tenantId` (system flows, root client).
+// Both models are registered in TENANT_SCOPED_MODELS as defense in depth (a
+// stray read through TenantPrismaService is tenant-filtered, not fail-open).
+model RealtimeEvent {
+  id        BigInt   @id @default(autoincrement())
+  tenantId  String
+  userId    String?
+  type      String
+  requestId String?
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([tenantId, id])
+  @@index([createdAt])
+  @@map("realtime_events")
+}
+
+// Highest id the retention purge removed for a tenant: a `Last-Event-ID` below
+// it may have skipped events, so the stream answers `event: resync`.
+model RealtimeEventRetention {
+  tenantId        String @id
+  purgedThroughId BigInt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("realtime_event_retention")
+}
+
+// ============================================================================
+// CONVERSATION MIRROR (human-intervention / unit 9 — contract §3.6, §6.2, §12.5)
+// ============================================================================
+// A 12-month copy of what the customer and the bot said, so staff read the
+// context of a request. Linked to requests by `conversationRef`
+// (`ChatbotRequest.conversationRef`, the bot's own `wa:<wa_id>`), never by a
+// foreign key: a conversation can exist without a request and outlive any of
+// them. `nextSeq` is the per-conversation counter (`UPDATE … RETURNING` inside
+// the insert transaction, so `seq` is monotonic however many replicas write and
+// the bot's clock is display-only). `mode` and `handoffEpoch` are the live-
+// session state that unit 11 drives; nothing in unit 9 changes them. The
+// conversation row is deleted by the retention purge once it has no messages.
+// `customerKey` derives from the `wa:` id (R1) and never leaves the module.
+model ChatbotConversation {
+  id                    String           @id @default(uuid())
+  tenantId              String
+  conversationRef       String           @db.VarChar(200)
+  customerKey           String?
+  lastCustomerMessageAt DateTime?
+  // S16 4: Meta's own verdict that the 24 h window is closed (error 131047 or a
+  // DEFERRED_WINDOW_CLOSED outcome), the instant it was reported. Only moves
+  // forward; a customer message newer than it reopens the window. Kept on the
+  // chat row so the statuses path never locks the request row.
+  windowClosedAt        DateTime?
+  mode                  ConversationMode @default(BOT)
+  handoffEpoch          Int              @default(0)
+  nextSeq               Int              @default(1)
+  // S12: the highest `seq` any staff member has been shown through the
+  // conversation read, and when that last moved. `unreadCustomerMessages` of a
+  // request row = CUSTOMER messages of its chat with seq > lastStaffReadSeq.
+  // Migration-only: partial index conversation_messages_customer_seq_idx.
+  lastStaffReadSeq      Int              @default(0)
+  lastStaffReadAt       DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  messages     ConversationMessage[]
+  liveSessions ChatbotLiveSession[]
+
+  @@unique([tenantId, conversationRef])
+  @@unique([tenantId, id])
+  // A receipt request finds its customer's chat by phone key (no ref upload).
+  @@index([tenantId, customerKey])
+  @@map("chatbot_conversations")
+}
+
+enum ConversationMode {
+  BOT
+  HUMAN
+}
+
+enum ConversationMessageDirection {
+  IN
+  OUT
+}
+
+enum ConversationMessageAuthor {
+  CUSTOMER
+  BOT
+  STAFF
+  SYSTEM
+}
+
+enum ConversationMessageType {
+  TEXT
+  IMAGE
+  STICKER
+  DOCUMENT
+  AUDIO
+  TEMPLATE
+  SYSTEM
+  UNSUPPORTED
+}
+
+enum ConversationDeliveryStatus {
+  QUEUED
+  DEFERRED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  UNKNOWN
+}
+
+// Immutable (§6.2): the migration trigger `conversation_messages_immutable`
+// rejects every UPDATE except a forward `deliveryStatus` move, and every DELETE
+// except the retention purge (`houndfe.conversation_retention = 'on'` and
+// `purgeAfter < now()`) and the tenant cascade. A correction is a new message.
+// `waMessageId` and `clientMessageId` are unique per tenant (NULLs are
+// distinct). `staffUserId` is a plain column (no FK): the author survives the
+// user. `providerTimestamp` is Meta's clock, `observedAt` the bot's, `receivedAt`
+// ours; the order is always `seq`. `purgeAfter` = `receivedAt` + 12 months.
+// Migration-only: the partial index `conversation_messages_media_idx`
+// (tenantId, mediaId) WHERE mediaId IS NOT NULL, and the CHECKs.
+model ConversationMessage {
+  id                String                       @id @default(uuid())
+  tenantId          String
+  conversationId    String
+  seq               Int
+  direction         ConversationMessageDirection
+  author            ConversationMessageAuthor
+  staffUserId       String?
+  waMessageId       String?                      @db.VarChar(255)
+  clientMessageId   String?
+  type              ConversationMessageType
+  text              String?                      @db.VarChar(4096)
+  mediaId           String?
+  providerTimestamp DateTime?
+  observedAt        DateTime?
+  receivedAt        DateTime                     @default(now())
+  deliveryStatus    ConversationDeliveryStatus?
+  purgeAfter        DateTime
+
+  conversation ChatbotConversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([conversationId, seq])
+  @@unique([tenantId, waMessageId])
+  @@unique([tenantId, clientMessageId])
+  @@index([purgeAfter])
+  @@map("conversation_messages")
+}
+
+// A private object in Spaces (`conversation-media/<tenantId>/<id>.<ext>`). The
+// key is persisted and never returned: staff read it through the authenticated
+// proxy. `idempotencyKey` makes the bot's upload retry-safe (same key + same
+// `sha256` = same media). Retention: `purgeAfter` = `createdAt` + 12 months; the
+// purge deletes the object, sets `purgedAt` and clears `storageKey`; a failed
+// delete bumps `purgeAttempts` and is retried. `purgeLeaseUntil` is the claim of
+// the replica that is purging the row. The row itself goes once purged and no
+// message points at it. Migration-only: the partial index
+// `conversation_media_due_idx` (purgeAfter) WHERE purgedAt IS NULL.
+model ConversationMedia {
+  id               String    @id @default(uuid())
+  tenantId         String
+  storageKey       String?
+  mimeType         String
+  sizeBytes        Int
+  sha256           String    @db.VarChar(64)
+  idempotencyKey   String
+  createdAt        DateTime  @default(now())
+  purgeAfter       DateTime
+  purgedAt         DateTime?
+  purgeAttempts    Int       @default(0)
+  lastPurgeErrorAt DateTime?
+  purgeLeaseUntil  DateTime?
+  // Unit 11 T11c: staff uploads only (NULL for the bot's customer media). The
+  // request and the user that uploaded the file; a staff message may carry only
+  // media of its own request and sender. `filename` is sanitized (≤ 120).
+  requestId        String?
+  uploadedByUserId String?
+  filename         String?   @db.VarChar(120)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, idempotencyKey])
+  @@map("conversation_media")
+}
+
+// S2: every object the media upload is about to write (UPLOAD) and every object
+// whose media row was deleted while it still owned one (ROW_DELETED, written by
+// the trigger `conversation_media_tombstone`, e.g. a tenant deletion). The row
+// goes only after the object is deleted or a media row owns it, so a crash or a
+// failed delete can never leave a file nobody will purge. No relation to Tenant
+// on purpose: it must outlive the tenant. Accessed with raw SQL only.
+model ConversationMediaIntent {
+  id          String    @id
+  tenantId    String
+  storageKey  String
+  reason      String
+  createdAt   DateTime  @default(now())
+  dueAt       DateTime
+  attempts    Int       @default(0)
+  lastErrorAt DateTime?
+  leaseUntil  DateTime?
+
+  @@index([dueAt])
+  @@map("conversation_media_intents")
+}
+
+// S2: cursor of the bucket sweep (objects under `conversation-media/` that no
+// media row and no intent own). One row, id `conversation-media`.
+model ConversationMediaOrphanSweep {
+  id         String    @id
+  cursor     String?
+  leaseUntil DateTime?
+  updatedAt  DateTime  @default(now())
+
+  @@map("conversation_media_orphan_sweep")
+}
+
+// ============================================================================
+// LIVE CONVERSATION (human-intervention / unit 11 — contract §4, §12.10, §12.15)
+// ============================================================================
+// One row per time a conversation goes to a human (one per `handoffEpoch`;
+// epochs are never reused). `state` STARTING -> ACTIVE -> ENDING -> ENDED, or
+// STARTING -> ENDED when the start reverts (`endReason` START_TIMEOUT). The
+// request-level `WAITING` state of §4.2 is derived: an open request whose
+// latest session ENDED. `startSeq` is the conversation's `nextSeq` at the
+// claim: the first message an attendee without `read:ChatbotConversation` may
+// read. Migration-only: CHECK on `state`/`endReason`, the partial unique index
+// `chatbot_live_sessions_one_live_uq` (one non-ENDED session per conversation),
+// and the three partial sweep indexes. The one live session is also what
+// serializes a second claim on another request of the same chat.
+model ChatbotLiveSession {
+  id                  String    @id @default(uuid())
+  tenantId            String
+  requestId           String
+  conversationId      String
+  epoch               Int
+  state               String
+  endReason           String?
+  staffUserId         String
+  startSeq            Int
+  startedAt           DateTime  @default(now())
+  // S16 1a: `startedAt + the tenant's startTimeoutSeconds`, snapshotted at the
+  // claim. NULL (created before slice 2) means `startedAt + 120 s`.
+  startDeadlineAt     DateTime?
+  activeAt            DateTime?
+  endingAt            DateTime?
+  endedAt             DateTime?
+  lastStaffActivityAt DateTime  @default(now())
+  // T11d (§4.6): written only by the live session sweep. The customer message
+  // (its instant) the "customer wrote" / "unanswered" notices were issued for,
+  // and the unanswered level already issued for it (0, 5 or 15; CHECK in the
+  // migration 20261113030000_live_conversation_notices).
+  customerNoticeAt    DateTime?
+  unansweredLevel     Int       @default(0) @db.SmallInt
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request      ChatbotRequest      @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  conversation ChatbotConversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, conversationId, epoch])
+  @@unique([tenantId, id])
+  @@index([tenantId, requestId, epoch(sort: Desc)])
+  @@map("chatbot_live_sessions")
+}
+
+// The paid template (§4.5): at most one per `(request, closed window)`, because
+// it costs money. `windowClosedAt` is the instant the window closed when the
+// template was requested. A template Meta refused (message FAILED) may be
+// retried: the command replaces `messageId` on the same row.
+model ChatbotSessionTemplate {
+  id             String   @id @default(uuid())
+  tenantId       String
+  requestId      String
+  sessionId      String
+  windowClosedAt DateTime
+  messageId      String
+  createdAt      DateTime @default(now())
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request ChatbotRequest @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([tenantId, requestId, windowClosedAt])
+  @@map("chatbot_session_templates")
+}
+
+// Unit 14 (§4.9, §10.1 "Agenda"): one row per `(tenant, block start)` that was
+// ever booked. `booked` is the number of non-cancelled requests scheduled at
+// `startsAt`, written ONLY by `INSERT … ON CONFLICT DO UPDATE … WHERE booked <
+// max` (the row lock serializes the last seat) and released on cancel and on a
+// move. The primary key serves the slot listing (a range read of full blocks).
+model ScheduledSlotCounter {
+  tenantId String
+  startsAt DateTime
+  booked   Int      @default(0)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([tenantId, startsAt])
+  @@map("scheduled_slot_counters")
 }

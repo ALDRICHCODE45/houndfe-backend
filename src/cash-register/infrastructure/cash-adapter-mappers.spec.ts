@@ -155,7 +155,10 @@ describe('cash-adapter-mappers — row to document', () => {
   });
 
   it('Given a closing row, when mapping, then the snapshot is embedded untouched', () => {
-    const snapshot = { cashExpectedCents: 100 };
+    const snapshot = {
+      cashExpectedCents: 100,
+      openedAt: '2025-01-01T08:00:00.000Z',
+    };
     expect(closingDocument(closingRow(), snapshot)).toEqual({
       id: 'closing-1',
       sessionId: 'session-1',
@@ -163,6 +166,14 @@ describe('cash-adapter-mappers — row to document', () => {
       createdAt: '2025-01-01T14:00:00.000Z',
       snapshot,
     });
+  });
+
+  it('Given a snapshot frozen before openedAt existed, when mapping, then openedAt reads as null without mutating it', () => {
+    const snapshot = { cashExpectedCents: 100 };
+    const doc = closingDocument(closingRow(), snapshot);
+
+    expect(doc.snapshot).toEqual({ cashExpectedCents: 100, openedAt: null });
+    expect(snapshot).toEqual({ cashExpectedCents: 100 });
   });
 
   it('Given a handover row, when mapping, then sender/receiver/receipt actors are explicit', () => {

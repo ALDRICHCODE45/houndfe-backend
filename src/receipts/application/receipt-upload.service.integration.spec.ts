@@ -34,17 +34,21 @@ class FakeStorage implements ReceiptStoragePort {
   readonly deleted: string[] = [];
   failNext = false;
   failDeletes = false;
+  /** Runs once before the next put (a concurrent writer committing). */
+  beforeNextPut: (() => Promise<unknown>) | null = null;
 
-  putPrivate(input: { key: string; bytes: Buffer; mimeType: string }) {
+  async putPrivate(input: { key: string; bytes: Buffer; mimeType: string }) {
+    const before = this.beforeNextPut;
+    this.beforeNextPut = null;
+    if (before) await before();
     if (this.failNext) {
       this.failNext = false;
-      return Promise.reject(new Error('spaces down'));
+      throw new Error('spaces down');
     }
     this.objects.set(input.key, {
       bytes: input.bytes,
       mimeType: input.mimeType,
     });
-    return Promise.resolve();
   }
 
   delete(key: string) {
@@ -550,6 +554,86 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
     expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
   });
 
+  describe('race with the pay-in-store hold sweep (pay-in-store-pickup / T2, S4)', () => {
+    /** What the sweep's expiry writes on the sale (cancel HOLD_EXPIRED). */
+    const sweepCancels = (saleId: string) =>
+      prisma.sale.update({
+        where: { id: saleId },
+        data: {
+          status: 'CANCELED',
+          cancelReason: 'HOLD_EXPIRED',
+          canceledAt: new Date(),
+          canceledByUserId: 'system',
+          debtCents: 0,
+        },
+      });
+
+    it('sweep cancels after the unlocked check: the upload is rejected and no receipt row is written', async () => {
+      const saleId = await createSale();
+      // The sweep commits its cancel between the upload's first (unlocked)
+      // sale check and its insert: here, while the original is being stored.
+      storage.beforeNextPut = () => sweepCancels(saleId);
+      expect(
+        await rejection(
+          service.upload({
+            saleId,
+            idempotencyKey: `wamid-${randomUUID()}`,
+            file: PNG_BYTES,
+            fields: {},
+          }),
+        ),
+      ).toBe('SALE_NOT_PAYABLE');
+      expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+      // The stored original of the rejected upload is not left behind.
+      expect(
+        [...storage.objects.keys()].some((key) => key.includes(saleId)),
+      ).toBe(false);
+    });
+
+    it('waits for a sweep holding the sale row and re-checks under the lock (legacy attachment)', async () => {
+      const saleId = await createSale();
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const sweep = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT id FROM sales WHERE id = ${saleId} FOR UPDATE`;
+          locked();
+          await released;
+          await tx.sale.update({
+            where: { id: saleId },
+            data: {
+              status: 'CANCELED',
+              cancelReason: 'HOLD_EXPIRED',
+              canceledAt: new Date(),
+              debtCents: 0,
+            },
+          });
+        },
+        { timeout: 30_000 },
+      );
+      await isLocked;
+      const upload = rejection(
+        inRequest(() =>
+          service.attachLegacyUrl({
+            saleId,
+            mediaUrl: 'https://example.com/late.jpg',
+            declaredAmountCents: null,
+            declaredDate: null,
+            declaredReference: null,
+          }),
+        ),
+      );
+      // Give the upload time to pass its unlocked check and block on the row.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      release();
+      await sweep;
+      expect(await upload).toBe('SALE_NOT_PAYABLE');
+      expect(await prisma.receiptEvidence.count({ where: { saleId } })).toBe(0);
+    });
+  });
+
   it('keeps legacy mediaUrl attachments working with the same sale checks', async () => {
     const saleId = await createSale();
     const legacy = await service.attachLegacyUrl({
@@ -586,6 +670,146 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
         }),
       ),
     ).toBe('SALE_ALREADY_PAID');
+  });
+
+  describe('destination check (N18)', () => {
+    // S1: the business account, verbatim, plus a second active account.
+    const MERCADO_PAGO = {
+      bankName: 'Mercado Pago W',
+      beneficiary: 'Diana berenice Vazquez',
+      clabe: '722969010558166876',
+      accountNumber: '5428785112374268',
+    };
+    const SECOND = {
+      bankName: 'BBVA',
+      beneficiary: 'Tienda Houndfe SA de CV',
+      clabe: '012180001234567891',
+      accountNumber: '0123456791',
+    };
+
+    afterEach(async () => {
+      await prisma.paymentDetail.deleteMany({
+        where: { tenantId: { in: [tenantId, otherTenantId] } },
+      });
+    });
+
+    async function uploadWith(extracted: Record<string, unknown>) {
+      const saleId = await createSale({ debtCents: 25_000 });
+      const response = await service.upload({
+        saleId,
+        idempotencyKey: `wamid-${randomUUID()}`,
+        file: PNG_BYTES,
+        fields: { extracted: JSON.stringify(extracted) },
+      });
+      return prisma.receiptEvidence.findUniqueOrThrow({
+        where: { id: response.receiptId },
+      });
+    }
+
+    it('persists mismatch for S1 against every active account, keeping flagged amount-only', async () => {
+      await prisma.paymentDetail.createMany({
+        data: [
+          { tenantId, ...MERCADO_PAGO },
+          { tenantId, ...SECOND },
+          // Inactive and foreign accounts never count.
+          {
+            tenantId,
+            bankName: 'Old',
+            beneficiary: 'Abril Alejandra Vazquez Ramos',
+            clabe: '000000000000009616',
+            accountNumber: '9616',
+            isActive: false,
+          },
+          {
+            tenantId: otherTenantId,
+            bankName: 'Other',
+            beneficiary: 'Abril Alejandra Vazquez Ramos',
+            clabe: '111111111111119616',
+            accountNumber: '9616',
+          },
+        ],
+      });
+
+      const row = await uploadWith({
+        amountCents: 25_000,
+        bank: 'BBVA MEXICO',
+        destinationBank: 'BBVA MEXICO',
+        destinationName: 'Abril Alejandra Vazquez Ramos',
+        destinationAccountLast4: '9616',
+      });
+
+      expect(row.extracted).toMatchObject({
+        destinationName: 'Abril Alejandra Vazquez Ramos',
+        destinationAccountLast4: '9616',
+      });
+      expect(row.mismatch).toEqual({
+        debtCents: 25_000,
+        extractedDiffCents: 0,
+        flagged: false,
+        destinationCheck: 'mismatch',
+      });
+    });
+
+    it('persists match when last4 belongs to any active account, and by name without last4', async () => {
+      await prisma.paymentDetail.createMany({
+        data: [
+          { tenantId, ...MERCADO_PAGO },
+          { tenantId, ...SECOND },
+        ],
+      });
+
+      const byLast4 = await uploadWith({ destinationAccountLast4: '6791' });
+      const byName = await uploadWith({
+        destinationName: 'Diana Berenice Vázquez',
+      });
+
+      expect(byLast4.mismatch).toMatchObject({ destinationCheck: 'match' });
+      expect(byName.mismatch).toMatchObject({ destinationCheck: 'match' });
+    });
+
+    it('persists unknown when the tenant has no active account', async () => {
+      await prisma.paymentDetail.create({
+        data: { tenantId: otherTenantId, ...MERCADO_PAGO },
+      });
+
+      const row = await uploadWith({ destinationAccountLast4: '6876' });
+
+      expect(row.mismatch).toMatchObject({ destinationCheck: 'unknown' });
+    });
+
+    it('keeps the previous mismatch shape when no destination field is sent', async () => {
+      await prisma.paymentDetail.create({
+        data: { tenantId, ...MERCADO_PAGO },
+      });
+
+      const row = await uploadWith({
+        amountCents: 25_000,
+        bank: 'BBVA',
+        destinationBank: 'Mercado Pago',
+      });
+
+      expect(row.mismatch).toEqual({
+        debtCents: 25_000,
+        extractedDiffCents: 0,
+        flagged: false,
+      });
+    });
+
+    it('does not recompute when the business account changes later', async () => {
+      await prisma.paymentDetail.create({
+        data: { tenantId, ...MERCADO_PAGO },
+      });
+      const row = await uploadWith({ destinationAccountLast4: '6876' });
+      await prisma.paymentDetail.updateMany({
+        where: { tenantId },
+        data: { isActive: false },
+      });
+
+      const again = await prisma.receiptEvidence.findUniqueOrThrow({
+        where: { id: row.id },
+      });
+      expect(again.mismatch).toMatchObject({ destinationCheck: 'match' });
+    });
   });
 
   it('enforces that every receipt has a URL or a storage key', async () => {
@@ -654,16 +878,50 @@ describeIfDb('ReceiptUploadService (Integration)', () => {
           receiptId: first.receiptId,
           saleId,
           saleFolio: 'V-0042',
-          customerName: 'Ana López',
           declaredAmountCents: 4000,
           extractedAmountCents: 10_000,
           debtCents: 10_000,
           mismatchFlagged: true,
+          destinationCheck: 'unknown',
           mimeType: 'application/pdf',
         },
       });
-      // Never the storage key or any file reference.
+      // Never the storage key or any file reference, and no customer name
+      // (R10, contract §6.3).
       expect(JSON.stringify(rows[0].payload)).not.toContain('receipts/');
+      expect(rows[0].payload).not.toHaveProperty('customerName');
+    });
+
+    it('carries the destination check in the payload (S5)', async () => {
+      await openGate(['RECEIPT_REVIEW_REQUESTED']);
+      await prisma.paymentDetail.create({
+        data: {
+          tenantId,
+          bankName: 'Mercado Pago W',
+          beneficiary: 'Diana berenice Vazquez',
+          clabe: '722969010558166876',
+          accountNumber: '5428785112374268',
+        },
+      });
+      try {
+        const saleId = await createSale();
+        const response = await service.upload({
+          saleId,
+          idempotencyKey: `wamid-${randomUUID()}`,
+          file: PNG_BYTES,
+          fields: {
+            extracted: JSON.stringify({ destinationAccountLast4: '9616' }),
+          },
+        });
+
+        const rows = await outboxRows(response.receiptId);
+        expect(rows[0].payload).toMatchObject({
+          mismatchFlagged: false,
+          destinationCheck: 'mismatch',
+        });
+      } finally {
+        await prisma.paymentDetail.deleteMany({ where: { tenantId } });
+      }
     });
 
     it('publishes for a legacy mediaUrl attachment too', async () => {

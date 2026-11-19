@@ -1447,3 +1447,201 @@ describe('POS configured business weekday', () => {
     ).toBe(applies ? promo.id : null);
   });
 });
+
+// ============================================================
+// order-promo-base-net-of-manual (S2) — the ORDER_DISCOUNT base (and its
+// minimum-purchase gate) is the subtotal net of manual line discounts too.
+// ============================================================
+describe('PosEvaluatePromotionsUseCase — order base net of manual line discounts (S2)', () => {
+  const orderTenPercent = (overrides: PromoOverrides = {}) =>
+    makeOrderPromotion({
+      id: 'order-10',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+      ...overrides,
+    });
+
+  it('computes the order promotion on the price after the manual line discount (689.00 − 10% manual → 62.01)', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent()]),
+    );
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            effectiveUnitPriceCents: 68_900,
+            hasManualDiscount: true,
+            manualDiscountCents: 6_890,
+          }),
+        ],
+      }),
+    );
+    expect(result.order?.discountAmountCents).toBe(6_201);
+  });
+
+  it('nets a manual-discount line AND an engine line-promotion line from the order base', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([
+        makePromotion({ id: 'line-10', discountValue: 10 }),
+        orderTenPercent(),
+      ]),
+    );
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            itemId: 'manual',
+            productId: 'prod-2',
+            quantity: 2,
+            effectiveUnitPriceCents: 1_000,
+            hasManualDiscount: true,
+            manualDiscountCents: 300, // 2 × 150
+          }),
+          makeLine({ itemId: 'promo', effectiveUnitPriceCents: 1_000 }),
+        ],
+      }),
+    );
+    expect(result.lines.map((l) => l.itemId)).toEqual(['promo']);
+    // (2000 − 300) + (1000 − 100) = 2600 → 10% = 260.
+    expect(result.order?.discountAmountCents).toBe(260);
+  });
+
+  it('checks minPurchaseAmountCents against the subtotal net of manual discounts', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent({ minPurchaseAmountCents: 65_000 })]),
+    );
+    const line = makeLine({
+      effectiveUnitPriceCents: 68_900,
+      hasManualDiscount: true,
+      manualDiscountCents: 6_890,
+    });
+    const net = await useCase.evaluate(makeInput({ lines: [line] }));
+    expect(net.order).toBeNull();
+
+    const atMinimum = await new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent({ minPurchaseAmountCents: 62_010 })]),
+    ).evaluate(makeInput({ lines: [line] }));
+    expect(atMinimum.order?.discountAmountCents).toBe(6_201);
+  });
+
+  it('keeps the minimum against the subtotal BEFORE engine line promotions (unchanged)', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([
+        makePromotion({ id: 'line-10', discountValue: 10 }),
+        orderTenPercent({ minPurchaseAmountCents: 1_000 }),
+      ]),
+    );
+    const result = await useCase.evaluate(
+      makeInput({ lines: [makeLine({ effectiveUnitPriceCents: 1_000 })] }),
+    );
+    // Base net of the 10% line promotion: 900 → 90.
+    expect(result.order?.discountAmountCents).toBe(90);
+  });
+
+  it('ignores manualDiscountCents on a line without a manual discount and when omitted (sales without manual discounts unchanged)', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent()]),
+    );
+    const flagged = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            productId: 'prod-2',
+            effectiveUnitPriceCents: 1_000,
+            hasManualDiscount: false,
+            manualDiscountCents: 500,
+          }),
+        ],
+      }),
+    );
+    expect(flagged.order?.discountAmountCents).toBe(100);
+
+    const omitted = await useCase.evaluate(
+      makeInput({
+        lines: [
+          makeLine({
+            productId: 'prod-2',
+            effectiveUnitPriceCents: 1_000,
+            hasManualDiscount: true,
+          }),
+        ],
+      }),
+    );
+    expect(omitted.order?.discountAmountCents).toBe(100);
+  });
+});
+
+// ============================================================
+// order-promo-base-net-of-manual T2 — quantity > 1: the ORDER base
+// subtracts each line's WHOLE-line discount (per-unit × quantity).
+// ============================================================
+describe('PosEvaluatePromotionsUseCase — order base with quantity > 1 (T2)', () => {
+  const orderTenPercent = (overrides: PromoOverrides = {}) =>
+    makeOrderPromotion({
+      id: 'order-10',
+      discountType: 'PERCENTAGE',
+      discountValue: 10,
+      ...overrides,
+    });
+
+  it.each([
+    [1, 6_201],
+    [2, 12_402], // FE dev numbers: 10% of 2 × 620.10 (not 130.91)
+    [3, 18_603],
+  ])(
+    'percentage line promotion, qty %i → order discount %i',
+    async (quantity, expected) => {
+      const useCase = new PosEvaluatePromotionsUseCase(
+        makeRepository([
+          makePromotion({ id: 'line-10', discountValue: 10 }),
+          orderTenPercent(),
+        ]),
+      );
+      const result = await useCase.evaluate(
+        makeInput({
+          lines: [makeLine({ quantity, effectiveUnitPriceCents: 68_900 })],
+        }),
+      );
+      expect(result.lines.map((l) => l.promotionId)).toEqual(['line-10']);
+      expect(result.order?.discountAmountCents).toBe(expected);
+    },
+  );
+
+  it('fixed-amount line promotion with qty 3 nets the amount per unit', async () => {
+    const useCase = new PosEvaluatePromotionsUseCase(
+      makeRepository([
+        makePromotion({
+          id: 'line-fixed',
+          discountType: 'FIXED',
+          discountValue: 100,
+        }),
+        orderTenPercent(),
+      ]),
+    );
+    const result = await useCase.evaluate(
+      makeInput({
+        lines: [makeLine({ quantity: 3, effectiveUnitPriceCents: 1_000 })],
+      }),
+    );
+    // 3 × (1000 − 100) = 2700 → 270.
+    expect(result.order?.discountAmountCents).toBe(270);
+  });
+
+  it('manual discount with qty 2: order base and minimum use the whole-line manual discount', async () => {
+    const line = makeLine({
+      quantity: 2,
+      effectiveUnitPriceCents: 68_900,
+      hasManualDiscount: true,
+      manualDiscountCents: 13_780, // 2 × 68.90
+    });
+    const applied = await new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent({ minPurchaseAmountCents: 124_020 })]),
+    ).evaluate(makeInput({ lines: [line] }));
+    expect(applied.order?.discountAmountCents).toBe(12_402);
+
+    const belowMinimum = await new PosEvaluatePromotionsUseCase(
+      makeRepository([orderTenPercent({ minPurchaseAmountCents: 124_021 })]),
+    ).evaluate(makeInput({ lines: [line] }));
+    expect(belowMinimum.order).toBeNull();
+  });
+});

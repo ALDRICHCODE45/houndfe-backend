@@ -66,7 +66,7 @@ export class ReceiptReviewOutboxDispatcher {
     try {
       await this.inngestService.send(
         RECEIPT_REVIEW_REQUESTED_INNGEST_EVENT,
-        event.payload,
+        withoutCustomerName(event.payload),
         idemKey,
       );
       await this.markPublished(event);
@@ -169,6 +169,25 @@ export class ReceiptReviewOutboxDispatcher {
       );
     }
   }
+}
+
+/**
+ * R10: rows written before the name was removed still carry `customerName`.
+ * Never forward it to Inngest event data.
+ */
+function withoutCustomerName(
+  payload: DispatchableOutboxEvent['payload'],
+): DispatchableOutboxEvent['payload'] {
+  if (
+    payload === null ||
+    typeof payload !== 'object' ||
+    Array.isArray(payload)
+  ) {
+    return payload;
+  }
+  const rest: Record<string, unknown> = { ...payload };
+  delete rest.customerName;
+  return rest as DispatchableOutboxEvent['payload'];
 }
 
 /** `${tenantId}:${receiptId}`: a replay of the same row is one Inngest event. */

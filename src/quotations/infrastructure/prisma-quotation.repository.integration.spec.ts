@@ -53,11 +53,18 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
 
     // The repository's `findById` requires a tenantId in CLS — wire up a
     // minimal CLS shim that returns the baseline tenant for every request.
+    // `set` stores the ambient transaction client: `save` / `delete` run
+    // inside `TenantPrismaService.runInTransaction` (sequential spec, so one
+    // shared slot is enough).
+    const slots = new Map<string, unknown>();
     const cls = {
       get: (key?: string) => {
         if (key === 'tenantId') return tenantId;
         if (key === 'isSuperAdmin') return false;
-        return undefined;
+        return key ? slots.get(key) : undefined;
+      },
+      set: (key: string, value: unknown) => {
+        slots.set(key, value);
       },
     };
 
@@ -69,8 +76,8 @@ describeIfDb('PrismaQuotationRepository (Integration - Real DB)', () => {
     // structural cast holds for this integration-only wiring.
     const tenantPrisma = new TenantPrismaService(
       prisma as unknown as ConstructorParameters<typeof TenantPrismaService>[0],
-      // SAFETY: this integration shim implements the only CLS operation used by
-      // TenantPrismaService (`get`) and returns the seeded tenant context.
+      // SAFETY: this integration shim implements the only CLS operations used
+      // by TenantPrismaService (`get` / `set`) with the seeded tenant context.
       cls as unknown as ClsService<TenantClsStore>,
     );
     repo = new PrismaQuotationRepository(tenantPrisma);

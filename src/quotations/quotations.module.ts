@@ -25,6 +25,8 @@
  *     send flow can dispatch outbound emails through Resend.
  *   - `PdfGenerationModule` — exports `PdfGenerationService` so the
  *     send flow can render the PDF in-memory.
+ *   - `SalesModule` — quotation-sale-conversion / T1: `SalesService` and
+ *     `SALE_REPOSITORY` for the POS "Pedido" conversions.
  *
  * Exports:
  *   - `QuotationsService` — consumed by `PdfGenerationController` for
@@ -41,6 +43,10 @@ import { ProductsModule } from '../products/products.module';
 import { PromotionsModule } from '../promotions/promotions.module';
 import { MailerModule } from '../notifications/email/mailer.module';
 import { PdfGenerationModule } from '../pdf-generation/pdf-generation.module';
+import { SalesModule } from '../sales/sales.module';
+import { QuotationSaleConversionController } from './controllers/quotation-sale-conversion.controller';
+import { QuotationSaleConversionService } from './application/quotation-sale-conversion.service';
+import { PrismaQuotationSaleConversionStore } from './infrastructure/prisma-quotation-sale-conversion.store';
 
 @Module({
   imports: [
@@ -49,10 +55,16 @@ import { PdfGenerationModule } from '../pdf-generation/pdf-generation.module';
     PromotionsModule,
     MailerModule,
     PdfGenerationModule,
+    // quotation-sale-conversion / T1 — `SalesService` (draft sale creation +
+    // recompute) and `SALE_REPOSITORY` (lock / delete). No cycle: SalesModule
+    // never imports QuotationsModule.
+    SalesModule,
   ],
-  controllers: [QuotationsController],
+  controllers: [QuotationsController, QuotationSaleConversionController],
   providers: [
     QuotationsService,
+    QuotationSaleConversionService,
+    PrismaQuotationSaleConversionStore,
     {
       provide: QUOTATION_REPOSITORY,
       useClass: PrismaQuotationRepository,

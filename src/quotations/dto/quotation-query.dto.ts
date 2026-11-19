@@ -57,6 +57,9 @@ export enum ListQuotationsStatus {
   SENT = 'SENT',
   EXPIRED = 'EXPIRED',
   CANCELLED = 'CANCELLED',
+  // quotation-sale-conversion / T1 — terminal status for quotations that
+  // became a POS draft sale.
+  CONVERTED_TO_SALE = 'CONVERTED_TO_SALE',
 }
 
 const coerceOptionalDate = (value: unknown): unknown => {

@@ -1,13 +1,25 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
   assertReceiptFile,
   type ReceiptMimeType,
 } from '../domain/receipt-file';
-import { parseReceiptUploadFields } from '../domain/receipt-fields';
-import { computeReceiptMismatch } from '../domain/receipt-mismatch';
+import {
+  parseReceiptUploadFields,
+  type ReceiptExtracted,
+} from '../domain/receipt-fields';
+import {
+  computeReceiptMismatch,
+  type ReceiptMismatch,
+} from '../domain/receipt-mismatch';
+import {
+  computeDestinationCheck,
+  hasDestinationEvidence,
+  readDestinationCheck,
+} from '../domain/receipt-destination-check';
 import {
   RECEIPT_PREVIEW_RASTERIZER,
   RECEIPT_STORAGE,
@@ -52,7 +64,38 @@ const EXTENSIONS: Record<ReceiptMimeType, string> = {
 type PayableSale = {
   debtCents: number;
   folio: string | null;
-  customerName: string | null;
+};
+
+type SaleRuleRow = {
+  status: string;
+  paymentStatus: string | null;
+  debtCents: number;
+  folio: string | null;
+};
+
+/**
+ * The sale rules of an upload: it exists, is CONFIRMED (not cancelled or a
+ * draft) and still owes money. Returns the current debt (source of truth for
+ * the mismatch) and the header the staff email shows.
+ */
+function payableSaleOf(sale: SaleRuleRow | null): PayableSale {
+  if (!sale) {
+    throw new ReceiptUploadError('SALE_NOT_FOUND', 'Sale not found');
+  }
+  if (sale.status !== 'CONFIRMED') {
+    throw new ReceiptUploadError(
+      'SALE_NOT_PAYABLE',
+      'Sale is canceled or not confirmed',
+    );
+  }
+  if (sale.paymentStatus === 'PAID' || sale.debtCents <= 0) {
+    throw new ReceiptUploadError('SALE_ALREADY_PAID', 'Sale is already paid');
+  }
+  return { debtCents: sale.debtCents, folio: sale.folio };
+}
+
+type ReceiptCreateData = Prisma.ReceiptEvidenceUncheckedCreateInput & {
+  tenantId: string;
 };
 
 type StoredReceipt = {
@@ -83,6 +126,9 @@ export class ReceiptUploadService {
       'find'
     >,
     private readonly outboxWriter: OutboxWriterService,
+    // Optional so specs that build the service alone keep their behavior; the
+    // module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
   ) {}
 
   async upload(input: {
@@ -129,28 +175,25 @@ export class ReceiptUploadService {
     });
 
     try {
-      const row = await this.createWithReviewRequest(
-        {
-          id: randomUUID(),
-          saleId: input.saleId,
-          tenantId,
-          declaredAmountCents: fields.declaredAmountCents,
-          declaredDate: fields.declaredDate,
-          declaredReference: fields.declaredReference,
-          extracted: fields.extracted ?? Prisma.DbNull,
-          storageKey,
-          mimeType,
-          sizeBytes,
-          sha256,
-          previewKey: preview.key,
-          previewMimeType: preview.key ? 'image/png' : null,
-          previewStatus: preview.status,
-          idempotencyKey: input.idempotencyKey,
-          mismatch,
-          status: 'PENDING',
-        },
-        sale,
-      );
+      const row = await this.createWithReviewRequest({
+        id: randomUUID(),
+        saleId: input.saleId,
+        tenantId,
+        declaredAmountCents: fields.declaredAmountCents,
+        declaredDate: fields.declaredDate,
+        declaredReference: fields.declaredReference,
+        extracted: fields.extracted ?? Prisma.DbNull,
+        storageKey,
+        mimeType,
+        sizeBytes,
+        sha256,
+        previewKey: preview.key,
+        previewMimeType: preview.key ? 'image/png' : null,
+        previewStatus: preview.status,
+        idempotencyKey: input.idempotencyKey,
+        mismatch,
+        status: 'PENDING',
+      });
       return toResponse(row);
     } catch (error) {
       // No row points at our objects any more: drop them. A concurrent
@@ -196,24 +239,21 @@ export class ReceiptUploadService {
   ): Promise<{ receiptId: string; status: 'PENDING' }> {
     const tenantId = this.tenantPrisma.getTenantId();
     const sale = await this.assertPayableSale(tenantId, input.saleId);
-    const row = await this.createWithReviewRequest(
-      {
-        id: randomUUID(),
-        saleId: input.saleId,
-        tenantId,
-        mediaUrl: input.mediaUrl,
-        declaredAmountCents: input.declaredAmountCents,
-        declaredDate: input.declaredDate,
-        declaredReference: input.declaredReference,
-        mismatch: computeReceiptMismatch({
-          debtCents: sale.debtCents,
-          declared: input.declaredAmountCents,
-          extracted: null,
-        }),
-        status: 'PENDING',
-      },
-      sale,
-    );
+    const row = await this.createWithReviewRequest({
+      id: randomUUID(),
+      saleId: input.saleId,
+      tenantId,
+      mediaUrl: input.mediaUrl,
+      declaredAmountCents: input.declaredAmountCents,
+      declaredDate: input.declaredDate,
+      declaredReference: input.declaredReference,
+      mismatch: computeReceiptMismatch({
+        debtCents: sale.debtCents,
+        declared: input.declaredAmountCents,
+        extracted: null,
+      }),
+      status: 'PENDING',
+    });
     return { receiptId: row.id, status: 'PENDING' };
   }
 
@@ -221,17 +261,30 @@ export class ReceiptUploadService {
    * Inserts the receipt and, when the tenant enabled RECEIPT_REVIEW_REQUESTED,
    * the staff-email outbox row in the same transaction. A unique violation
    * rolls both back, so a lost concurrent race never emails twice.
+   *
+   * When the extraction carries a destination last4 or name, the destination
+   * check (N18) is computed here, once, against the tenant's active payment
+   * accounts read in the same transaction, and stored in `mismatch`.
+   *
+   * pay-in-store-pickup / T2 (S4): the sale row is locked FIRST (`FOR UPDATE`,
+   * tenant-scoped) and the sale rules are re-checked under that lock, so the
+   * hold sweep and an upload serialize on the sale: an upload that commits
+   * first leaves a PENDING receipt the sweep sees (no cancel); a sweep that
+   * cancelled first makes the upload fail with `SALE_NOT_PAYABLE` and no row.
+   * Lock order: sale row, then the wrapper's request/feed writes.
    */
   private createWithReviewRequest(
-    data: Prisma.ReceiptEvidenceUncheckedCreateInput & {
+    input: Prisma.ReceiptEvidenceUncheckedCreateInput & {
       id: string;
       tenantId: string;
     },
-    sale: PayableSale,
   ) {
     return this.tenantPrisma.runInTransaction(async () => {
       const prisma = this.tenantPrisma.getClient();
+      const sale = await this.lockPayableSale(input.tenantId, input.saleId);
+      const data = await this.withDestinationCheck(input);
       const row = await prisma.receiptEvidence.create({ data });
+      await this.wrapper?.wrapReceipt({ id: row.id, saleId: data.saleId });
 
       const config = await this.notificationConfig.find();
       if (
@@ -239,17 +292,17 @@ export class ReceiptUploadService {
         config.enabledActions.includes('RECEIPT_REVIEW_REQUESTED')
       ) {
         const extracted = data.extracted as { amountCents?: number } | null;
-        const mismatch = data.mismatch as { flagged?: boolean } | null;
+        const mismatch = data.mismatch as ReceiptMismatch | null;
         const payload: ReceiptReviewRequestedPayload = {
           tenantId: data.tenantId,
           receiptId: row.id,
           saleId: data.saleId,
           saleFolio: sale.folio,
-          customerName: sale.customerName,
           declaredAmountCents: data.declaredAmountCents ?? null,
           extractedAmountCents: extracted?.amountCents ?? null,
           debtCents: sale.debtCents,
           mismatchFlagged: mismatch?.flagged ?? false,
+          destinationCheck: readDestinationCheck(mismatch),
           mimeType: data.mimeType ?? null,
         };
         await this.outboxWriter.publish(
@@ -263,6 +316,30 @@ export class ReceiptUploadService {
       }
       return row;
     });
+  }
+
+  /** Adds `mismatch.destinationCheck` only when there is evidence to check. */
+  private async withDestinationCheck<T extends ReceiptCreateData>(
+    data: T,
+  ): Promise<T> {
+    const extracted =
+      data.extracted && typeof data.extracted === 'object'
+        ? (data.extracted as ReceiptExtracted)
+        : null;
+    const mismatch = data.mismatch as ReceiptMismatch | undefined;
+    if (!mismatch || !hasDestinationEvidence(extracted)) return data;
+    const accounts = await this.tenantPrisma
+      .getClient()
+      .paymentDetail.findMany({
+        where: { tenantId: data.tenantId, isActive: true },
+        select: { beneficiary: true, clabe: true, accountNumber: true },
+      });
+    const destinationCheck = computeDestinationCheck({
+      destinationAccountLast4: extracted?.destinationAccountLast4,
+      destinationName: extracted?.destinationName,
+      accounts,
+    });
+    return { ...data, mismatch: { ...mismatch, destinationCheck } };
   }
 
   private findByKey(
@@ -296,6 +373,9 @@ export class ReceiptUploadService {
   }
 
   /**
+   * Early, unlocked check (fail fast before storing objects). The insert
+   * re-checks the same rules under the sale row lock (`lockPayableSale`).
+   *
    * @returns the current sale debt (source of truth for the mismatch) and
    * the header the staff email shows.
    */
@@ -310,30 +390,29 @@ export class ReceiptUploadService {
         paymentStatus: true,
         debtCents: true,
         folio: true,
-        customer: { select: { firstName: true, lastName: true } },
       },
     });
-    if (!sale) {
-      throw new ReceiptUploadError('SALE_NOT_FOUND', 'Sale not found');
-    }
-    if (sale.status !== 'CONFIRMED') {
-      throw new ReceiptUploadError(
-        'SALE_NOT_PAYABLE',
-        'Sale is canceled or not confirmed',
-      );
-    }
-    if (sale.paymentStatus === 'PAID' || sale.debtCents <= 0) {
-      throw new ReceiptUploadError('SALE_ALREADY_PAID', 'Sale is already paid');
-    }
-    return {
-      debtCents: sale.debtCents,
-      folio: sale.folio,
-      customerName: sale.customer
-        ? [sale.customer.firstName, sale.customer.lastName]
-            .filter(Boolean)
-            .join(' ')
-        : null,
-    };
+    return payableSaleOf(sale);
+  }
+
+  /**
+   * The same rules as `assertPayableSale`, on the sale row locked
+   * `FOR UPDATE` in the caller's transaction (the receipt insert's).
+   */
+  private async lockPayableSale(
+    tenantId: string,
+    saleId: string,
+  ): Promise<PayableSale> {
+    const [sale] = await this.tenantPrisma.getClient().$queryRaw<
+      SaleRuleRow[]
+    >(Prisma.sql`
+      SELECT "status"::text AS "status",
+             "paymentStatus"::text AS "paymentStatus",
+             "debtCents", "folio"
+      FROM "sales"
+      WHERE "id" = ${saleId} AND "tenantId" = ${tenantId}
+      FOR UPDATE`);
+    return payableSaleOf(sale ?? null);
   }
 
   /**

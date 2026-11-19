@@ -7,6 +7,9 @@ import {
   type QuotationItemProps,
 } from './quotation-item.entity';
 import {
+  QuotationAlreadyConvertedError,
+  QuotationCancelledError,
+  QuotationExpiredError,
   QuotationHasNoItemsError,
   QuotationItemNotFoundError,
   QuotationNotDraftError,
@@ -27,8 +30,17 @@ import {
  * - `EXPIRED`   — lazy transition when `expiresAt` is in the past on any read.
  *                 Idempotent: subsequent reads keep the same effective status.
  * - `CANCELLED` — terminal. `cancelReason` is set.
+ * - `CONVERTED_TO_SALE` — terminal (quotation-sale-conversion / T1): the
+ *                 quotation became a POS DRAFT sale (`convertedSaleId`).
+ *                 Immune to the lazy EXPIRED transition. A NULL link (the
+ *                 draft sale was later discarded) makes it convertible again.
  */
-export type QuotationStatus = 'DRAFT' | 'SENT' | 'EXPIRED' | 'CANCELLED';
+export type QuotationStatus =
+  | 'DRAFT'
+  | 'SENT'
+  | 'EXPIRED'
+  | 'CANCELLED'
+  | 'CONVERTED_TO_SALE';
 
 /**
  * Reason captured when a quotation is cancelled. Mirrors the Sale enum
@@ -76,6 +88,9 @@ export interface QuotationFromPersistenceProps {
   optedInManualPromotionIds: ReadonlyArray<string>;
   customerNotes?: string | null;
   taxRate?: number;
+  /** quotation-sale-conversion / T1 — linked POS draft sale (nullable). */
+  convertedSaleId?: string | null;
+  convertedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -109,6 +124,8 @@ export class Quotation {
   private _optedInManualPromotionIds: string[];
   private _customerNotes: string | null;
   private _taxRate: number;
+  private _convertedSaleId: string | null;
+  private _convertedAt: Date | null;
 
   private constructor(
     public readonly id: string,
@@ -131,6 +148,8 @@ export class Quotation {
     optedInManualPromotionIds: ReadonlyArray<string> = [],
     customerNotes: string | null = null,
     taxRate: number = 0.16,
+    convertedSaleId: string | null = null,
+    convertedAt: Date | null = null,
   ) {
     this._items = items;
     this._sellerUserId = sellerUserId;
@@ -142,6 +161,8 @@ export class Quotation {
     this._optedInManualPromotionIds = [...optedInManualPromotionIds];
     this._customerNotes = customerNotes;
     this._taxRate = taxRate;
+    this._convertedSaleId = convertedSaleId;
+    this._convertedAt = convertedAt;
   }
 
   // ── Factories ────────────────────────────────────────────────────────
@@ -199,6 +220,8 @@ export class Quotation {
       props.optedInManualPromotionIds ?? [],
       props.customerNotes ?? null,
       props.taxRate ?? 0.16,
+      props.convertedSaleId ?? null,
+      props.convertedAt ?? null,
     );
   }
 
@@ -248,6 +271,15 @@ export class Quotation {
 
   get taxRate(): number {
     return this._taxRate;
+  }
+
+  /** quotation-sale-conversion / T1 — the POS draft sale this became. */
+  get convertedSaleId(): string | null {
+    return this._convertedSaleId;
+  }
+
+  get convertedAt(): Date | null {
+    return this._convertedAt;
   }
 
   /** Add a new line or stack the quantity on a matching product+variant. */
@@ -432,8 +464,9 @@ export class Quotation {
   }
 
   optOutManualPromotion(promotionId: string): void {
-    this._optedInManualPromotionIds =
-      this._optedInManualPromotionIds.filter((id) => id !== promotionId);
+    this._optedInManualPromotionIds = this._optedInManualPromotionIds.filter(
+      (id) => id !== promotionId,
+    );
   }
 
   // ── Expiry + lazy status ─────────────────────────────────────────────
@@ -486,7 +519,12 @@ export class Quotation {
    * Pass `now` explicitly in tests for determinism.
    */
   getEffectiveStatus(now?: Date): QuotationStatus {
-    if (this.status === 'CANCELLED' || this.status === 'EXPIRED') {
+    if (
+      this.status === 'CANCELLED' ||
+      this.status === 'EXPIRED' ||
+      // quotation-sale-conversion / T1 — terminal; never lazily EXPIRED.
+      this.status === 'CONVERTED_TO_SALE'
+    ) {
       return this.status;
     }
     if (this._expiresAt === null) {
@@ -554,6 +592,8 @@ export class Quotation {
       // WU1 — carry the legacy root rate through the status copy so a
       // transition can never silently reset it to the 0.16 default.
       this._taxRate,
+      this._convertedSaleId,
+      this._convertedAt,
     );
   }
 
@@ -572,6 +612,12 @@ export class Quotation {
   ): Quotation {
     if (this.status === 'CANCELLED') {
       return this;
+    }
+    // quotation-sale-conversion / T1 — a quotation that already has a live
+    // sale cannot be cancelled (cancel the sale instead). A NULL link means
+    // the draft sale was discarded, so the quotation may be cancelled.
+    if (this.status === 'CONVERTED_TO_SALE' && this._convertedSaleId !== null) {
+      throw new QuotationAlreadyConvertedError(this.id, this._convertedSaleId);
     }
 
     return new Quotation(
@@ -596,6 +642,76 @@ export class Quotation {
       this._customerNotes,
       // WU1 — carry the legacy root rate through the status copy.
       this._taxRate,
+      this._convertedSaleId,
+      this._convertedAt,
+    );
+  }
+
+  // ── Conversion to sale (quotation-sale-conversion / T1) ──────────────
+
+  /**
+   * S5/S6 guard: only DRAFT or SENT quotations that are not expired, not
+   * cancelled and not already converted can become a sale. Order matters:
+   * the most specific terminal reason wins (cancelled, converted, expired),
+   * then the empty-quotation guard.
+   *
+   * `CONVERTED_TO_SALE` with a NULL `convertedSaleId` (the draft sale was
+   * discarded later, FK `ON DELETE SET NULL`) is convertible again.
+   */
+  assertConvertibleToSale(now: Date = new Date()): void {
+    if (this.status === 'CANCELLED') {
+      throw new QuotationCancelledError(this.id);
+    }
+    if (this.status === 'CONVERTED_TO_SALE' && this._convertedSaleId !== null) {
+      throw new QuotationAlreadyConvertedError(this.id, this._convertedSaleId);
+    }
+    if (
+      this.status === 'EXPIRED' ||
+      (this._expiresAt !== null && this._expiresAt.getTime() <= now.getTime())
+    ) {
+      throw new QuotationExpiredError(this.id);
+    }
+    if (this._items.length === 0) {
+      throw new QuotationHasNoItemsError(this.id);
+    }
+  }
+
+  /**
+   * Returns a new CONVERTED_TO_SALE instance linked to `saleId`. Mirrors the
+   * `send` / `cancel` copy pattern (`status` is readonly). The persistence
+   * write is a compare-and-set owned by the conversion store, not `save`.
+   */
+  markConvertedToSale(
+    saleId: string,
+    convertedAt: Date = new Date(),
+  ): Quotation {
+    if (!saleId || saleId.trim() === '') {
+      throw new InvalidArgumentError('Sale ID cannot be empty');
+    }
+    this.assertConvertibleToSale(convertedAt);
+    return new Quotation(
+      this.id,
+      this.sellerUserId,
+      'CONVERTED_TO_SALE',
+      this.subtotalCents,
+      this.discountCents,
+      this.totalCents,
+      this.manuallyEnded,
+      this.cancelReason,
+      this.canceledAt,
+      this.createdAt,
+      convertedAt,
+      this._customerId,
+      this._globalPriceListId,
+      this._priceListExplicitlySet,
+      this._expiresAt,
+      [...this._items],
+      [...this._vetoedPromotionIds],
+      [...this._optedInManualPromotionIds],
+      this._customerNotes,
+      this._taxRate,
+      saleId,
+      convertedAt,
     );
   }
 
@@ -627,8 +743,7 @@ export class Quotation {
     const subtotalCents = this._items.reduce(
       (sum, item) =>
         sum +
-        (item.unitPriceCents + (item.discountAmountCents ?? 0)) *
-          item.quantity,
+        (item.unitPriceCents + (item.discountAmountCents ?? 0)) * item.quantity,
       0,
     );
     const totalCents = this._items.reduce(
@@ -668,6 +783,10 @@ export class Quotation {
       // grand totals — only the removed informational field was
       // derived from the root column).
       ivaBreakdown: this.computeIvaBreakdown(),
+      // quotation-sale-conversion / T1 (S7) — the linked POS draft sale.
+      // Null unless `status === 'CONVERTED_TO_SALE'` with a live sale.
+      saleId: this._convertedSaleId,
+      convertedAt: this._convertedAt,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };
@@ -718,10 +837,7 @@ export class Quotation {
    * all items that the promotion touched.
    */
   private computeAppliedPromotions() {
-    const byPromo = new Map<
-      string,
-      { title: string; discountCents: number }
-    >();
+    const byPromo = new Map<string, { title: string; discountCents: number }>();
     for (const item of this._items) {
       if (!item.promotionId) continue;
       const existing = byPromo.get(item.promotionId);

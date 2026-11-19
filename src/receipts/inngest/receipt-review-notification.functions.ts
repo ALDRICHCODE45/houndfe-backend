@@ -95,11 +95,11 @@ export function buildReceiptReviewNotificationFunctions(
       const html = renderToStaticMarkup(
         ReceiptReviewRequestedEmail({
           saleFolio: payload.saleFolio,
-          customerName: payload.customerName,
           declaredAmountCents: payload.declaredAmountCents,
           extractedAmountCents: payload.extractedAmountCents,
           debtCents: payload.debtCents,
           mismatchFlagged: payload.mismatchFlagged,
+          destinationMismatch: payload.destinationCheck === 'mismatch',
           appBaseUrl: input.appBaseUrl,
         }) as ReactElement,
       );

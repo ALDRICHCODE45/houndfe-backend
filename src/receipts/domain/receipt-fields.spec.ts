@@ -68,6 +68,62 @@ describe('parseReceiptUploadFields', () => {
     ).toEqual({ confidence: 0 });
   });
 
+  it('accepts the optional destination fields, trimmed (S2)', () => {
+    expect(
+      parseReceiptUploadFields({
+        extracted: JSON.stringify({
+          amountCents: 25000,
+          bank: 'BBVA MEXICO',
+          destinationBank: ' BBVA MEXICO ',
+          destinationName: '  Abril Alejandra Vazquez Ramos ',
+          destinationAccountLast4: ' 9616 ',
+          originName: 'Juan Pérez',
+        }),
+      }).extracted,
+    ).toEqual({
+      amountCents: 25000,
+      bank: 'BBVA MEXICO',
+      destinationBank: 'BBVA MEXICO',
+      destinationName: 'Abril Alejandra Vazquez Ramos',
+      destinationAccountLast4: '9616',
+      originName: 'Juan Pérez',
+    });
+  });
+
+  it('accepts a leading-zero last4 and names at their limits', () => {
+    expect(
+      parseReceiptUploadFields({
+        extracted: JSON.stringify({
+          destinationAccountLast4: '0042',
+          destinationBank: 'b'.repeat(80),
+          destinationName: 'n'.repeat(120),
+          originName: 'o'.repeat(120),
+        }),
+      }).extracted,
+    ).toEqual({
+      destinationAccountLast4: '0042',
+      destinationBank: 'b'.repeat(80),
+      destinationName: 'n'.repeat(120),
+      originName: 'o'.repeat(120),
+    });
+  });
+
+  it.each([
+    ['last4 as a number', '{"destinationAccountLast4":9616}'],
+    ['a 3-digit last4', '{"destinationAccountLast4":"961"}'],
+    ['a 5-digit last4', '{"destinationAccountLast4":"99616"}'],
+    ['a masked last4', '{"destinationAccountLast4":"**16"}'],
+    ['an empty last4', '{"destinationAccountLast4":""}'],
+    ['a long destinationBank', `{"destinationBank":"${'b'.repeat(81)}"}`],
+    ['a long destinationName', `{"destinationName":"${'n'.repeat(121)}"}`],
+    ['a long originName', `{"originName":"${'o'.repeat(121)}"}`],
+    ['a blank destinationName', '{"destinationName":"   "}'],
+    ['a non-string originName', '{"originName":["Ana"]}'],
+    ['an unknown destination key', '{"destinationClabe":"722969010558166876"}'],
+  ])('rejects extracted with %s', (_label, value) => {
+    expect(rejectCode({ extracted: value })).toBe('INVALID_RECEIPT_EXTRACTED');
+  });
+
   it.each([
     ['zero', '0'],
     ['negative', '-5'],

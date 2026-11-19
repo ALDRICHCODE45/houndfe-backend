@@ -4,6 +4,9 @@
  * expiration calendar date is before today in the business timezone are
  * excluded from `stock.quantity` and `stock.status` on catalog search and the
  * stock check, read through the real public-catalog repository and lots table.
+ * A product with variants reports, in both endpoints, the best variant status
+ * and the sum of its non-negative variant quantities (T3 / S6), never the raw
+ * product quantity.
  *
  * Fixture: one randomized tenant per run; deleting it cascades its products
  * and lots (no TRUNCATE).
@@ -121,6 +124,46 @@ describeIfDb('ChatbotApiService sellable catalog stock (Integration)', () => {
     const results = await service.searchCatalog({ q: productName, limit: 50 });
     expect(results.find((item) => item.productId === productId)?.stock).toEqual(
       { status: 'low_stock', quantity: 3 },
+    );
+  });
+
+  it('derives a variant product stock from its visible variants in search and stock check', async () => {
+    const productId = randomUUID();
+    await prisma.product.create({
+      data: {
+        id: productId,
+        tenantId,
+        name: `${productName} variants ${productId.slice(0, 8)}`,
+        hasVariants: true,
+        useStock: true,
+        // Misleading raw product stock: must never be reported.
+        quantity: 999,
+        minQuantity: 0,
+      },
+    });
+    await prisma.variant.createMany({
+      data: [
+        { name: 'out', quantity: 0, minQuantity: 1 },
+        { name: 'neg', quantity: -3, minQuantity: 1 },
+        { name: 'low', quantity: 2, minQuantity: 2 },
+        { name: 'ok', quantity: 7, minQuantity: 2 },
+        // Hidden variant: not visible, so not part of the sum.
+        {
+          name: 'hidden',
+          quantity: 50,
+          minQuantity: 1,
+          catalogPublishMode: 'OFF' as const,
+        },
+      ].map((variant) => ({ ...variant, tenantId, productId })),
+    });
+
+    await expect(service.checkStock(productId)).resolves.toMatchObject({
+      productId,
+      stock: { status: 'available', quantity: 9 },
+    });
+    const results = await service.searchCatalog({ q: productName, limit: 50 });
+    expect(results.find((item) => item.productId === productId)?.stock).toEqual(
+      { status: 'available', quantity: 9 },
     );
   });
 

@@ -14,10 +14,19 @@ import type { CatalogStockPresentationValue } from '../../../catalog-settings/do
 import type { PublicEditorialProjectionV2 } from '../../../catalog-editorial/domain/editorial-public-projection-v2';
 import type { PublishedCoverageV2 } from '../../../catalog-editorial/domain/editorial-published-subjects-v2';
 
+export type ProductSearchMatch = 'all' | 'partial';
+
 export interface ListProductsParams {
   q?: string;
   /** Internal chatbot opt-in; public callers retain literal full-query search. */
   chatbotMgSpacing?: boolean;
+  /**
+   * Internal chatbot opt-in: tokenize `q` and match each word against product
+   * name, brand, category and variant text (accent/case-insensitive), all
+   * words first, then any word ranked by matched-word count. Public callers
+   * never set it and keep the literal whole-phrase search.
+   */
+  chatbotTokenSearch?: boolean;
   categoryId?: string;
   sort: 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'rating_desc';
   page: number;
@@ -170,6 +179,12 @@ export interface IPublicCatalogRepository {
   findProducts(params: ListProductsParams): Promise<{
     items: ProductWithIncludes[];
     total: number;
+    /**
+     * Chatbot token search only: per returned product id, whether it matched
+     * every effective word (`all`) or only some (`partial`). Absent for the
+     * public search and when the token path is not used.
+     */
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
   }>;
 
   findCategoryFacets(params: {

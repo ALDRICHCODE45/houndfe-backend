@@ -16,6 +16,10 @@ import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import {
+  QuotationAlreadyConvertedError,
+  QuotationNotDraftError,
+} from '../domain/quotation.errors';
+import {
   Quotation,
   type QuotationCancelReason,
   type QuotationStatus,
@@ -52,54 +56,120 @@ export class PrismaQuotationRepository implements IQuotationRepository {
     return tenantId;
   }
 
+  /**
+   * quotation-sale-conversion / T1 — tenant-qualified `FOR UPDATE` lock on
+   * the root row, returning the COMMITTED lifecycle facts the write guards
+   * need. Same lock the conversion takes, so a draft write and a conversion
+   * of the same quotation are strictly serialized. Must run inside a
+   * transaction (the lock lives until commit / rollback).
+   */
+  private async lockRoot(
+    id: string,
+    tenantId: string,
+  ): Promise<{
+    status: QuotationStatus;
+    convertedSaleId: string | null;
+  } | null> {
+    const rows = await this.tenantPrisma.getClient().$queryRaw<
+      Array<{ status: QuotationStatus; convertedSaleId: string | null }>
+    >`
+      SELECT status::text AS status, "convertedSaleId"
+      FROM quotations
+      WHERE id = ${id} AND "tenantId" = ${tenantId}
+      FOR UPDATE
+    `;
+    return rows[0] ?? null;
+  }
+
   // ============================================================
-  // save — upsert root + replace items + promotion junctions
+  // save — ONE transaction: lock the root, guard, write the root, replace
+  // items + junctions. Joins an ambient transaction when present.
   // ============================================================
   async save(quotation: Quotation): Promise<Quotation> {
+    // quotation-sale-conversion / T1 (verifier M2) — atomic. The root row
+    // lock is held from the first statement until commit, and the
+    // conversion takes the same lock before reading the quotation, so a
+    // concurrent conversion sees either the full old or the full new
+    // quotation (items, vetoes, opt-ins included), never a mix. A save that
+    // loses the race to a conversion is rejected before ANY write.
+    return this.tenantPrisma.runInTransaction(() => this.saveLocked(quotation));
+  }
+
+  private async saveLocked(quotation: Quotation): Promise<Quotation> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
 
-    // Upsert the root row. `tenantId` rides along on every branch — even
-    // for the update path — so a corrupted row that landed in the wrong
-    // tenant cannot survive the round-trip (the FK to Tenant rejects it).
-    await prisma.quotation.upsert({
-      where: { id: quotation.id },
-      create: {
-        id: quotation.id,
-        sellerUserId: quotation.sellerUserId,
-        tenantId,
-        customerId: quotation.customerId,
-        globalPriceListId: quotation.globalPriceListId,
-        priceListExplicitlySet: quotation.priceListExplicitlySet,
-        status: quotation.status,
-        expiresAt: quotation.expiresAt,
-        cancelReason: quotation.cancelReason,
-        canceledAt: quotation.canceledAt,
-        subtotalCents: quotation.subtotalCents,
-        discountCents: quotation.discountCents,
-        totalCents: quotation.totalCents,
-        manuallyEnded: quotation.manuallyEnded,
-        customerNotes: quotation.customerNotes,
-        taxRate: quotation.taxRate,
-      } as Prisma.QuotationUncheckedCreateInput,
-      update: {
-        sellerUserId: quotation.sellerUserId,
-        customerId: quotation.customerId,
-        globalPriceListId: quotation.globalPriceListId,
-        priceListExplicitlySet: quotation.priceListExplicitlySet,
-        status: quotation.status,
-        expiresAt: quotation.expiresAt,
-        cancelReason: quotation.cancelReason,
-        canceledAt: quotation.canceledAt,
-        subtotalCents: quotation.subtotalCents,
-        discountCents: quotation.discountCents,
-        totalCents: quotation.totalCents,
-        manuallyEnded: quotation.manuallyEnded,
-        customerNotes: quotation.customerNotes,
-        taxRate: quotation.taxRate,
-        updatedAt: new Date(),
-      },
-    });
+    const rootData = {
+      sellerUserId: quotation.sellerUserId,
+      customerId: quotation.customerId,
+      globalPriceListId: quotation.globalPriceListId,
+      priceListExplicitlySet: quotation.priceListExplicitlySet,
+      status: quotation.status,
+      expiresAt: quotation.expiresAt,
+      cancelReason: quotation.cancelReason,
+      canceledAt: quotation.canceledAt,
+      subtotalCents: quotation.subtotalCents,
+      discountCents: quotation.discountCents,
+      totalCents: quotation.totalCents,
+      manuallyEnded: quotation.manuallyEnded,
+      customerNotes: quotation.customerNotes,
+      taxRate: quotation.taxRate,
+      // quotation-sale-conversion / T1 — the link is owned by the
+      // conversion CAS; `save` only round-trips the loaded value.
+      convertedSaleId: quotation.convertedSaleId,
+      convertedAt: quotation.convertedAt,
+    };
+
+    const existing = await this.lockRoot(quotation.id, tenantId);
+    // A row that already became a live sale is read-only for every
+    // aggregate that is not itself the converted one (stale DRAFT read →
+    // conversion → late save). Rejected under the lock, before any write.
+    if (
+      existing &&
+      existing.status === 'CONVERTED_TO_SALE' &&
+      existing.convertedSaleId !== null &&
+      quotation.status !== 'CONVERTED_TO_SALE'
+    ) {
+      throw new QuotationNotDraftError('CONVERTED_TO_SALE');
+    }
+
+    if (!existing) {
+      // `tenantId` rides along explicitly so a row can never land in the
+      // wrong tenant (the FK to Tenant rejects a bogus id).
+      await prisma.quotation.create({
+        data: {
+          id: quotation.id,
+          tenantId,
+          ...rootData,
+        } as Prisma.QuotationUncheckedCreateInput,
+      });
+    } else {
+      // quotation-sale-conversion / T1 — the root write is a compare-and-
+      // set: an aggregate that is NOT converted can never overwrite a row
+      // that already became a live sale (stale DRAFT read → concurrent
+      // conversion → late save). Under READ COMMITTED the UPDATE re-checks
+      // the WHERE after waiting on the conversion's row lock, and it runs
+      // BEFORE any item / junction write, so a rejected save leaves the
+      // converted row untouched.
+      const updated = await prisma.quotation.updateMany({
+        where: {
+          id: quotation.id,
+          tenantId,
+          ...(quotation.status === 'CONVERTED_TO_SALE'
+            ? {}
+            : {
+                OR: [
+                  { status: { not: 'CONVERTED_TO_SALE' } },
+                  { convertedSaleId: null },
+                ],
+              }),
+        },
+        data: { ...rootData, updatedAt: new Date() },
+      });
+      if (updated.count !== 1) {
+        throw new QuotationNotDraftError('CONVERTED_TO_SALE');
+      }
+    }
 
     // Delete-then-createMany for items (mirrors PrismaSaleRepository).
     if (quotation.items.length > 0) {
@@ -296,12 +366,30 @@ export class PrismaQuotationRepository implements IQuotationRepository {
   // delete — hard delete with cascade
   // ============================================================
   async delete(id: string): Promise<void> {
-    const prisma = this.tenantPrisma.getClient();
-    const tenantId = this.requireTenantId();
-    // Idempotent: a missing id does NOT throw. This keeps callers free
-    // of the P2025 race window when two concurrent deletes hit the same
-    // id. Tenant-scoped filter ensures cross-tenant deletes 404 silently.
-    await prisma.quotation.deleteMany({ where: { id, tenantId } });
+    // quotation-sale-conversion / T1 (verifier M1) — the status rule is
+    // enforced HERE, under the row lock, not only on the caller's earlier
+    // unlocked read: a conversion (or send) that committed in between makes
+    // the delete fail with the matching error and delete nothing.
+    return this.tenantPrisma.runInTransaction(async () => {
+      const prisma = this.tenantPrisma.getClient();
+      const tenantId = this.requireTenantId();
+      const row = await this.lockRoot(id, tenantId);
+      // Idempotent: a missing (or cross-tenant) id does NOT throw.
+      if (!row) return;
+      if (row.status === 'CONVERTED_TO_SALE') {
+        throw new QuotationAlreadyConvertedError(id, row.convertedSaleId);
+      }
+      if (row.status !== 'DRAFT' && row.status !== 'CANCELLED') {
+        throw new BusinessRuleViolationError(
+          `Quotation is in ${row.status} status; only DRAFT and CANCELLED can be deleted`,
+          'QUOTATION_CANNOT_DELETE',
+        );
+      }
+      // Belt and braces: the DELETE itself repeats the status condition.
+      await prisma.quotation.deleteMany({
+        where: { id, tenantId, status: { in: ['DRAFT', 'CANCELLED'] } },
+      });
+    });
   }
 
   // ============================================================
@@ -324,6 +412,8 @@ export class PrismaQuotationRepository implements IQuotationRepository {
       manuallyEnded: data.manuallyEnded,
       customerNotes: data.customerNotes,
       taxRate: data.taxRate,
+      convertedSaleId: data.convertedSaleId,
+      convertedAt: data.convertedAt,
       items: data.items.map((item) => ({
         id: item.id,
         quotationId: item.quotationId,

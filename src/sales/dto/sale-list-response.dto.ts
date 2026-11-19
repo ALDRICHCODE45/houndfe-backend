@@ -1,9 +1,22 @@
+import type { StaffSaleHoldView } from '../domain/sale-hold';
+import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
 
 export interface SaleListRowDto {
   id: string;
   folio: string | null;
   status: string;
+  /**
+   * pay-in-store-pickup / T5 (S7) — sale channel: 'POS' for counter sales,
+   * 'ONLINE' for chatbot sales. Always present on the wire (optional only
+   * for typing, like `hold`).
+   */
+  channel?: 'POS' | 'ONLINE';
+  /**
+   * pay-in-store-pickup / T5 (S7) — why the sale was canceled; null unless
+   * canceled (HOLD_EXPIRED = «Apartado vencido»). Always present on the wire.
+   */
+  cancelReason?: SaleCancelReason | null;
   paymentStatus: string | null;
   deliveryStatus: string;
   totalCents: number;
@@ -16,6 +29,11 @@ export interface SaleListRowDto {
   paymentMethods: string[];
   /** Sale-time shipping snapshot with its source status; null without one. */
   shippingAddress: SaleShippingAddressDto | null;
+  /**
+   * pay-in-store-pickup / T1 — the counter-payment hold; null unless the bot
+   * declared IN_STORE. Always present on the wire (optional only for typing).
+   */
+  hold?: StaffSaleHoldView | null;
 }
 
 export interface SaleListResponseDto {

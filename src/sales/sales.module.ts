@@ -10,6 +10,7 @@
  * and on InventoryModule (stock journal) for the charge/cancel stock writes.
  */
 import { Module } from '@nestjs/common';
+import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request-wrapper.module';
 import { CashRegisterModule } from '../cash-register/cash-register.module';
 import { SalesController } from './sales.controller';
 import { SalesCatalogController } from './sales-catalog.controller';
@@ -24,6 +25,12 @@ import { AuthModule } from '../auth/auth.module';
 import { SaleEventListener } from './listeners/sale-event.listener';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
+import { SaleHoldController } from './sale-hold.controller';
+import { SaleHoldService } from './sale-hold.service';
+import { SaleHoldExpireService } from './sale-hold-expire.service';
+import { SaleHoldSweepScheduler } from './sale-hold-sweep.scheduler';
+import { SaleHoldSweepStore } from './sale-hold-sweep.store';
+import { TenantModule } from '../shared/tenant/tenant.module';
 import { OutboxModule } from '../shared/outbox/outbox.module';
 import { SaleCommentsModule } from './comments/sale-comments.module';
 import { ReceiptReviewController } from './review/receipt-review.controller';
@@ -53,16 +60,25 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     PromotionsModule,
     AdminPaymentMethodModule,
     CashRegisterModule,
+    ChatbotRequestWrapperModule,
+    TenantModule,
   ],
   controllers: [
     SalesController,
     SalesCatalogController,
     SalesQueryController,
     SalesPaymentsController,
+    // pay-in-store-pickup / T1 — PATCH /sales/:id/hold.
+    SaleHoldController,
     ReceiptReviewController,
   ],
   providers: [
     SalesService,
+    SaleHoldService,
+    // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
+    SaleHoldSweepStore,
+    SaleHoldSweepScheduler,
+    SaleHoldExpireService,
     SaleStockService,
     {
       provide: SALE_REPOSITORY,
@@ -75,6 +91,11 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     },
     SaleEventListener,
   ],
-  exports: [SalesService, SALE_REPOSITORY],
+  exports: [
+    SalesService,
+    SALE_REPOSITORY,
+    ReceiptReviewService,
+    SaleHoldService,
+  ],
 })
 export class SalesModule {}

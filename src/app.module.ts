@@ -37,6 +37,10 @@ import { ChatbotApiModule } from './chatbot-api/chatbot-api.module';
 // /chatbot-api/human-decisions`). Self-contained: imports ChatbotApiModule
 // (exported ServiceAuthGuard + credentials provider) and DatabaseModule.
 import { HumanDecisionsModule } from './human-decisions/human-decisions.module';
+// human-intervention / unit 2 — chatbot request inbox staff commands.
+import { ChatbotRequestsModule } from './chatbot-requests/chatbot-requests.module';
+import { ConversationsModule } from './conversations/conversations.module';
+import { ChatbotSettingsModule } from './chatbot-settings/chatbot-settings.module';
 import { DeliveryZonesModule } from './delivery-zones/delivery-zones.module';
 import { DeliveryZoneOutboxModule } from './delivery-zones/outbox/delivery-zone-outbox.module';
 import { DeliveryZoneInngestRegistrar } from './delivery-zones/inngest/delivery-zone-inngest-registrar';
@@ -94,6 +98,13 @@ import { PromotionExpiryInngestRegistrar } from './promotions/inngest/promotion-
 import { ReceiptsModule } from './receipts/receipts.module';
 import { ReceiptReviewOutboxModule } from './receipts/outbox/receipt-review-outbox.module';
 import { ReceiptReviewInngestRegistrar } from './receipts/inngest/receipt-review-inngest-registrar';
+// human-intervention / unit 6 — notifications API, the dedicated notice
+// pipeline (the generic poller excludes its `chatbot_request.` prefix in the
+// same change) and the notice email registrar.
+import { NotificationsModule } from './notifications/notifications.module';
+import { RealtimeStreamModule } from './realtime/realtime-stream.module';
+import { ChatbotRequestNoticeOutboxModule } from './notifications/outbox/chatbot-request-notice-outbox.module';
+import { ChatbotRequestInngestRegistrar } from './notifications/inngest/chatbot-request-inngest-registrar';
 // branch-analytics-summary / bas-3a — read-only branch sales summary
 // bounded context. Imports DatabaseModule + AuthModule only.
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -141,6 +152,9 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     EmployeesModule,
     ChatbotApiModule,
     HumanDecisionsModule,
+    ChatbotRequestsModule,
+    ConversationsModule,
+    ChatbotSettingsModule,
     // shipping-zones / T1 — delivery zones per postal code (store routes).
     DeliveryZonesModule,
     PublicCatalogModule,
@@ -221,6 +235,12 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     // delivery_zone.validation.requested outbox rows. The generic poller
     // excludes this eventType in the same change.
     DeliveryZoneOutboxModule,
+    // human-intervention / unit 6 (R3) — notifications API plus the
+    // dedicated `chatbot_request.*` poller/consumer. The generic poller
+    // excludes that prefix by pattern in the same change.
+    NotificationsModule,
+    RealtimeStreamModule,
+    ChatbotRequestNoticeOutboxModule,
   ],
   // Slice F.2 — the Inngest function registrar. Declared as a top-level
   // provider (not a module) so its dep graph (InngestService + MAILER +
@@ -251,6 +271,8 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     DeliveryZoneInngestRegistrar,
     // transfer-receipts / T2 — RECEIPT_REVIEW_REQUESTED staff email.
     ReceiptReviewInngestRegistrar,
+    // human-intervention / unit 6 — chatbot request notice email.
+    ChatbotRequestInngestRegistrar,
   ],
 })
 export class AppModule {}

@@ -15,8 +15,9 @@
  * row: RESOLVED v2 only, one terminal per requester, exact replay by attempt
  * id + evidence hash, and a fixed 24 h application window.
  */
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import {
@@ -144,7 +145,12 @@ function toRecord(row: RequestRow): DeliveryZoneRequestRecord {
 
 @Injectable()
 export class PrismaDeliveryZoneBotRepository implements IDeliveryZoneBotRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    // Optional so specs that build the repository alone keep their behavior;
+    // the module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
+  ) {}
 
   async submit(
     command: SubmitDeliveryZoneIntakeCommand,
@@ -218,6 +224,16 @@ export class PrismaDeliveryZoneBotRepository implements IDeliveryZoneBotReposito
         const created = await db.deliveryZoneRequest.create({
           data: { ...base, validationId },
           select: REQUEST_RECORD_SELECT,
+        });
+        // Only a requester that waits for a human is wrapped; the
+        // EXISTING_ZONE branch above is born RESOLVED.
+        await this.wrapper?.wrapZoneRequest({
+          id: created.id,
+          zipCode: request.zipCode,
+          conversationRef: request.conversationRef,
+          customerPhoneCountryCode: request.phoneCountryCode,
+          customerPhone: request.phone,
+          lastCustomerMessageAt: request.lastCustomerMessageAt,
         });
         return { status: 'created', record: toRecord(created) };
       });

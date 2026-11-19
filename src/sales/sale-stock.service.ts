@@ -22,12 +22,21 @@ import { LowStockCrossing } from '../stock-alerts/infrastructure/low-stock-cross
 /** Journal actor name for bot-originated sale movements. */
 export const BOT_STOCK_ACTOR_NAME = 'Bot';
 
+/**
+ * Journal actor name for system movements (pay-in-store-pickup / T2: the hold
+ * sweep releasing an expired hold). No user id.
+ */
+export const SYSTEM_STOCK_ACTOR_NAME = 'Sistema';
+
 /** Fallback when the acting user row cannot be read (should not happen). */
 const UNKNOWN_USER_NAME = 'Usuario';
 
-/** Who moves the stock: the authenticated POS user, or the bot on their behalf. */
+/**
+ * Who moves the stock: the authenticated POS user, the bot on their behalf, or
+ * the system (no person; `userId` is not recorded).
+ */
 export interface SaleStockActor {
-  kind: 'user' | 'bot';
+  kind: 'user' | 'bot' | 'system';
   userId: string;
 }
 
@@ -114,6 +123,9 @@ export class SaleStockService {
   }
 
   private async resolveActor(actor: SaleStockActor): Promise<StockActor> {
+    if (actor.kind === 'system') {
+      return { id: null, displayName: SYSTEM_STOCK_ACTOR_NAME };
+    }
     if (actor.kind === 'bot') {
       return { id: actor.userId, displayName: BOT_STOCK_ACTOR_NAME };
     }

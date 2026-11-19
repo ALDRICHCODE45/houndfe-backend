@@ -175,8 +175,50 @@ describeIfDb('Receipt review queue (Integration)', () => {
       },
       extracted: { amountCents: 10_000, bank: 'BBVA', confidence: 0.9 },
       mismatch: { debtCents: 10_000, extractedDiffCents: 0, flagged: false },
+      // Rows persisted before the destination check read as 'unknown'.
+      destinationCheck: 'unknown',
       createdAt: new Date('2026-11-05T09:00:00.000Z'),
     });
+  });
+
+  it('exposes the destinationCheck persisted at upload, in both queues', async () => {
+    const receiptId = await createPrivateReceipt(
+      saleId,
+      tenantId,
+      new Date('2026-11-05T09:30:00.000Z'),
+    );
+    await prisma.receiptEvidence.update({
+      where: { id: receiptId },
+      data: {
+        extracted: {
+          amountCents: 10_000,
+          destinationName: 'Abril Alejandra Vazquez Ramos',
+          destinationAccountLast4: '9616',
+        },
+        mismatch: {
+          debtCents: 10_000,
+          extractedDiffCents: 0,
+          flagged: false,
+          destinationCheck: 'mismatch',
+        },
+      },
+    });
+
+    const item = (await service.listPending(saleId)).find(
+      (candidate) => candidate.id === receiptId,
+    );
+    const page = await service.listPendingForTenant({ limit: 100 });
+    const tenantItem = page.items.find(
+      (candidate) => candidate.id === receiptId,
+    );
+
+    for (const exposed of [item, tenantItem]) {
+      expect(exposed).toMatchObject({
+        destinationCheck: 'mismatch',
+        extracted: { destinationAccountLast4: '9616' },
+        mismatch: { flagged: false, destinationCheck: 'mismatch' },
+      });
+    }
   });
 
   it('pages the tenant-wide queue oldest first and never shows another tenant', async () => {

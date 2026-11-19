@@ -34,8 +34,10 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
   let mockCount: jest.Mock;
   let mockTenantFindMany: jest.Mock;
   let mockTenantGetClient: jest.Mock;
+  let mockQueryRaw: jest.Mock;
 
   beforeEach(() => {
+    mockQueryRaw = jest.fn();
     mockFindMany = jest.fn();
     mockCount = jest.fn();
     mockTenantFindMany = jest.fn().mockResolvedValue([]);
@@ -46,9 +48,11 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
         count: mockCount,
         groupBy: jest.fn().mockResolvedValue([]),
       },
+      $queryRaw: mockQueryRaw,
     }));
     const mockTenantPrisma = {
       getClient: mockTenantGetClient,
+      getTenantId: jest.fn(() => 'tenant-1'),
     } as unknown as TenantPrismaService;
 
     const mockPrisma = {
@@ -157,6 +161,181 @@ describe('PrismaPublicCatalogRepository (WARNING-01 regression)', () => {
         },
       ]),
     );
+  });
+
+  it('keeps the public multi-word q as one whole-phrase predicate (no token search)', async () => {
+    mockFindMany.mockResolvedValue([]);
+    mockCount.mockResolvedValue(0);
+    const q = 'croquetas pedigree';
+
+    await repo.findProducts({ q, sort: 'relevance', page: 1, limit: 20 });
+
+    const text = { contains: q, mode: 'insensitive' };
+    expect(mockFindMany).toHaveBeenCalledTimes(1);
+    expect(mockCount).toHaveBeenCalledTimes(1);
+    expect(mockQueryRaw).not.toHaveBeenCalled();
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { name: text },
+            { brand: { name: text } },
+            {
+              variants: {
+                some: {
+                  catalogPublishMode: { not: 'OFF' },
+                  OR: [{ name: text }, { option: text }, { value: text }],
+                },
+              },
+            },
+          ],
+        }) as unknown,
+        skip: 0,
+        take: 20,
+      }),
+    );
+  });
+
+  describe('chatbot token search (opt-in)', () => {
+    // `m0[i]` = whether token i of the (single) token set matches the product.
+    const candidates = (rows: Array<{ id: string; m0: boolean[] }>) =>
+      mockQueryRaw.mockResolvedValue(rows);
+    const search = (q: string, limit = 10, page = 1) =>
+      repo.findProducts({
+        q,
+        chatbotTokenSearch: true,
+        sort: 'relevance',
+        page,
+        limit,
+      });
+
+    it('uses one tenant-scoped raw match query and never the whole-phrase predicate', async () => {
+      candidates([]);
+      mockFindMany.mockResolvedValue([]);
+
+      const result = await search('croquetas pedigree');
+
+      expect(result).toEqual({ items: [], total: 0 });
+      expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+      expect(mockCount).not.toHaveBeenCalled();
+    });
+
+    it('prefers AND matches over OR matches once publication gates are applied', async () => {
+      candidates([
+        { id: 'or-only', m0: [true, false] },
+        { id: 'both-a', m0: [true, true] },
+        { id: 'gated-and', m0: [true, true] },
+      ]);
+      // Gate query: `gated-and` is excluded (e.g. not published), so the AND
+      // phase is decided by the surviving rows only.
+      mockFindMany
+        .mockResolvedValueOnce([
+          { id: 'or-only', createdAt: new Date(3) },
+          { id: 'both-a', createdAt: new Date(2) },
+        ])
+        .mockResolvedValueOnce([makeProduct('both-a', 100)]);
+
+      const result = await search('croquetas pedigree');
+
+      expect(result.total).toBe(1);
+      expect(result.items.map((i) => i.id)).toEqual(['both-a']);
+      expect(result.matches).toEqual(new Map([['both-a', 'all']]));
+    });
+
+    it('falls back to OR ranked by matched-token count, then newest first, and paginates', async () => {
+      candidates([
+        { id: 'one-new', m0: [true, false, false] },
+        { id: 'two-old', m0: [true, true, false] },
+        { id: 'one-old', m0: [false, false, true] },
+      ]);
+      mockFindMany
+        .mockResolvedValueOnce([
+          { id: 'one-new', createdAt: new Date(3) },
+          { id: 'one-old', createdAt: new Date(1) },
+          { id: 'two-old', createdAt: new Date(0) },
+        ])
+        .mockResolvedValueOnce([
+          makeProduct('one-new', 1),
+          makeProduct('two-old', 2),
+        ]);
+
+      const result = await search('uno dos tres', 2);
+
+      expect(result.total).toBe(3);
+      expect(result.items.map((i) => i.id)).toEqual(['two-old', 'one-new']);
+      expect(result.matches).toEqual(
+        new Map([
+          ['two-old', 'partial'],
+          ['one-new', 'partial'],
+        ]),
+      );
+    });
+
+    it('ignores a token that matches no gated candidate when deciding all (S5)', async () => {
+      // tokens: tiene, croquetas, cachorro. "tiene" matches nobody.
+      candidates([
+        { id: 'cachorro', m0: [false, false, true] },
+        { id: 'croquetas', m0: [false, true, false] },
+        { id: 'both', m0: [false, true, true] },
+      ]);
+      mockFindMany
+        .mockResolvedValueOnce([
+          { id: 'cachorro', createdAt: new Date(3) },
+          { id: 'croquetas', createdAt: new Date(2) },
+          { id: 'both', createdAt: new Date(1) },
+        ])
+        .mockResolvedValueOnce([makeProduct('both', 1)]);
+
+      const result = await search('tiene croquetas cachorro');
+
+      expect(result.items.map((i) => i.id)).toEqual(['both']);
+      expect(result.matches).toEqual(new Map([['both', 'all']]));
+    });
+
+    it('judges "matches no product" after the publication gates', async () => {
+      // "tiene" only matches a gated-out product, so it is ignored too.
+      candidates([
+        { id: 'gated', m0: [true, true] },
+        { id: 'visible', m0: [false, true] },
+      ]);
+      mockFindMany
+        .mockResolvedValueOnce([{ id: 'visible', createdAt: new Date(1) }])
+        .mockResolvedValueOnce([makeProduct('visible', 1)]);
+
+      const result = await search('tiene croquetas');
+
+      expect(result.matches).toEqual(new Map([['visible', 'all']]));
+    });
+
+    it('returns no items when every word is unknown', async () => {
+      candidates([]);
+
+      const result = await search('zzz yyy');
+
+      expect(result).toEqual({ items: [], total: 0 });
+      expect(mockFindMany).not.toHaveBeenCalled();
+    });
+
+    it('returns no items when every candidate is gated out', async () => {
+      candidates([{ id: 'gated', m0: [true] }]);
+      mockFindMany.mockResolvedValueOnce([]);
+
+      expect(await search('croquetas')).toEqual({ items: [], total: 0 });
+    });
+  });
+
+  it('does not report matches for a public search', async () => {
+    mockFindMany.mockResolvedValue([makeProduct('p1', 1)]);
+    mockCount.mockResolvedValue(1);
+
+    const result = await repo.findProducts({
+      q: 'croquetas pedigree',
+      sort: 'relevance',
+      page: 1,
+      limit: 10,
+    });
+
+    expect(result).not.toHaveProperty('matches');
   });
 
   describe('chatbot-only integer mg spacing', () => {
@@ -1328,9 +1507,7 @@ describe('F3.WU9 slice 8 listPublicProducts transport-only projection', () => {
     // First count = eligible, second count = base (both before pagination).
     count.mockReset().mockResolvedValueOnce(2).mockResolvedValueOnce(5);
     groupBy.mockResolvedValue([{ categoryId: 'cat-1', _count: { id: 2 } }]);
-    categoryFindMany.mockResolvedValue([
-      { id: 'cat-1', name: 'Alimento' },
-    ]);
+    categoryFindMany.mockResolvedValue([{ id: 'cat-1', name: 'Alimento' }]);
 
     const result = await list();
 

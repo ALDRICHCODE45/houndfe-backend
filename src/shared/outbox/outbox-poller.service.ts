@@ -3,7 +3,10 @@ import { Interval } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { OutboxDispatcherService } from './outbox-dispatcher.service';
-import type { DispatchableOutboxEvent } from './outbox.types';
+import {
+  RESERVED_OUTBOX_PREFIX,
+  type DispatchableOutboxEvent,
+} from './outbox.types';
 
 export const OUTBOX_POLL_INTERVAL_MS = 'OUTBOX_POLL_INTERVAL_MS';
 export const OUTBOX_BATCH_SIZE = 'OUTBOX_BATCH_SIZE';
@@ -79,6 +82,11 @@ export class OutboxPollerService {
       // `"eventType"` predicate. shipping-zones / T1 adds
       // `delivery_zone.validation.requested` together with its dedicated
       // DeliveryZoneOutboxModule.
+      //
+      // human-intervention / unit 6 (R3): the chatbot request notices own
+      // every type under `RESERVED_OUTBOX_PREFIX`. That prefix is excluded by
+      // PATTERN, not by extending the list above, so a later dedicated type
+      // under it is safe without remembering to touch this file.
       const pendingRows = (await tx.$queryRawUnsafe<{ id: string }[]>(
         `
           SELECT id
@@ -87,6 +95,7 @@ export class OutboxPollerService {
             AND "nextAttemptAt" <= NOW()
             AND ("lockedUntil" IS NULL OR "lockedUntil" < NOW())
             AND "eventType" NOT IN ('stock.low.detected', 'hr.timeoff.requested', 'delivery.next_stop.notify', 'delivery.thank_you.notify', 'promotion.near_capacity.detected', 'promotion.expiring.detected', 'delivery_zone.validation.requested', 'receipt.review_requested')
+            AND NOT starts_with("eventType", '${RESERVED_OUTBOX_PREFIX}')
           ORDER BY "createdAt" ASC
           LIMIT $1
           FOR UPDATE SKIP LOCKED

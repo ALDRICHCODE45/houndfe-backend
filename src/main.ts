@@ -12,6 +12,7 @@ import { AppModule } from './app.module';
 import { installSupplierBodyParser } from './procurement/suppliers/supplier-http.filter';
 import { installPurchaseOrderBodyParser } from './procurement/purchase-orders/po-body-parser';
 import { installInventoryBodyParser } from './inventory/http/inventory-body-parser';
+import { installConversationBatchBodyParser } from './conversations/presentation/conversation-body-parser';
 import { editorialCors } from './catalog-editorial/http/editorial-cors';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
@@ -24,6 +25,11 @@ import {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
+
+  // SIGTERM/SIGINT run the modules' destroy hooks (Prisma disconnect, the bot
+  // feed's long-polls and its LISTEN connection) instead of killing the process
+  // with 25 s long-polls open. Only `PrismaService` and the feed have hooks.
+  app.enableShutdownHooks();
 
   // Global validation pipe — validates all incoming DTOs
   app.useGlobalPipes(createAppValidationPipe());
@@ -74,6 +80,11 @@ async function bootstrap() {
   installSupplierBodyParser(app);
   installPurchaseOrderBodyParser(app);
   installInventoryBodyParser(app);
+  // Bot conversation mirror batches (up to 50 messages: ~200 KB raw, ~2.5 MB
+  // worst case with every character \uXXXX-escaped) exceed the default 100 KB
+  // JSON limit; this route-scoped parser allows 3 MiB for them only and answers
+  // its parse errors in the bot envelope.
+  installConversationBatchBodyParser(app);
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);

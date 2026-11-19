@@ -1,5 +1,49 @@
 import { OutboxEventStatus } from '@prisma/client';
 import { OutboxPollerService } from './outbox-poller.service';
+import { RESERVED_OUTBOX_PREFIX } from './outbox.types';
+import { NOTICE_OUTBOX_EVENT_TYPES } from '../../notifications/domain/chatbot-request-notice';
+
+/** Runs one generic poll and returns the claim SELECT it issued. */
+async function genericClaimSql(): Promise<string> {
+  const calls: string[] = [];
+  const prisma = {
+    $transaction: (work: (tx: unknown) => Promise<unknown>) =>
+      work({
+        $queryRawUnsafe: jest.fn().mockImplementation((sql: string) => {
+          calls.push(sql);
+          return Promise.resolve([]);
+        }),
+      }),
+  };
+  await new OutboxPollerService(
+    prisma as never,
+    { dispatch: jest.fn() } as never,
+    1000,
+    50,
+    30000,
+  ).poll();
+  return calls.find((c) => /SELECT\s+id\s+FROM\s+outbox_events/i.test(c)) ?? '';
+}
+
+// R3 (human-intervention unit 6): dedicated types are excluded by prefix
+// pattern, not by remembering to extend the NOT IN list.
+describe('OutboxPollerService — reserved prefix (R3)', () => {
+  it('excludes the reserved prefix by pattern in the claim SELECT', async () => {
+    expect(await genericClaimSql()).toContain(
+      `AND NOT starts_with("eventType", '${RESERVED_OUTBOX_PREFIX}')`,
+    );
+  });
+
+  it.each([...NOTICE_OUTBOX_EVENT_TYPES])(
+    'dedicated type %s lives under the prefix the generic poller excludes',
+    async (eventType) => {
+      expect(eventType.startsWith(RESERVED_OUTBOX_PREFIX)).toBe(true);
+      expect(await genericClaimSql()).toContain(
+        `starts_with("eventType", '${eventType.slice(0, RESERVED_OUTBOX_PREFIX.length)}')`,
+      );
+    },
+  );
+});
 
 describe('OutboxPollerService', () => {
   it('claims pending rows using FOR UPDATE SKIP LOCKED and dispatches claimed events', async () => {

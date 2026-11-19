@@ -64,7 +64,14 @@ module.exports = {
   testTimeout: 30_000,
   // Load .env.test BEFORE Prisma is constructed (some specs eager-init
   // PrismaClient at module top level).
-  setupFiles: ['<rootDir>/test/integration/setup/load-env.ts'],
+  //
+  // `disable-schedulers.ts` keeps `@Interval`/`@Cron` jobs (SLA sweep, purges,
+  // outbox pollers, scanners) from ticking against the shared test DB when a
+  // spec boots AppModule; specs opt in via `enableSchedulersForSpec()`.
+  setupFiles: [
+    '<rootDir>/test/integration/setup/load-env.ts',
+    '<rootDir>/test/integration/setup/disable-schedulers.ts',
+  ],
   globalSetup: '<rootDir>/test/integration/setup/global-setup.ts',
   globalTeardown: '<rootDir>/test/integration/setup/global-teardown.ts',
   // WU5 — mirror the unit config's @react-pdf/renderer ESM shims.

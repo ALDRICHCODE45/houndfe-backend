@@ -13,6 +13,7 @@ import {
   SaleShippingAddressSetEvent,
   SaleShippingAddressClearedEvent,
 } from '../domain/events/sale.events';
+import type { SaleHoldUpdatedEvent } from '../sale-hold.service';
 
 @Injectable()
 export class SaleEventListener {
@@ -163,6 +164,21 @@ export class SaleEventListener {
       userId: event.userId,
       previousSellerUserId: event.previousSellerUserId,
       sellerUserId: event.sellerUserId,
+    });
+  }
+
+  /** pay-in-store-pickup / T1 — who moved a pay-in-store deadline. */
+  @OnEvent('sale.hold.updated')
+  onSaleHoldUpdated(event: SaleHoldUpdatedEvent) {
+    this.logger.log({
+      eventType: 'sale.hold.updated',
+      saleId: event.saleId,
+      tenantId: event.tenantId,
+      userId: event.userId,
+      previousExpiresAt: event.previousExpiresAt,
+      expiresAt: event.expiresAt,
+      reminderAt: event.reminderAt,
+      version: event.version,
     });
   }
 

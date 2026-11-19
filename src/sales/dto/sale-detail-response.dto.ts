@@ -1,6 +1,7 @@
 import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleRefundMethod } from '../domain/sale.repository';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
+import type { StaffSaleHoldView } from '../domain/sale-hold';
 
 export type SaleTimelineEventType =
   | 'SALE_REGISTERED'
@@ -150,8 +151,19 @@ export interface SaleDetailResponseDto {
   customer: { id: string; name: string } | null;
   cashier: { id: string; name: string };
   seller: { id: string; name: string } | null;
+  /**
+   * quotation-sale-conversion / T1 (S7) — the quotation this sale was
+   * created from. Present ONLY on quote-born sales (omitted otherwise).
+   */
+  quotationId?: string;
   /** Sale-time shipping snapshot with its source status; null without one. */
   shippingAddress: SaleShippingAddressDto | null;
+  /**
+   * pay-in-store-pickup / T1 — `{ paymentIntent, expiresAt, reminderAt,
+   * stage, version }` when the bot declared IN_STORE, else null. Always
+   * present on GET /sales/:id (optional only so older fixtures type-check).
+   */
+  hold?: StaffSaleHoldView | null;
   items: SaleDetailItemDto[];
   payments: SaleDetailPaymentDto[];
   timeline: SaleDetailTimelineEventDto[];

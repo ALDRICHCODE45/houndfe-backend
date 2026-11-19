@@ -721,6 +721,7 @@ describe('ChatbotApiService', () => {
         {
           q: 'royal',
           chatbotMgSpacing: true,
+          chatbotTokenSearch: true,
           sort: 'relevance',
           page: 1,
           limit: 5,
@@ -732,6 +733,7 @@ describe('ChatbotApiService', () => {
         productId: 'prod-1',
         name: 'Royal Canin Mini Adult',
         brand: 'Royal Canin',
+        category: { id: 'cat-1', name: 'Food' },
         imageUrl: 'https://cdn.example.com/main.jpg',
         description: 'Dry food for small dogs',
         price: {
@@ -742,7 +744,8 @@ describe('ChatbotApiService', () => {
         },
         stock: {
           status: 'available',
-          quantity: 12,
+          // Variant product (T3 / S6): sum of the variants (2 + 7), not the raw 12.
+          quantity: 9,
         },
         packageInfo: {
           weightGrams: null,
@@ -793,6 +796,7 @@ describe('ChatbotApiService', () => {
         {
           q: 'ibuprofeno de 400 mg',
           chatbotMgSpacing: true,
+          chatbotTokenSearch: true,
           sort: 'relevance',
           page: 1,
           limit: 10,
@@ -804,6 +808,45 @@ describe('ChatbotApiService', () => {
       stock: { status: 'out_of_stock', quantity: 0 },
       price: { priceCents: 259900 },
     });
+  });
+
+  it('adds the additive match field per item only when the repository reports matches', async () => {
+    repository.findProducts.mockResolvedValue({
+      items: [
+        makeCatalogProduct({ id: 'prod-a' }),
+        makeCatalogProduct({ id: 'prod-b' }),
+      ],
+      total: 2,
+      matches: new Map([
+        ['prod-a', 'all'],
+        ['prod-b', 'partial'],
+      ]),
+    });
+
+    const result = await service.searchCatalog({ q: 'tiene croquetas' });
+
+    expect(result.map((r) => [r.productId, r.match])).toEqual([
+      ['prod-a', 'all'],
+      ['prod-b', 'partial'],
+    ]);
+    const { match: _match, ...rest } = result[0];
+    expect(rest).toEqual(
+      expect.objectContaining({
+        productId: 'prod-a',
+        name: 'Royal Canin Mini Adult',
+      }),
+    );
+  });
+
+  it('omits the match field when the repository reports no matches (blank q)', async () => {
+    repository.findProducts.mockResolvedValue({
+      items: [makeCatalogProduct()],
+      total: 1,
+    });
+
+    const result = await service.searchCatalog({ q: '   ' });
+
+    expect(result[0]).not.toHaveProperty('match');
   });
 
   it('returns an empty array when no catalog items match the search', async () => {
@@ -827,6 +870,7 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('prod-1')).resolves.toEqual({
       productId: 'prod-1',
       name: 'Royal Canin Mini Adult',
+      category: { id: 'cat-1', name: 'Food' },
       stock: { status: 'out_of_stock', quantity: 0 },
       variants: [],
     });
@@ -855,6 +899,7 @@ describe('ChatbotApiService', () => {
     await expect(service.checkStock('prod-1')).resolves.toEqual({
       productId: 'prod-1',
       name: 'Royal Canin Mini Adult',
+      category: { id: 'cat-1', name: 'Food' },
       stock: { status: 'not_managed', quantity: null },
       variants: [
         {
@@ -991,6 +1036,7 @@ describe('ChatbotApiService', () => {
       await expect(service.checkStock('prod-1')).resolves.toEqual({
         productId: 'prod-1',
         name: 'Royal Canin Mini Adult',
+        category: { id: 'cat-1', name: 'Food' },
         stock: { status: 'out_of_stock', quantity: 0 },
         variants: [],
       });
@@ -1035,7 +1081,7 @@ describe('ChatbotApiService', () => {
 
       const [item] = await service.searchCatalog({ q: 'royal' });
 
-      expect(item.stock).toEqual({ status: 'available', quantity: 12 });
+      expect(item.stock).toEqual({ status: 'available', quantity: 9 });
       expect(item.variants.map((variant) => variant.stock)).toEqual([
         { status: 'low_stock', quantity: 2 },
         { status: 'available', quantity: 7 },
@@ -1057,6 +1103,239 @@ describe('ChatbotApiService', () => {
 
       expect(result.stock).toEqual({ status: 'not_managed', quantity: null });
       expect(lotFindMany()).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('product-level stock of a product with variants (T3 / S6)', () => {
+    type Variants = ProductDetailWithIncludes['variants'];
+    const variant = (
+      id: string,
+      quantity: number,
+      minQuantity: number,
+    ): Variants[number] => ({
+      id,
+      name: id,
+      option: 'Weight',
+      value: id,
+      quantity,
+      minQuantity,
+      images: [],
+      variantPrices: [{ priceCents: 1000 }],
+    });
+    const searchVariants = (variants: Variants) =>
+      variants.map((v) => ({
+        id: v.id,
+        name: v.name,
+        option: v.option,
+        value: v.value,
+        quantity: v.quantity,
+        minQuantity: v.minQuantity,
+        variantPrices: v.variantPrices,
+      }));
+
+    // Same visible variants and a deliberately misleading raw product.quantity
+    // for both endpoints, so only the variants can explain the answer.
+    const stockOf = async (
+      variants: Variants,
+      product: { quantity: number; minQuantity: number } = {
+        quantity: 999,
+        minQuantity: 0,
+      },
+    ) => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            ...product,
+            variants: searchVariants(variants),
+          }),
+        ],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({ ...product, variants }),
+      );
+      const [searched] = await service.searchCatalog({ q: 'royal' });
+      const checked = await service.checkStock('prod-1');
+      return {
+        search: searched.stock,
+        check: checked.stock,
+        checked,
+        searched,
+      };
+    };
+
+    it('mixed variants: best status and the sum of their quantities, in both endpoints', async () => {
+      const { search, check } = await stockOf([
+        variant('v-out', 0, 1),
+        variant('v-low', 2, 2),
+        variant('v-ok', 7, 2),
+      ]);
+
+      expect(search).toEqual({ status: 'available', quantity: 9 });
+      expect(check).toEqual(search);
+    });
+
+    it('low_stock is the best status when no variant is available', async () => {
+      const { search, check } = await stockOf([
+        variant('v-out', 0, 1),
+        variant('v-low-a', 1, 2),
+        variant('v-low-b', 2, 2),
+      ]);
+
+      expect(search).toEqual({ status: 'low_stock', quantity: 3 });
+      expect(check).toEqual(search);
+    });
+
+    it('all variants out of stock: out_of_stock with quantity 0', async () => {
+      const { search, check } = await stockOf([
+        variant('v-a', 0, 1),
+        variant('v-b', 0, 1),
+      ]);
+
+      expect(search).toEqual({ status: 'out_of_stock', quantity: 0 });
+      expect(check).toEqual(search);
+    });
+
+    it('clamps a negative variant quantity to 0 in the sum', async () => {
+      const { search, check } = await stockOf([
+        variant('v-neg', -4, 1),
+        variant('v-ok', 7, 2),
+      ]);
+
+      expect(search).toEqual({ status: 'available', quantity: 7 });
+      expect(check).toEqual(search);
+    });
+
+    it('never reports the raw product.quantity, even when it is 0 or large', async () => {
+      const zeroRaw = await stockOf([variant('v-ok', 5, 1)], {
+        quantity: 0,
+        minQuantity: 0,
+      });
+      expect(zeroRaw.search).toEqual({ status: 'available', quantity: 5 });
+      expect(zeroRaw.check).toEqual(zeroRaw.search);
+
+      const bigRaw = await stockOf([variant('v-out', 0, 1)], {
+        quantity: 500,
+        minQuantity: 0,
+      });
+      expect(bigRaw.search).toEqual({ status: 'out_of_stock', quantity: 0 });
+      expect(bigRaw.check).toEqual(bigRaw.search);
+    });
+
+    it('keeps the per-variant entries exactly as before', async () => {
+      const { searched, checked } = await stockOf([
+        variant('v-neg', -4, 1),
+        variant('v-ok', 7, 2),
+      ]);
+
+      expect(searched.variants.map((v) => v.stock)).toEqual([
+        { status: 'out_of_stock', quantity: -4 },
+        { status: 'available', quantity: 7 },
+      ]);
+      expect(checked.variants.map((v) => v.stock)).toEqual([
+        { status: 'out_of_stock', quantity: -4 },
+        { status: 'available', quantity: 7 },
+      ]);
+    });
+
+    it('simple product is unchanged in both endpoints', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            hasVariants: false,
+            quantity: 8,
+            minQuantity: 2,
+            variants: [],
+          }),
+        ],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          hasVariants: false,
+          quantity: 8,
+          minQuantity: 2,
+          variants: [],
+        }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.stock).toEqual({ status: 'available', quantity: 8 });
+      expect(checked.stock).toEqual({ status: 'available', quantity: 8 });
+    });
+
+    it('unmanaged product is unchanged in both endpoints (variants ignored)', async () => {
+      const variants = [variant('v-ok', 7, 2)];
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            useStock: false,
+            quantity: 50,
+            variants: searchVariants(variants),
+          }),
+        ],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({ useStock: false, quantity: 50, variants }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.stock).toEqual({ status: 'not_managed', quantity: null });
+      expect(checked.stock).toEqual({ status: 'not_managed', quantity: null });
+    });
+  });
+
+  describe('product category on search and stock (T4 / S7)', () => {
+    it('returns the POS category as { id, name } on both endpoints', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [
+          makeCatalogProduct({
+            category: { id: 'cat-aves', name: 'Alimento para aves' },
+          }),
+        ],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({
+          category: { id: 'cat-aves', name: 'Alimento para aves' },
+        }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'alpiste' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.category).toEqual({
+        id: 'cat-aves',
+        name: 'Alimento para aves',
+      });
+      expect(checked.category).toEqual({
+        id: 'cat-aves',
+        name: 'Alimento para aves',
+      });
+      // Existing fields are untouched.
+      expect(item.brand).toBe('Royal Canin');
+      expect(item.name).toBe('Royal Canin Mini Adult');
+    });
+
+    it('returns category null when the product has none', async () => {
+      repository.findProducts.mockResolvedValue({
+        items: [makeCatalogProduct({ category: null })],
+        total: 1,
+      });
+      repository.findProductById.mockResolvedValue(
+        makeDetailProduct({ category: null }),
+      );
+
+      const [item] = await service.searchCatalog({ q: 'royal' });
+      const checked = await service.checkStock('prod-1');
+
+      expect(item.category).toBeNull();
+      expect(checked.category).toBeNull();
     });
   });
 

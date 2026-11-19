@@ -1,3 +1,4 @@
+import type { StaffSaleHoldView } from './sale-hold';
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
 import type { ShippingAddressSnapshot } from './shipping-address-snapshot';
@@ -218,6 +219,23 @@ export interface ISaleRepository {
   >;
 
   markCancellationIdempotencySucceeded(
+    token: string,
+    saleId: string,
+    payload: unknown,
+  ): Promise<void>;
+
+  /** pay-in-store-pickup / T6 — POST /sales/:id/hold/expire idempotency slot. */
+  acquireHoldExpireIdempotency(
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markHoldExpireIdempotencySucceeded(
     token: string,
     saleId: string,
     payload: unknown,
@@ -446,6 +464,10 @@ export interface ISaleRepository {
       id: string;
       folio: string | null;
       status: string;
+      /** pay-in-store-pickup / T5 (S7). Absent on older repository mocks. */
+      channel?: 'POS' | 'ONLINE';
+      /** pay-in-store-pickup / T5 (S7) — null unless canceled. Absent on older repository mocks. */
+      cancelReason?: SaleCancelReason | null;
       paymentStatus: string | null;
       deliveryStatus: string;
       totalCents: number;
@@ -458,6 +480,8 @@ export interface ISaleRepository {
       paymentMethods: string[];
       /** Snapshot plus source status; null when the sale has no snapshot. */
       shippingAddress: SaleShippingAddressView | null;
+      /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
+      hold?: StaffSaleHoldView | null;
     }>
   >;
 
@@ -560,6 +584,8 @@ export interface ISaleRepository {
     seller: { id: string; name: string } | null;
     /** Snapshot plus source status; null without a snapshot. Absent on older repository mocks. */
     shippingAddress?: SaleShippingAddressView | null;
+    /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
+    hold?: StaffSaleHoldView | null;
     items: Array<{
       productName: string;
       variantName: string | null;

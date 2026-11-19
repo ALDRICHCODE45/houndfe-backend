@@ -102,3 +102,28 @@ node scripts/dev-showcase/rotate-bot-credential.cjs --name "<nombre de la creden
 
   El adaptador limita el plazo a `SHIPPING_CARRIER_TIMEOUT_MS − 500`, por eso el timeout del transportista va por encima del plazo. El cliente que llama (el bot o tu `curl`) necesita un timeout mayor que `SHIPPING_CARRIER_TIMEOUT_MS`.
 - Si no responde a tiempo y no hay otro transportista, la respuesta es `503 SHIPPING_QUOTE_UNAVAILABLE`. Detalle: [shipping-quotes.md](shipping-quotes.md) y [chatbot-checkout-shipping.md](chatbot-checkout-shipping.md).
+
+## 6. Apartados «pagar en tienda» (ventas del bot)
+
+`pnpm seed:showcase` no crea apartados. Para la prueba del POS hay un script aparte que, en **Sucursal Centro** (la de `manager@houndfe.com`), deja dos ventas del bot «recoger en tienda»:
+
+- **Apartado vivo:** venta ONLINE, PICKUP, a crédito, con `hold` IN_STORE que vence en ~24 h. En el POS se ve «Apartado · pagar en tienda · vence {fecha}».
+- **Apartado vencido con abono parcial:** el plazo se mueve a ~1 min y se registra un abono en efectivo de la mitad (sin caja). Al vencer, el barrido (cada 30 s, en la API que esté corriendo) **no la cancela** y manda la notificación `SALE_HOLD_REVIEW` a quien tenga `update:Sale` (p. ej. `manager`).
+
+Cliente: «Paola Apartado Mostrador»; producto: «Arena Sanitaria Aglomerante 10 kg».
+
+Todo pasa por las rutas reales de la API **ya levantada** (por defecto `http://127.0.0.1:3003`): la venta y el «pagar en tienda» con la credencial del bot; el plazo (`PATCH /sales/:id/hold`) y el abono (`POST /sales/:id/payments`) como `manager`. La base solo se lee. Hace falta una credencial del bot de Centro con `sales:create` y `sales:write` (sección 4).
+
+```bash
+# 1. Ver qué haría (solo lee la base; no llama a la API ni necesita la credencial)
+node scripts/dev-showcase/pay-in-store-holds.cjs
+# 2. Crear
+SHOWCASE_BOT_TOKEN_FILE=.tmp/chatbot-service-token \
+  node scripts/dev-showcase/pay-in-store-holds.cjs --apply
+```
+
+- Credencial: `SHOWCASE_BOT_TOKEN` o `SHOWCASE_BOT_TOKEN_FILE` (por defecto `.tmp/chatbot-service-token`, el archivo que deja la rotación). Nunca se imprime.
+- Opcionales: `SHOWCASE_API_URL` (solo hosts locales salvo `SHOWCASE_ALLOW=1`), `SHOWCASE_MANAGER_PASSWORD` (si no, la del seed base), `SHOWCASE_BOT_CASHIER_EMAIL` (si no, el cajero de la última venta ONLINE, o `cashier@houndfe.com`), `SHOWCASE_HOLD_CUSTOMER_PHONE` (teléfono del cliente si hay que crearlo; por defecto uno ficticio) y `--review-in <segundos>` (plazo del apartado vencido, 60 por defecto).
+- Misma protección de base local que el showcase. Imprime solo folios, ids y el estado del apartado.
+- Se puede correr de nuevo: no crea nada mientras el apartado vivo venza en más de 1 h y el vencido siga con abono parcial. Si el vivo ya está por vencer (o se cobró o canceló), crea otro; un apartado anterior que nadie cobró lo cancela el barrido al vencer (`cancelReason: "HOLD_EXPIRED"`, «Apartado vencido» en la lista).
+- El bot recibe avisos de estas ventas (`sale.pickup_extended`, `sale.pickup_expired`…) en su feed; si el bot de dev está conectado a WhatsApp, usá un teléfono de prueba en `SHOWCASE_HOLD_CUSTOMER_PHONE`.

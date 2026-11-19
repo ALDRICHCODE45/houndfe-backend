@@ -28,9 +28,29 @@ decides a payment.
 | `declaredAmountCents` | text, optional | Integer ≥ 1 (digits only). |
 | `declaredDate` | text, optional | ISO-8601 date or timestamp. |
 | `declaredReference` | text, optional | 1–120 chars after trimming. |
-| `extracted` | text, optional | JSON object string, max 4 KB: `{ amountCents?: int ≥ 1, date?: ISO-8601, reference?: 1–120 chars, bank?: 1–80 chars, confidence?: number 0..1 }`. Unknown keys, `null` values and wrong types are rejected. |
+| `extracted` | text, optional | JSON object string, max 4 KB: `{ amountCents?: int ≥ 1, date?: ISO-8601, reference?: 1–120 chars, bank?: 1–80 chars, confidence?: number 0..1, destinationBank?: 1–80 chars, destinationName?: 1–120 chars, destinationAccountLast4?: string of exactly 4 digits, originName?: 1–120 chars }`. Unknown keys, `null` values and wrong types are rejected. |
 
 Blank text parts count as absent. Unknown or repeated parts are rejected.
+
+#### Destination fields of `extracted` (N18)
+
+All four are optional. Send them only when the receipt shows them; omit a key
+rather than sending `null` or `""`. String values are trimmed before the
+length checks.
+
+| Key | Rule | Meaning |
+| --- | --- | --- |
+| `destinationBank` | 1–80 chars | Bank of the destination account as printed. Shown to staff only; it never decides anything (Mercado Pago appears under several names). |
+| `destinationName` | 1–120 chars | Beneficiary name of the destination account as printed. |
+| `destinationAccountLast4` | JSON **string** of exactly 4 digits (`"0042"`, not `42`) | Last 4 digits of the destination CLABE, account or card as printed (`****9616` → `"9616"`). Masked or partial values (`"**16"`) are rejected: omit the key instead. |
+| `originName` | 1–120 chars | Name of the payer (origin account) as printed. Stored and shown only. |
+
+An invalid value fails the whole upload with `400 INVALID_RECEIPT_EXTRACTED`,
+like any other `extracted` key. These fields never block a valid upload and
+never change the upload response or the customer-facing flow; the backend
+uses them only for the staff destination check (see
+[Destination check](#destination-check)). Do **not** send them to a backend
+that predates this change: it rejects unknown `extracted` keys.
 
 Magic bytes: JPEG `FF D8 FF`, PNG `89 50 4E 47 0D 0A 1A 0A`, PDF `%PDF-`
 (at offset 0).
@@ -212,6 +232,46 @@ Diffs are `amount - debt` (negative = partial, positive = overpaid). A diff is
 present only when its amount was provided. `flagged` is true when any provided
 amount differs from the debt. It is a review hint; it never confirms anything.
 
+## Destination check
+
+Computed **once at upload** from `extracted` against **every active payment
+account** (`payment_detail`, `isActive = true`) of the tenant, read in the
+same transaction as the insert. It is persisted and never recomputed, because
+the business account may change later. Values:
+
+1. `destinationAccountLast4` present: `match` when it equals the last 4
+   digits (separators ignored) of the CLABE or the account number of any
+   active account; otherwise `mismatch`. The name is not consulted.
+2. No last4 but `destinationName` present: `match` when the name looks like
+   any active beneficiary; otherwise `mismatch`.
+3. Neither present, or the tenant has no active account: `unknown` (no
+   alert).
+
+`destinationBank` and `originName` never decide.
+
+Name rule: both names are lowercased, accents stripped and every run of
+non-alphanumeric characters becomes one space. Significant tokens are those
+of 3+ characters except `del`, `las`, `los`. With S the smaller token set,
+the names match when they share at least min(2, |S|) tokens. So
+«Diana Berenice Vázquez», «Diana Vazquez» and «DIANA BERENICE V» match
+«Diana berenice Vazquez», while «Abril Alejandra Vazquez Ramos» (one shared
+surname) does not.
+
+Storage: the result is stored as `destinationCheck` inside the `mismatch`
+JSON, only when the extraction carried a last4 or a name; otherwise the key is
+absent and reads as `unknown` (as do rows stored before this change). It does
+not touch `flagged`, which stays about the amount:
+
+```json
+{ "debtCents": 25000, "extractedDiffCents": 0, "flagged": false, "destinationCheck": "mismatch" }
+```
+
+No migration. It is a staff hint only: nothing is auto-rejected and the bot
+message to the customer does not change. Staff see it as `destinationCheck`
+on the review queues and the chatbot request detail
+([frontend-handoff/22-receipt-destination-check.md](frontend-handoff/22-receipt-destination-check.md))
+and as a warning in the staff email.
+
 ## Data model
 
 Migration `20261106030000_receipt_private_upload` is additive.
@@ -254,6 +314,12 @@ Inngest event `receipts/review.requested`; the function
 `receipt-review-requested-email` re-checks the config and emails the
 configured recipients who can review receipts (`ReceiptEvidence`
 update/manage or `manage all`). The file is never attached.
+
+The outbox payload carries `mismatchFlagged` and `destinationCheck`. The
+email shows «No coincide con el saldo» when `mismatchFlagged`, and «⚠ El
+destinatario del comprobante no coincide con la cuenta del negocio» only when
+`destinationCheck` is `mismatch`. Rows queued before this change have no
+`destinationCheck` and get no destination warning.
 
 ## Retention
 

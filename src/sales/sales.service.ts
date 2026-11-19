@@ -15,6 +15,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
+import type { SaleItemProps } from './domain/sale-item.entity';
 import type { ShippingAddressSnapshot } from './domain/shipping-address-snapshot';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
@@ -85,7 +86,8 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
 } from './domain/sale.repository';
-import { SaleStockService } from './sale-stock.service';
+import { SaleStockService, type SaleStockActor } from './sale-stock.service';
+import { SYSTEM_ACTOR_ID } from '../shared/tenant/tenant-runner.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import {
@@ -107,6 +109,19 @@ import {
   type CashPaymentMethod,
   type ICashLedger,
 } from '../cash-register/cash-ledger.port';
+import {
+  keptQuotedPromotionMismatches,
+  promotionsToVetoForExactOpening,
+  withoutQuotedDiscount,
+  type KeptQuotedPromotionLine,
+} from './domain/quotation-opening-promotions';
+
+/**
+ * S8 — upper bound on veto rounds when opening a sale from a quotation.
+ * Each round vetoes ≥1 new promotion; the bound only guards against a
+ * misbehaving engine.
+ */
+const MAX_EXACT_OPENING_ROUNDS = 20;
 
 type SupportedChargeMethod =
   | 'cash'
@@ -210,6 +225,28 @@ type CancelSaleResult = {
   }>;
   canceledAt: string;
 };
+
+function restockedItemsOf(sale: Sale): CancelSaleResult['restockedItems'] {
+  return sale.items.map((item) => ({
+    productId: item.productId,
+    variantId: item.variantId,
+    quantity: item.quantity,
+  }));
+}
+
+function buildCancelResult(
+  canceledSale: Sale,
+  refundedCents: number,
+): CancelSaleResult {
+  return {
+    saleId: canceledSale.id,
+    status: 'CANCELED',
+    refundedCents,
+    restockedItems: restockedItemsOf(canceledSale),
+    canceledAt:
+      canceledSale.canceledAt?.toISOString() ?? new Date().toISOString(),
+  };
+}
 
 type CancelSaleRefundSource = {
   paymentId: string;
@@ -672,6 +709,8 @@ export class SalesService {
    *         `resolvePriceListGlobalIds` map.
    *       `hasManualDiscount = item.discountType !== null
    *         && item.promotionId === null`  ← auto-promo skips this line.
+   *       `manualDiscountCents` = whole-line manual reduction ← the ORDER
+   *         promotion base is net of it (order-promo-base-net-of-manual).
    *  4. Call the engine (`posEvaluatePromotions.evaluate(input)`).
    *  5. Apply each engine `lines[]` result via `item.applyDiscount({...,
    *     promotionId})` or `applyBuyXGetYReward({...,rewardKind})`. Engine
@@ -1088,13 +1127,16 @@ export class SalesService {
       customerId: sale.customerId,
       lines: sale.items.map((item) => {
         const resolved = productCategoryBrandMap.get(item.productId);
+        const effectiveUnitPriceCents =
+          item.prePriceCentsBeforeDiscount ?? item.unitPriceCents;
+        const hasManualDiscount =
+          item.discountType !== null && item.promotionId === null;
         return {
           itemId: item.id,
           productId: item.productId,
           variantId: item.variantId,
           quantity: item.quantity,
-          effectiveUnitPriceCents:
-            item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
+          effectiveUnitPriceCents,
           appliedPriceListId: item.appliedPriceListId,
           appliedGlobalPriceListId:
             item.appliedPriceListId != null
@@ -1108,8 +1150,17 @@ export class SalesService {
           // "no match" semantics the spec demands.
           categoryId: resolved?.categoryId ?? null,
           brandId: resolved?.brandId ?? null,
-          hasManualDiscount:
-            item.discountType !== null && item.promotionId === null,
+          hasManualDiscount,
+          // order-promo-base-net-of-manual (S2) — the ORDER promotion base
+          // is net of manual line discounts (per-unit manual discounts bake
+          // the reduction into `unitPriceCents`; a global manual discount is
+          // stored as a manual discount on each line, so it is covered too).
+          manualDiscountCents: hasManualDiscount
+            ? Math.max(
+                0,
+                (effectiveUnitPriceCents - item.unitPriceCents) * item.quantity,
+              )
+            : 0,
         };
       }),
       vetoedPromotionIds: sale.vetoedPromotionIds,
@@ -1492,6 +1543,144 @@ export class SalesService {
       'sale.draft.deleted',
       new SaleDraftDeletedEvent(saleId, userId),
     );
+  }
+
+  /**
+   * quotation-sale-conversion / T1 (S4/S5) — open a POS DRAFT sale that is
+   * pre-filled from a quotation. Called by `QuotationSaleConversionService`
+   * INSIDE its ambient transaction (the save joins it), after the caller
+   * validated every line (catalog + stock) and locked the quotation row.
+   *
+   * The lines arrive already mapped to the quoted prices: sticky `custom`
+   * prices and, where the quotation had a discount, a MANUAL discount with
+   * the exact quoted cents. Vetoes copied from the quotation stay vetoed.
+   *
+   * T2 (S8, "Exacto por defecto, se ajusta después") — the opened sale
+   * totals EXACTLY the quote. Every promotion the engine would apply today
+   * (line or ORDER) is added to the per-sale veto set, re-evaluating until
+   * nothing applies (vetoing a best-wins winner can surface a runner-up).
+   * The standard recompute then runs as usual, so the draft preview equals
+   * what charge computes. The cashier adjusts afterwards with the existing
+   * draft routes (re-enable: `POST /sales/drafts/:id/manual-promotions/
+   * :promotionId`, which clears the veto).
+   *
+   * T3 (S8, defect D2) — a quoted line discount whose `quotedPromotionId`
+   * the engine still reproduces EXACTLY on that line is kept as that
+   * promotion's application (not vetoed, not manual), so a later ORDER
+   * promotion is computed on the subtotal net of it, like a normal sale.
+   * Any kept promotion that does not reproduce the quote (changed value,
+   * ended, lands on another line, ...) falls back to the T2 manual quoted
+   * discount; the opened total must equal the all-manual quoted total or
+   * every line falls back. Each retry shrinks the kept set, so it ends.
+   */
+  async openDraftFromQuotation(input: {
+    userId: string;
+    customerId: string | null;
+    sellerUserId: string | null;
+    globalPriceListId: string | null;
+    priceListExplicitlySet: boolean;
+    vetoedPromotionIds: ReadonlyArray<string>;
+    lines: ReadonlyArray<
+      Omit<SaleItemProps, 'id' | 'saleId'> & {
+        /** Promotion the quoted line discount came from, when any. */
+        quotedPromotionId?: string | null;
+      }
+    >;
+  }): Promise<Sale> {
+    const saleId = randomUUID();
+    const lines = input.lines.map(({ quotedPromotionId, ...props }) => ({
+      id: randomUUID(),
+      props,
+      quotedPromotionId: quotedPromotionId ?? null,
+    }));
+    const keptLines: KeptQuotedPromotionLine[] = lines.flatMap((line) =>
+      line.quotedPromotionId !== null &&
+      (line.props.discountAmountCents ?? 0) > 0 &&
+      !input.vetoedPromotionIds.includes(line.quotedPromotionId)
+        ? [
+            {
+              itemId: line.id,
+              promotionId: line.quotedPromotionId,
+              unitPriceCents: line.props.unitPriceCents,
+              discountAmountCents: line.props.discountAmountCents!,
+            },
+          ]
+        : [],
+    );
+    const kept = new Set(keptLines.map((line) => line.promotionId));
+
+    const build = (keep: ReadonlySet<string>): Sale => {
+      const sale = Sale.create({ id: saleId, userId: input.userId });
+      if (input.customerId) {
+        sale.assignCustomer(input.customerId);
+      }
+      if (input.sellerUserId) {
+        sale.assignSeller(input.sellerUserId);
+      }
+      sale.setGlobalPriceList(
+        input.globalPriceListId,
+        input.priceListExplicitlySet,
+      );
+      for (const promotionId of input.vetoedPromotionIds) {
+        sale.addVetoedPromotion(promotionId);
+      }
+      for (const line of lines) {
+        const keepLine =
+          line.quotedPromotionId !== null &&
+          keep.has(line.quotedPromotionId) &&
+          keptLines.some((k) => k.itemId === line.id);
+        sale.addItem({
+          ...(keepLine ? withoutQuotedDiscount(line.props) : line.props),
+          id: line.id,
+          saleId,
+        });
+      }
+      return sale;
+    };
+
+    // The all-manual build (T2 lines, no promotions) IS the quote.
+    const exactTotalCents = build(new Set()).previewTotals().totalCents;
+
+    for (;;) {
+      const sale = build(kept);
+      // Bounded: each round vetoes at least one new id or stops.
+      for (let round = 0; round < MAX_EXACT_OPENING_ROUNDS; round++) {
+        const applied = await this.evaluatePromotionsForSale(sale);
+        const toVeto = promotionsToVetoForExactOpening(
+          applied,
+          sale.vetoedPromotionIds,
+          kept,
+        );
+        if (toVeto.length === 0) break;
+        for (const promotionId of toVeto) {
+          sale.addVetoedPromotion(promotionId);
+        }
+      }
+
+      await this.recomputePricingAndPromotions(sale);
+      if (kept.size === 0) return this.saleRepo.save(sale);
+
+      const mismatched = keptQuotedPromotionMismatches(
+        sale.items.map((item) => ({
+          id: item.id,
+          promotionId: item.promotionId,
+          unitPriceCents: item.unitPriceCents,
+          discountAmountCents: item.discountAmountCents,
+          isReward: item.isBuyXGetYReward(),
+        })),
+        keptLines,
+        kept,
+      );
+      if (mismatched.length > 0) {
+        for (const id of mismatched) kept.delete(id);
+        continue;
+      }
+      if (sale.previewTotals().totalCents !== exactTotalCents) {
+        kept.clear();
+        continue;
+      }
+      return this.saleRepo.save(sale);
+    }
   }
 
   /**
@@ -1885,7 +2074,13 @@ export class SalesService {
       customer: sale.customer,
       cashier: sale.cashier,
       seller: sale.seller,
+      // quotation-sale-conversion / T1 (S7) — only on quote-born sales.
+      ...('quotationId' in sale && typeof sale.quotationId === 'string'
+        ? { quotationId: sale.quotationId }
+        : {}),
       shippingAddress: sale.shippingAddress ?? null,
+      // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
+      hold: sale.hold ?? null,
       items: sale.items,
       // Custom Payment Methods (custom-payment-methods / WU2 — D10):
       // spread the three catalog fields only when non-null so legacy rows
@@ -3326,7 +3521,6 @@ export class SalesService {
     }
 
     return this.saleRepo.runInTransaction(async () => {
-      const tenantId = this.tenantPrisma.getTenantId();
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
 
       // Tenant isolation: findByIdForUpdate queries within the tenant-scoped
@@ -3342,26 +3536,8 @@ export class SalesService {
         );
       }
 
-      const restockedItems = sale.items.map((item) => ({
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-      }));
-
-      const buildResult = (
-        canceledSale: Sale,
-        refundedCents: number,
-      ): CancelSaleResult => ({
-        saleId: canceledSale.id,
-        status: 'CANCELED',
-        refundedCents,
-        restockedItems,
-        canceledAt:
-          canceledSale.canceledAt?.toISOString() ?? new Date().toISOString(),
-      });
-
       if (sale.status === 'CANCELED') {
-        const replayPayload = buildResult(
+        const replayPayload = buildCancelResult(
           sale,
           sale.paymentStatus === 'CREDIT' || sale.paidCents === 0
             ? 0
@@ -3377,67 +3553,14 @@ export class SalesService {
         return replayPayload;
       }
 
-      const { sale: canceledSale, refundedCents } = sale.cancel(dto.reason, {
+      const payload = await this.applyCancellation(sale, {
         actorId,
-      });
-
-      // O1 — restore exactly what the journal consumed. A sale confirmed
-      // before the journal went live is restored from its lines through the
-      // journal too; a replayed cancellation restores nothing twice.
-      await this.requireSaleStock().reverse({
-        saleId,
-        actor: {
+        reason: dto.reason,
+        stockActor: {
           kind: options.origin === 'bot' ? 'bot' : 'user',
           userId: actorId,
         },
-        lines: restockedItems,
-        confirmedAt: sale.confirmedAt,
       });
-
-      const detail =
-        refundedCents === 0
-          ? null
-          : await this.saleRepo.findOneWithRelations(saleId);
-      const refunds =
-        refundedCents === 0
-          ? []
-          : buildCancellationRefunds(
-              (detail?.payments ?? []).map((payment) => ({
-                paymentId: payment.paymentId,
-                method: payment.method,
-                amountCents: payment.amountCents,
-              })),
-              refundedCents,
-              dto.reason,
-            );
-
-      await this.saleRepo.persistCancellation(canceledSale, refunds);
-
-      // pca-2d2 — return every capacity unit this sale claimed, in the same
-      // ambient transaction, regardless of the monetary refund amount. A
-      // restore rejection must reject the cancellation before the outbox and
-      // the idempotency-success stamp, so the typed error is not caught here.
-      await this.promotionUsageRepo.restoreForSale(saleId);
-
-      const payload = buildResult(canceledSale, refundedCents);
-
-      await this.outboxWriter.publish(
-        this.tenantPrisma.getClient(),
-        tenantId,
-        'Sale',
-        saleId,
-        'sale.canceled',
-        {
-          saleId,
-          tenantId,
-          actorId,
-          folio: canceledSale.folio ?? 'N/A',
-          reason: dto.reason,
-          refundedCents,
-          restockedItems,
-          canceledAt: payload.canceledAt,
-        },
-      );
 
       await this.saleRepo.markCancellationIdempotencySucceeded(
         idempotency.token,
@@ -3447,6 +3570,132 @@ export class SalesService {
 
       return payload;
     });
+  }
+
+  /**
+   * pay-in-store-pickup / T2 (S2) — the hold sweep's cancellation of an
+   * expired, unpaid pay-in-store sale: reason HOLD_EXPIRED, actor the system.
+   *
+   * Exactly the internals of `cancelSale` (stock reversed through the
+   * journal, promotion usage restored, `sale.canceled` outbox row) WITHOUT its
+   * up-front idempotency acquire: the caller already holds the sale row
+   * (`FOR UPDATE SKIP LOCKED`) inside its ambient transaction and re-checked
+   * the hold version and stage under that lock, and the `holdStage` it writes
+   * in the same transaction is the idempotency. Eligibility (CONFIRMED,
+   * CREDIT, nothing paid, no pending receipt) is the caller's decision under
+   * the same lock. Never called outside a transaction.
+   *
+   * T6 (S11) — a staff manual expiry («Vencer apartado ahora») passes the
+   * acting user: `canceledByUserId`, the `sale.canceled` actor and the stock
+   * reversal actor are that user instead of the system. Omitted = the sweep.
+   */
+  async expireHeldSale(
+    saleId: string,
+    actor?: { userId: string },
+  ): Promise<CancelSaleResult> {
+    if (!this.tenantPrisma.isInTransaction()) {
+      throw new Error(
+        'expireHeldSale must run inside the hold expiry transaction',
+      );
+    }
+    // Re-entrant: the sweep's transaction already holds this row lock.
+    const sale = await this.saleRepo.findByIdForUpdate(saleId);
+    if (!sale) {
+      throw new BusinessRuleViolationError('SALE_NOT_FOUND', 'SALE_NOT_FOUND');
+    }
+    if (actor) {
+      return this.applyCancellation(sale, {
+        actorId: actor.userId,
+        reason: 'HOLD_EXPIRED',
+        stockActor: { kind: 'user', userId: actor.userId },
+      });
+    }
+    return this.applyCancellation(sale, {
+      actorId: SYSTEM_ACTOR_ID,
+      reason: 'HOLD_EXPIRED',
+      stockActor: { kind: 'system', userId: SYSTEM_ACTOR_ID },
+    });
+  }
+
+  /**
+   * The cancellation itself, on a sale locked by the caller's ambient
+   * transaction: domain transition, exact stock reversal, refunds, promotion
+   * capacity restore and the `sale.canceled` outbox row. Shared by
+   * `cancelSale` (behind its idempotency row) and `expireHeldSale`.
+   */
+  private async applyCancellation(
+    sale: Sale,
+    input: {
+      actorId: string;
+      reason: SaleCancelReason;
+      stockActor: SaleStockActor;
+    },
+  ): Promise<CancelSaleResult> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const saleId = sale.id;
+    const { actorId, reason } = input;
+    const restockedItems = restockedItemsOf(sale);
+
+    const { sale: canceledSale, refundedCents } = sale.cancel(reason, {
+      actorId,
+    });
+
+    // O1 — restore exactly what the journal consumed. A sale confirmed
+    // before the journal went live is restored from its lines through the
+    // journal too; a replayed cancellation restores nothing twice.
+    await this.requireSaleStock().reverse({
+      saleId,
+      actor: input.stockActor,
+      lines: restockedItems,
+      confirmedAt: sale.confirmedAt,
+    });
+
+    const detail =
+      refundedCents === 0
+        ? null
+        : await this.saleRepo.findOneWithRelations(saleId);
+    const refunds =
+      refundedCents === 0
+        ? []
+        : buildCancellationRefunds(
+            (detail?.payments ?? []).map((payment) => ({
+              paymentId: payment.paymentId,
+              method: payment.method,
+              amountCents: payment.amountCents,
+            })),
+            refundedCents,
+            reason,
+          );
+
+    await this.saleRepo.persistCancellation(canceledSale, refunds);
+
+    // pca-2d2 — return every capacity unit this sale claimed, in the same
+    // ambient transaction, regardless of the monetary refund amount. A
+    // restore rejection must reject the cancellation before the outbox and
+    // the idempotency-success stamp, so the typed error is not caught here.
+    await this.promotionUsageRepo.restoreForSale(saleId);
+
+    const payload = buildCancelResult(canceledSale, refundedCents);
+
+    await this.outboxWriter.publish(
+      this.tenantPrisma.getClient(),
+      tenantId,
+      'Sale',
+      saleId,
+      'sale.canceled',
+      {
+        saleId,
+        tenantId,
+        actorId,
+        folio: canceledSale.folio ?? 'N/A',
+        reason,
+        refundedCents,
+        restockedItems,
+        canceledAt: payload.canceledAt,
+      },
+    );
+
+    return payload;
   }
 
   /** Read-only quote: no transaction, persistence, capacity claim or stock effects. */
@@ -4301,7 +4550,18 @@ export class SalesService {
         );
       }
       const sale = await this.saleRepo.findByIdForUpdate(saleId);
-      if (!sale || (authMode === 'owner' && sale.userId !== actorId)) {
+      // Owner rule: a POS sale (draft or confirmed) is collected only by its
+      // own cashier. pay-in-store-pickup / T1 — ONLINE (bot) sales are
+      // collected at the counter by any staff member: their `userId` is the
+      // bot's configured cashier, never the person at the register, and the
+      // route already requires `update:Sale`. A PARTIAL/PAID result takes the
+      // sale out of the hold-expiry flow (T2 only expires CREDIT, 0 paid).
+      if (
+        !sale ||
+        (authMode === 'owner' &&
+          sale.userId !== actorId &&
+          sale.channel !== 'ONLINE')
+      ) {
         throw new BusinessRuleViolationError(
           'SALE_NOT_FOUND',
           'SALE_NOT_FOUND',

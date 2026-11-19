@@ -1352,6 +1352,17 @@ async function main() {
       permissionKey('DeliveryZone', 'read'),
       permissionKey('DeliveryZone', 'validate'),
       permissionKey('DeliveryZone', 'manage'),
+      // human-intervention / T1 (L2): every chatbot-request permission except
+      // update:ChatbotSettingsAllBranches. Existing databases get the same
+      // rows from scripts/ops/grant-chatbot-request-permissions.cjs.
+      permissionKey('ChatbotRequest', 'read'),
+      permissionKey('ChatbotRequest', 'update'),
+      permissionKey('ChatbotRequestAssignment', 'update'),
+      permissionKey('ChatbotConversation', 'read'),
+      permissionKey('ChatbotEscalation', 'read'),
+      permissionKey('CustomerPhone', 'read'),
+      permissionKey('ChatbotSettings', 'read'),
+      permissionKey('ChatbotSettings', 'update'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [
@@ -1363,6 +1374,10 @@ async function main() {
       permissionKey('Category', 'read'),
       permissionKey('GlobalPriceList', 'read'),
       permissionKey('HumanDecision', 'read'),
+      // human-intervention / T1 (L2): see and attend chatbot requests only.
+      permissionKey('ChatbotRequest', 'read'),
+      permissionKey('ChatbotRequest', 'update'),
+      permissionKey('ChatbotConversation', 'read'),
     ];
 
     for (const managerRole of managerRoleByTenant.values()) {

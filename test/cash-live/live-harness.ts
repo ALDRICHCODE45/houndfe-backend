@@ -43,10 +43,8 @@ import { createAppValidationPipe } from '../../src/shared/listing/app-validation
 import { DomainExceptionFilter } from '../../src/shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from '../../src/shared/filters/prisma-exception.filter';
 import { PrismaService } from '../../src/shared/prisma/prisma.service';
-import {
-  MAILER,
-  type IMailer,
-} from '../../src/notifications/email/mailer.port';
+import { MAILER } from '../../src/notifications/email/mailer.port';
+import { OfflineNoSendMailer } from './offline-mailer';
 import type { LiveHarnessConfig } from './live-config';
 import { signActorTokens, type ActorTokens } from './tokens';
 import type { SeedResult } from './seed';
@@ -56,19 +54,11 @@ import {
 } from './resume-startup';
 
 /**
- * Test-only offline MAILER implementation. Fail closed: every send
- * throws with a FIXED message (input is never echoed). This is the only
- * replacement provider in the harness.
+ * Test-only offline MAILER implementation (./offline-mailer). Fail closed:
+ * every send throws with a FIXED message. This is the only replacement
+ * provider in the harness. Re-exported for existing importers.
  */
-export class OfflineNoSendMailer implements IMailer {
-  send(): Promise<void> {
-    return Promise.reject(
-      new Error(
-        'cash-live harness: outbound email is disabled (offline MAILER override)',
-      ),
-    );
-  }
-}
+export { OfflineNoSendMailer };
 
 /** Compile the real module graph with explicit fictional config.
  *

@@ -1,0 +1,187 @@
+# POS — pay-in-store hold of bot pickup orders ("Apartado")
+
+**Status:** T1, T2 and T3 on branch `feat/pay-in-store-hold`, **not merged, not pushed, not deployed**. T6 («Vencer apartado ahora», §6; `hold.expiredAt`, §1) on branch `feat/hold-expire-now`, not merged, **no migration**. Migrations `20261118010000_pay_in_store_hold` and `20261118020000_sale_feed_items` must be deployed first (T2 adds none). The hold sweep (T2) reminds the customer, auto-cancels unpaid holds at the deadline (`cancelReason: "HOLD_EXPIRED"`) and sends staff an in-app notice when it does not cancel (§4, §5). Task: `odd/tasks/pay-in-store-pickup.md`.
+
+Shapes come from the code and its specs: `src/sales/sale-hold.controller.ts`, `src/sales/sale-hold.service.ts`, `src/sales/sale-hold-expire.service.ts`, `src/sales/sale-hold-expire.integration.spec.ts`, `src/sales/domain/sale-hold.ts`, `src/sales/domain/sale-hold-sweep.ts`, `src/notifications/domain/sale-hold-notice.ts`, `src/chatbot-api/presentation/pay-in-store-hold.integration.spec.ts`, `src/sales/sale-hold-sweep.integration.spec.ts` (real PostgreSQL). Nothing was sent to the dev API.
+
+## What it is
+
+A WhatsApp customer orders for **store pickup** and says they will **pay at the counter**. The bot marks the sale `IN_STORE`; the backend holds the order (stock is already reserved at confirmation) until a deadline: **24 h by default**, changeable **per sale** from the POS (owner decisions S2/S5). The customer gets a reminder **3 h before** the deadline; with a deadline of 3 h or less there is no reminder (S3). When the deadline passes unpaid, the sale is cancelled automatically and the stock released (T2), unless a payment or a pending transfer receipt exists (then staff get a notice instead, S4).
+
+## 1. Reading the hold: `hold` on GET `/sales/:id` and GET `/sales`
+
+Additive key on the sale detail and on every row of the sales list. `null` for every sale that never declared an intent (all POS sales, and bot sales where the customer did not choose pay-in-store):
+
+```json
+"hold": {
+  "paymentIntent": "IN_STORE",
+  "expiresAt": "2026-11-19T18:30:00.000Z",
+  "reminderAt": "2026-11-19T15:30:00.000Z",
+  "stage": 0,
+  "version": 1
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `paymentIntent` | Always `"IN_STORE"` when `hold` is not null. |
+| `expiresAt` | The deadline (UTC ISO). Render in the sucursal time zone. |
+| `reminderAt` | When the customer reminder goes out (`expiresAt − 3 h`), or `null` when the hold is 3 h or shorter. |
+| `stage` | `0` nothing sent yet, `1` reminder stage done, `2` hold over (set by the sweep or by `POST /sales/:id/hold/expire`: expired and cancelled, closed because paid/cancelled, or handed to staff with a notice). Reset to `0` on every edit. The sweep never changes `version`. |
+| `version` | Send it back as `expectedVersion` when editing or expiring (§2, §6). |
+| `expiredAt` | **T6, present only** on a sale cancelled `HOLD_EXPIRED` (by the sweep or by «Vencer apartado ahora»): when the expiry was applied, equal to `canceledAt`. Absent on every other hold (live, paid, or expired without a cancel), so older readers see the exact previous shape. |
+
+**Cancelled sales keep `hold`.** A sale cancelled `HOLD_EXPIRED` still returns `hold` (with `expiresAt`, `stage: 2` and `expiredAt`) on the detail and on list rows, so the POS can say both «venta cancelada» and «plazo vencido» (S10): `status === "CANCELED" && cancelReason === "HOLD_EXPIRED"` → «Cancelada · plazo vencido {expiredAt}». An expiry that did **not** cancel (§5) stores no instant: there is no `expiredAt`; show «Apartado vencido · revisar» from `stage === 2` with `status === "CONFIRMED"` and use `expiresAt` as the deadline (a manual expiry may have been applied earlier than it).
+
+### Display rule
+
+Show the badge **«Apartado · pagar en tienda · vence {fecha}»** only while the hold is live:
+
+`hold !== null && status === "CONFIRMED" && paymentStatus === "CREDIT"`
+
+`{fecha}` = `expiresAt` in the sucursal time zone (e.g. «vie 19 nov, 12:30»). Once the sale is paid (`PARTIAL`/`PAID`) or cancelled, hide the badge: the `hold` object stays on the sale as history, but a paid sale is never expired (see §3). A cancelled sale whose `cancelReason` is `HOLD_EXPIRED` was cancelled by the deadline (T2); see §4.
+
+### `channel` and `cancelReason` on GET `/sales` rows (T5)
+
+Branch `feat/sales-list-channel-cancel-reason`, not merged. Two additive keys on every row of `GET /sales` `data[]`, always present; no other field changes:
+
+```json
+{ "id": "…", "folio": "…", "status": "CANCELED", "channel": "ONLINE", "cancelReason": "HOLD_EXPIRED", "hold": { … } }
+```
+
+| Field | Values |
+| --- | --- |
+| `channel` | `"POS"` (rung at the counter) or `"ONLINE"` (chatbot sale). Same value as `GET /sales/:id`. |
+| `cancelReason` | `null` unless the sale was cancelled; then one of `CUSTOMER_REQUEST`, `ORDER_ERROR`, `OUT_OF_STOCK`, `DUPLICATE_SALE`, `OTHER`, `HOLD_EXPIRED`. Same value as `GET /sales/:id`. |
+
+List labels: show the real channel from `channel`, and «Apartado vencido» for `cancelReason === "HOLD_EXPIRED"`. There is no list filter by channel or reason yet (`status=CANCELED` still lists every cancelled sale).
+
+## 2. Editing the deadline: `PATCH /sales/:id/hold`
+
+Permission: `update:Sale` (the same as every other confirmed-sale edit, e.g. `PATCH /sales/:id/due-date`). Hide the edit control without it.
+
+Request:
+
+```json
+{ "expiresAt": "2026-11-20T23:00:00-06:00", "expectedVersion": 1 }
+```
+
+- `expiresAt`: ISO 8601 with time and offset, **in the future**. Any length is accepted (there is no maximum).
+- `expectedVersion`: the `hold.version` you displayed.
+
+Response `200`: the full sale detail (same shape as `GET /sales/:id`) with the new `hold`: `expiresAt` updated, `reminderAt` recomputed (`expiresAt − 3 h`, or `null` if that is already past), `stage: 0`, `version + 1`. The change is logged with the acting user (`sale.hold.updated`) and the customer is told about the new deadline over WhatsApp (T3).
+
+A hold the sweep left **uncancelled** at the deadline because a transfer receipt was pending (§5) is still editable (`CREDIT`, nothing paid): extending it restarts it (`stage: 0`, new reminder, swept again at the new deadline). That is one of the staff decisions of the notice.
+
+Errors (sales envelope `{ statusCode, error, message }`, switch on `error`):
+
+| Status | `error` | Meaning / what to do |
+| --- | --- | --- |
+| `400` | (validation) | `expiresAt` not ISO or `expectedVersion` not an integer ≥ 0. |
+| `403` | — | Missing `update:Sale`. |
+| `404` | `SALE_NOT_FOUND` | No such sale in this sucursal. |
+| `409` | `SALE_NOT_PAY_IN_STORE` | The sale has no pay-in-store hold. |
+| `409` | `SALE_HOLD_NOT_EDITABLE` | Already paid (any amount) or cancelled; the hold is over. Reload. |
+| `409` | `HOLD_VERSION_CONFLICT` | Someone else changed the deadline meanwhile. Reload and retry. |
+| `422` | `HOLD_EXPIRY_NOT_FUTURE` | The chosen deadline is not in the future. |
+
+## 3. Charging at the counter: `POST /sales/:id/payments`
+
+The existing payment route (permission `update:Sale`, `Idempotency-Key` header required) now accepts **ONLINE (bot) sales from any staff member**. Before T1 it answered `404 SALE_NOT_FOUND` unless the caller was the bot's configured cashier. The owner rule is unchanged for POS sales: only the cashier who rang a POS sale can add payments to it.
+
+```http
+POST /sales/{saleId}/payments
+Idempotency-Key: <one per press>
+
+{ "method": "cash", "amountCents": 45000, "cashSessionId": "<open session, optional>" }
+```
+
+Same body, split payments (`payments: [...]`), catalog `paymentMethodId` and cash-session binding as for any other later collection. Response: `{ saleId, paidCents, debtCents, totalCents, paymentStatus, paymentIds }`.
+
+**Without `cashSessionId` (T5 answer).** Omitting it is accepted for every method (`cash`, `card_credit`, `card_debit`, `transfer`), on POS and ONLINE sales alike, and no open cash session is required. The payment is recorded on the sale (payment row with the acting user, `paidCents`/`debtCents`/`paymentStatus` updated, the hold ends as above), but **no cash-register movement is written**: it belongs to no session and does not count in any session's expected cash at close. So a cash payment taken at the counter without `cashSessionId` shows up as a surplus when that drawer is counted. Send `cashSessionId` (the user's OPEN session) whenever the money goes into a drawer; with it the session must be OPEN and owned by the caller (otherwise the request fails and nothing is written). Omitting it is right only for money that does not enter a drawer (e.g. a transfer already in the bank).
+
+Any payment (`PARTIAL` or `PAID`) ends the hold: the sale can no longer be edited with `PATCH /hold` and it will never be auto-cancelled by the deadline. A **partially** paid sale still reaches staff as a notice at the deadline (§5), so someone decides what to do with the rest. After charging, mark the pickup as delivered as usual.
+
+## 4. Auto-cancelled at the deadline: `cancelReason: "HOLD_EXPIRED"`
+
+At `expiresAt`, a hold that is still `CONFIRMED`, `CREDIT`, with nothing paid and **no `PENDING` transfer receipt**, is cancelled by the system:
+
+- `status: "CANCELED"`, `cancelReason: "HOLD_EXPIRED"` (new value of the existing enum; staff and the bot cannot choose it in the cancel dialog), `canceledAt` set, `canceledBy: null` (no person: show «Sistema»). After a manual expiry (§6) `canceledBy` is the staff member who pressed the button;
+- stock is released through the stock journal (kardex rows with actor «Sistema»), promotion capacity is returned, the usual `sale.canceled` event is written;
+- the customer is told over WhatsApp by the bot;
+- `hold.stage` becomes `2`; the `hold` object stays as history, with `hold.expiredAt` (= `canceledAt`).
+
+POS: label the reason «Apartado vencido (no se pagó a tiempo)» in the sale detail and in the cancelled list filter/labels next to the other reasons (`CUSTOMER_REQUEST`, `ORDER_ERROR`, `OUT_OF_STOCK`, `DUPLICATE_SALE`, `OTHER`). Do not offer it in the staff cancel dialog (the API rejects it).
+
+## 5. Staff notice when the deadline passes but the sale is not cancelled (S4)
+
+If at `expiresAt` the sale has a **partial payment** or a **`PENDING` transfer receipt**, it is **not** cancelled. Every active member of the sucursal with `update:Sale` gets ONE in-app notification (one per sale and hold version; no email). It arrives through the existing notifications API and realtime stream (`GET /notifications`, `notification.created`), with a new `type` and an additive `saleId` field on every notification (`null` on the request notices):
+
+```json
+{
+  "id": "…",
+  "type": "SALE_HOLD_REVIEW",
+  "title": "Apartado vencido: revisa la venta",
+  "body": "Venta <folio> · Comprobante pendiente de revisar",
+  "requestId": null,
+  "saleId": "8c1d…",
+  "folio": "<sale folio as stored>",
+  "subtype": null,
+  "cause": null,
+  "reason": null,
+  "requestOpen": null,
+  "level": null,
+  "createdAt": "…",
+  "readAt": null
+}
+```
+
+`body` reasons: «Tiene un pago registrado» (partial payment) or «Comprobante pendiente de revisar» (pending receipt). On click open the sale detail for `saleId`, not the request inbox: `requestId` is `null`. Staff decide: review the receipt, charge the rest, extend the hold (§2), or cancel the sale with a normal reason (and refund if needed). A fully paid sale gets no notice (nothing to decide).
+
+## 6. «Vencer apartado ahora»: `POST /sales/:id/hold/expire` (T6)
+
+Runs **exactly** what the sweep does when the deadline arrives (same decision code, `planHoldStep`), now, for one sale. Permission `update:Sale`; `Idempotency-Key` header required (one per press, like `POST /sales/:id/payments`).
+
+```http
+POST /sales/{saleId}/hold/expire
+Idempotency-Key: <one per press>
+
+{ "expectedVersion": 1 }
+```
+
+Checked under the sale row lock: pay-in-store hold, `stage < 2`, `CONFIRMED`, `hold.version === expectedVersion`. Then, by the sale's state:
+
+| `outcome` | When | What happens |
+| --- | --- | --- |
+| `CANCELLED` | nothing paid (`CREDIT`) and no `PENDING` transfer receipt | Cancelled `cancelReason: "HOLD_EXPIRED"`, **`canceledBy` = the user who pressed it** (kardex rows and the `sale.canceled` event carry that user too), stock released, promotion capacity returned; the customer is told by the bot (`sale.pickup_expired`, same as the sweep); `hold.stage: 2`, `hold.expiredAt` = `canceledAt`. |
+| `REVIEW` | a partial payment, or a `PENDING` transfer receipt | **Not cancelled**; `hold.stage: 2`; ONE `SALE_HOLD_REVIEW` notice to staff (§5, same dedup per sale and hold version); the bot gets `sale.pickup_expired_review`. Show «Apartado vencido · revisar». |
+| `SETTLED` | fully paid (or already handed over) | `hold.stage: 2` silently (no notice, no message): the hold is fulfilled. Normally unreachable because the button is hidden for paid sales; answered `200` rather than an error because it is exactly the sweep's decision for a paid sale. |
+
+Response `200`: the full sale detail (same shape as `GET /sales/:id`, `hold` included) **plus** `"outcome": "CANCELLED" | "REVIEW" | "SETTLED"`. The deadline (`hold.expiresAt`) is not rewritten and `hold.version` does not change.
+
+**Idempotent.** The same `Idempotency-Key` with the same body (same user, sale and `expectedVersion`) returns the **first** response again (including its `outcome`), with no second effect. A rejected request (any `4xx` below) consumes nothing: the same key can be retried.
+
+**Button visibility.** Show «Vencer apartado ahora» only when all hold: `hold !== null`, `hold.paymentIntent === "IN_STORE"`, `status === "CONFIRMED"`, `hold.stage < 2`, `paymentStatus` is `CREDIT` (unpaid) or `PARTIAL`, and the user has `update:Sale`. Confirm before sending (an unpaid sale is cancelled and the customer is notified). After the answer, render the returned detail; on `409` reload the sale.
+
+Errors (envelope `{ statusCode, error, message }`, switch on `error`):
+
+| Status | `error` | Meaning / what to do |
+| --- | --- | --- |
+| `400` | (`message: "IDEMPOTENCY_KEY_REQUIRED"`) | Missing or blank `Idempotency-Key` (same Nest `Bad Request` body as `POST /sales/:id/payments`). |
+| `400` | (validation) | `expectedVersion` not an integer ≥ 0, or the id is not a UUID. |
+| `403` | — | Missing `update:Sale`. |
+| `404` | `SALE_NOT_FOUND` | No such sale in this sucursal (another sucursal's sale is also 404). |
+| `409` | `SALE_NOT_PAY_IN_STORE` | The sale has no pay-in-store hold. |
+| `409` | `HOLD_ALREADY_CLOSED` | `hold.stage` is already `2` (the sweep or another user got there first). Reload. |
+| `409` | `SALE_HOLD_NOT_EDITABLE` | The sale is not `CONFIRMED` (e.g. cancelled by staff). Reload. |
+| `409` | `HOLD_VERSION_CONFLICT` | The deadline was changed meanwhile. Reload and retry. |
+| `409` | `IDEMPOTENCY_KEY_CONFLICT` | The key was already used with another body (other sale, user or version). Use a new key per press. |
+| `409` | `IDEMPOTENCY_KEY_IN_FLIGHT` | The same key is still being processed. Retry shortly. |
+
+If the sweep and a manual expiry hit the same sale at the same time, the sale is cancelled once: one of them wins, the other sees `HOLD_ALREADY_CLOSED` (manual) or does nothing (sweep).
+
+## Test data
+
+`hold` appears only on bot pickup sales after the bot calls `PATCH /chatbot-api/sales/:saleId/payment-intent` (see `docs/chatbot-handoff/pay-in-store-hold-bot-contract.md`). The base seed and `pnpm seed:showcase` create no holds.
+
+On the dev DB, `scripts/dev-showcase/pay-in-store-holds.cjs` (T5) creates two bot pickup sales in Sucursal Centro (`manager@houndfe.com`) through the real routes of the running API: one with a live 24 h hold (the badge) and one whose deadline is set ~1 min ahead with a partial cash payment, so the sweep raises `SALE_HOLD_REVIEW` (§5) on its next tick after the deadline. It prints the folios. How to run it: [dev-showcase-guide.md](../dev-showcase-guide.md) §6.

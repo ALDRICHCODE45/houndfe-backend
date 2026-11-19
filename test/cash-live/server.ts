@@ -21,8 +21,16 @@
  *     `cash_proof`, database `cash_closing_proof_test`, and NO query
  *     string or fragment (no Prisma host/socket/schema/ssl overrides);
  *   - no external-service credential (RESEND_API_KEY, AWS_*, INNGEST_*)
- *     is inherited — checked BEFORE the Nest module graph compiles.
+ *     is inherited — checked BEFORE the Nest/Prisma graph is even
+ *     imported, and re-checked right after the import (tripwire).
  * It NEVER loads .env and NEVER deletes the database or containers.
+ *
+ * STARTUP ORDER (S5): this file statically imports ONLY the light guard
+ * modules. The Nest + Prisma graph is loaded through `loadHarnessGraph()`
+ * (./dotenv-isolation) AFTER the environment guards pass; it first blocks
+ * Prisma 6's generated-client dotenv load (import-time `warnEnvConflicts`
+ * and constructor `relativeEnvPaths`), so the repository dotenv file is
+ * never read into this process — neither before nor after the guards.
  *
  * RESUME (restart without reseeding): when EITHER CASH_LIVE_RESUME_* value
  * is present the request must be complete and valid —
@@ -36,30 +44,20 @@
  * Logging contract: fixed diagnostic texts only — no error objects, no
  * error messages (they may carry secret material), no tokens, no URLs.
  */
+// Light, guard-only static imports. NOTHING here may reach Nest or Prisma
+// (enforced by dotenv-isolation.spec.ts).
 import { randomUUID } from 'node:crypto';
-import { Logger } from '@nestjs/common';
 import {
   checkDeniedExternalEnv,
   checkDisposableDatabaseUrl,
 } from './disposable-env';
 import { loadLiveHarnessConfig } from './live-config';
-import {
-  configureLiveApp,
-  createLiveTestingModule,
-  issueActorTokens,
-  prismaOf,
-} from './live-harness';
-import { seedFictionalDataset } from './seed';
-import {
-  isResumeRequested,
-  loadLiveDataset,
-  loadResumeDatasetPeer,
-  resolveResumeStartup,
-  type LiveStartupRequest,
-  type RestoreExistingDataset,
-  type ResumeStartupConfig,
+import { loadHarnessGraph } from './dotenv-isolation';
+import type {
+  LiveStartupRequest,
+  RestoreExistingDataset,
+  ResumeStartupConfig,
 } from './resume-startup';
-import { buildFixture, writeFixtureFile } from './fixture';
 
 /**
  * Fresh mode never restores an existing dataset. `loadLiveDataset` still
@@ -78,7 +76,8 @@ function fail(message: string): never {
 }
 
 async function main(): Promise<void> {
-  // 1. Fail-closed environment guards (offline, before any module loads).
+  // 1. Fail-closed environment guards (offline, before the Nest/Prisma graph
+  //    is imported at all).
   //    1a. Deny inherited external-service credentials FIRST.
   const deniedEnv = checkDeniedExternalEnv(process.env);
   if (!deniedEnv.ok) {
@@ -105,6 +104,45 @@ async function main(): Promise<void> {
     );
     return;
   }
+
+  // 1c. Only NOW load the heavy graph, with Prisma's generated-client
+  //     dotenv loading blocked (see ./dotenv-isolation). Fixed message only.
+  let graph: Awaited<ReturnType<typeof loadHarnessGraph>>;
+  try {
+    graph = await loadHarnessGraph();
+  } catch {
+    fail(
+      'cash-live harness refused to start: module graph could not be loaded with the dotenv block (details suppressed)',
+    );
+    return;
+  }
+  //     Tripwire: nothing in the import may have introduced a denied
+  //     credential. Fails closed exactly like 1a.
+  const deniedAfterImport = checkDeniedExternalEnv(process.env);
+  if (!deniedAfterImport.ok) {
+    for (const reason of deniedAfterImport.reasons) {
+      console.error(`[cash-live] guard (after import): ${reason}`);
+    }
+    fail(
+      'cash-live harness refused to start: external service credentials appeared during module import',
+    );
+    return;
+  }
+  const {
+    configureLiveApp,
+    createLiveTestingModule,
+    issueActorTokens,
+    prismaOf,
+  } = graph.liveHarness;
+  const { seedFictionalDataset } = graph.seed;
+  const {
+    isResumeRequested,
+    loadLiveDataset,
+    loadResumeDatasetPeer,
+    resolveResumeStartup,
+  } = graph.resumeStartup;
+  const { buildFixture, writeFixtureFile } = graph.fixture;
+  const { Logger } = graph;
 
   // 2. Harness config (origin/fixture-path guards, in-memory JWT secret).
   const config = loadLiveHarnessConfig(process.env);

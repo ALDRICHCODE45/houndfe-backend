@@ -1,5 +1,5 @@
 // Dev only: rotates the chatbot service credential of one sucursal. A new
-// credential (same scopes and rate limit) replaces every active one with the
+// credential (same scopes, rate limit and per-class rate limits) replaces every active one with the
 // given name; the old ones are revoked in the same transaction. The raw token
 // is written to a 0600 file under the gitignored `.tmp/` and never printed.
 //
@@ -45,6 +45,23 @@ function parseArgs(argv) {
   return args;
 }
 
+/**
+ * What the replacement keeps from the credentials it replaces: every scope,
+ * the first credential's `rateLimit`, and the per-class `rateLimits` (R2; the
+ * first credential wins a class set on several). Null when none was set.
+ */
+function carriedOver(rows) {
+  const rateLimits = Object.assign(
+    {},
+    ...rows.map((row) => row.rateLimits ?? {}).reverse(),
+  );
+  return {
+    scopes: [...new Set(rows.flatMap((row) => row.scopes))].sort(),
+    rateLimit: rows[0].rateLimit,
+    rateLimits: Object.keys(rateLimits).length > 0 ? rateLimits : null,
+  };
+}
+
 /** Name of the replacement: the base name plus the rotation date. */
 function rotatedName(name, now) {
   const base = name.replace(/ \(rotada \d{4}-\d{2}-\d{2}\)$/, '');
@@ -77,18 +94,18 @@ async function main() {
         isActive: true,
         revokedAt: null,
       },
-      select: { id: true, scopes: true, rateLimit: true },
+      select: { id: true, scopes: true, rateLimit: true, rateLimits: true },
     });
     if (current.length === 0) {
       throw new Error(`no active credential "${args.name}" in ${tenant.name}`);
     }
-    const scopes = [...new Set(current.flatMap((row) => row.scopes))].sort();
+    const { scopes, rateLimit, rateLimits } = carriedOver(current);
     const now = new Date();
     const name = rotatedName(args.name, now);
     const plan = {
       tenant: tenant.name,
       revoke: current.map((row) => row.id),
-      create: { name, scopes, rateLimit: current[0].rateLimit },
+      create: { name, scopes, rateLimit, rateLimits },
       tokenFile: args.out,
     };
     if (!args.apply) {
@@ -112,7 +129,9 @@ async function main() {
             name,
             hashedKey: hashToken(token),
             scopes,
-            rateLimit: plan.create.rateLimit,
+            rateLimit,
+            // Json null needs an explicit marker; leave the column unset.
+            ...(rateLimits ? { rateLimits } : {}),
           },
           select: { id: true },
         });
@@ -134,4 +153,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { newToken, hashToken, parseArgs, rotatedName, writeSecret };
+module.exports = {
+  newToken,
+  hashToken,
+  parseArgs,
+  rotatedName,
+  writeSecret,
+  carriedOver,
+};

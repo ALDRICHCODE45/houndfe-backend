@@ -8,6 +8,8 @@ import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { ChatbotApiService } from './application/chatbot-api.service';
 import { CheckoutService } from './application/checkout.service';
 import { CheckoutController } from './presentation/checkout.controller';
+import { PayInStoreController } from './presentation/pay-in-store.controller';
+import { BotRateLimitModule } from './presentation/guards/bot-rate-limit.module';
 import { ServiceAuthGuard } from './presentation/guards/service-auth.guard';
 import { ChatbotApiController } from './presentation/chatbot-api.controller';
 import { SERVICE_CREDENTIAL_REPOSITORY } from './domain/service-credential.repository';
@@ -39,11 +41,15 @@ import { ReceiptsModule } from '../receipts/receipts.module';
     // T7 — pickup location (name, origin address, opening hours).
     ShippingPickupModule,
     ReceiptsModule,
+    // R2: PostgreSQL route budgets shared by every replica (global).
+    BotRateLimitModule,
   ],
   controllers: [
     ChatbotApiController,
     CheckoutController,
     ShippingQuotesController,
+    // pay-in-store-pickup / T1 — PATCH /chatbot-api/sales/:saleId/payment-intent.
+    PayInStoreController,
   ],
   providers: [
     ChatbotApiService,

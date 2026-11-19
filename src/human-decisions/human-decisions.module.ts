@@ -41,6 +41,7 @@
  */
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request-wrapper.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { DeliveryZonesModule } from '../delivery-zones/delivery-zones.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
@@ -64,7 +65,13 @@ import { HumanDecisionActiveReviewerGuard } from './presentation/guards/human-de
 import { HumanDecisionReviewController } from './presentation/human-decision-review.controller';
 
 @Module({
-  imports: [ChatbotApiModule, DatabaseModule, AuthModule, DeliveryZonesModule],
+  imports: [
+    ChatbotApiModule,
+    DatabaseModule,
+    AuthModule,
+    DeliveryZonesModule,
+    ChatbotRequestWrapperModule,
+  ],
   controllers: [
     BotRestockIntakeController,
     BotRestockPollController,
@@ -99,5 +106,7 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
       useClass: PrismaHumanDecisionReviewResolveRepository,
     },
   ],
+  // The common `resolve` command (unit 3) calls the resolve use case.
+  exports: [HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY],
 })
 export class HumanDecisionsModule {}

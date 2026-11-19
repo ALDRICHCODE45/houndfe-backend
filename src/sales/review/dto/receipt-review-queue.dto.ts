@@ -1,5 +1,6 @@
 import type { ReceiptExtracted } from '../../../receipts/domain/receipt-fields';
 import type { ReceiptMismatch } from '../../../receipts/domain/receipt-mismatch';
+import type { DestinationCheck } from '../../../receipts/domain/receipt-destination-check';
 import type { ReceiptReviewStatus } from '../domain/receipt-review.repository';
 
 /** Private file of a receipt; routes are relative to the API base URL. */
@@ -33,6 +34,12 @@ export type ReceiptReviewQueueItemDto = {
   file: ReceiptReviewFileDto | null;
   extracted: ReceiptExtracted | null;
   mismatch: ReceiptMismatch | null;
+  /**
+   * N18 additive key: whether the receipt destination is one of the tenant's
+   * active payment accounts, computed once at upload. 'unknown' when it could
+   * not be checked (no destination data, no active account, older rows).
+   */
+  destinationCheck: DestinationCheck;
   createdAt: Date;
 };
 

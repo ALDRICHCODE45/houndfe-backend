@@ -600,6 +600,102 @@
       "sessions": 4,
       "memories": 1,
       "prompts": 0
+    },
+    {
+      "id": "c3dd7a90",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-13T15:27:18.655516527Z",
+      "sessions": 226,
+      "memories": 11,
+      "prompts": 0
+    },
+    {
+      "id": "48efc2d0",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-16T21:43:21.156879749Z",
+      "sessions": 6,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "464787eb",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-17T20:41:49.571065884Z",
+      "sessions": 4,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "033e683a",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-17T21:49:31.477798375Z",
+      "sessions": 2,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "cb106331",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-17T22:52:35.156585912Z",
+      "sessions": 4,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "becda9a9",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-18T17:23:22.253996242Z",
+      "sessions": 12,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "d7e07d01",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-18T18:45:08.432553225Z",
+      "sessions": 9,
+      "memories": 2,
+      "prompts": 0
+    },
+    {
+      "id": "eeba3190",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-18T20:03:00.575772139Z",
+      "sessions": 14,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "6732a7ce",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-18T21:16:06.168875837Z",
+      "sessions": 7,
+      "memories": 1,
+      "prompts": 0
+    },
+    {
+      "id": "ce333fe4",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-18T21:42:44.582609416Z",
+      "sessions": 2,
+      "memories": 1,
+      "prompts": 0
+    },
+    {
+      "id": "46ab5cf7",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-19T00:25:26.297223415Z",
+      "sessions": 4,
+      "memories": 0,
+      "prompts": 0
+    },
+    {
+      "id": "08a32a2e",
+      "created_by": "aldrich_coder45",
+      "created_at": "2026-11-19T18:40:30.381599261Z",
+      "sessions": 8,
+      "memories": 0,
+      "prompts": 0
     }
   ]
 }

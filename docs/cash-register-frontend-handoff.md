@@ -305,11 +305,20 @@ frontend should gate UI by these abilities and still handle server-side
   list to mark a FLOAT as reserved or to block another register. Missing
   `read:CashHandover` is a denial (`CASH_PERMISSION_DENIED`), never a silent
   empty page.
-- **Closing list filter quirk**: the shared closing-list DTO accepts and
-  validates `cashierUserId`, but the closing query does **not** apply it. Do not
-  use it to filter closing history. Without audit permission, the closings list
-  is scoped to closings closed by the caller or belonging to the caller's
-  sessions.
+- **Closing list `cashierUserId` (fixed on `feat/cash-redesign-reads`)**: the
+  filter is now applied — it keeps cuts whose closed session belongs to that
+  cashier. Without audit permission, the closings list is still scoped to
+  closings closed by the caller or belonging to the caller's sessions. See
+  [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md).
+- **In-memory list filtering (fixed on `feat/cash-redesign-reads`)**: session
+  and closing lists now filter, count and page in the database whenever the
+  caller's cash grants are unconditional (every role the app builds today);
+  conditional grants keep the per-row path. Same results, totals and order.
+- **New reads (`feat/cash-redesign-reads`)**: `GET /cash-handovers/recipients`
+  (permission `create:CashHandover`) and the `status` / `drawerOpen` filters on
+  `GET /cash-sessions`; the exact `POST /cash-sessions/:id/close` error table
+  and snapshot field types are in
+  [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md).
 - **Not-found status**: cash rule/application violations are thrown as
   `BusinessRuleViolationError` and fall through to the global filter's generic
   `422`, so `CASH_*_NOT_FOUND` is `422`, not `404`. DTO failures are `400`;
@@ -377,8 +386,9 @@ requirements; resolve them together before or during Phase 0.
 7. **Refetch strategy** after freeze/close/handover (no realtime event stream is
    claimed by the contract).
 8. **Error copy mapping**: how `CASH_*` `422` errors map to Spanish UI messages.
-9. **Closing-list filter**: confirm the frontend must hide the unsupported
-   `cashierUserId` filter rather than relying on it server-side.
+9. **Closing-list filter**: resolved — `cashierUserId` is applied server-side
+   on `feat/cash-redesign-reads` (not merged yet; hide it against older
+   backends).
 
 ## Out of scope / do not
 

@@ -37,6 +37,7 @@ const readiness: ReadinessV2 = {
 const reader = { read: jest.fn() };
 const db = {
   user: { findUnique: jest.fn() },
+  role: { findFirst: jest.fn() },
   tenantMembership: { findMany: jest.fn() },
   product: { findFirst: jest.fn() },
   $transaction: jest.fn(),
@@ -48,6 +49,68 @@ let principal: {
   isSuperAdmin: boolean;
 };
 let actions: string[];
+
+type StoredRole = {
+  id: string;
+  tenantId: string | null;
+  isSystem: boolean;
+  name: string;
+  memberUserIds: string[];
+  permissions: { subject: string; action: string }[];
+};
+let roles: StoredRole[];
+// Evaluates the exact persisted global-administrator predicate against
+// stored roles; an unknown predicate shape fails the test loudly.
+function findGlobalRole(args: {
+  where: {
+    tenantId: null;
+    tenantMemberships: { some: { userId: string } };
+    OR: Array<
+      | { isSystem: boolean; name: string }
+      | {
+          permissions: {
+            some: { permission: { subject: string; action: string } };
+          };
+        }
+    >;
+  };
+  select: { id: true };
+}) {
+  const { where } = args;
+  if (where.tenantId !== null || !Array.isArray(where.OR))
+    throw new Error('unexpected global role predicate');
+  const role = roles.find(
+    (r) =>
+      r.tenantId === null &&
+      r.memberUserIds.includes(where.tenantMemberships.some.userId) &&
+      where.OR.some((branch) =>
+        'permissions' in branch
+          ? r.permissions.some(
+              (p) =>
+                p.subject === branch.permissions.some.permission.subject &&
+                p.action === branch.permissions.some.permission.action,
+            )
+          : r.isSystem === branch.isSystem && r.name === branch.name,
+      ),
+  );
+  return Promise.resolve(role ? { id: role.id } : null);
+}
+const superAdminRole = (members: string[]): StoredRole => ({
+  id: 'system-super-admin',
+  tenantId: null,
+  isSystem: true,
+  name: 'Super Admin',
+  memberUserIds: members,
+  permissions: [{ subject: 'all', action: 'manage' }],
+});
+const globalManageAllRole = (members: string[]): StoredRole => ({
+  id: 'global-editors',
+  tenantId: null,
+  isSystem: false,
+  name: 'Global Editors',
+  memberUserIds: members,
+  permissions: [{ subject: 'all', action: 'manage' }],
+});
 
 @Global()
 @Module({
@@ -90,6 +153,8 @@ describe('GET /products/:productId/editorial/draft/readiness', () => {
     jest.clearAllMocks();
     principal = { userId: actorId, tenantId, isSuperAdmin: false };
     actions = ['read'];
+    roles = [];
+    db.role.findFirst.mockImplementation(findGlobalRole);
     db.user.findUnique.mockResolvedValue({ isActive: true });
     db.tenantMembership.findMany.mockImplementation(() =>
       Promise.resolve([
@@ -194,5 +259,99 @@ describe('GET /products/:productId/editorial/draft/readiness', () => {
   test('never touches the write surfaces', async () => {
     await get();
     expect(db.$transaction).not.toHaveBeenCalled();
+  });
+  describe('global mode (positive)', () => {
+    const productTenant = '44444444-4444-4444-8444-444444444444';
+    const expectGlobalRead = async () => {
+      const response = await get().set('x-tenant-id', 'foreign');
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual(readiness);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.headers['editorial-contract-version']).toBe('2');
+      expect(response.headers['editorial-vocabulary-revision']).toBe(revision);
+      // Tenant comes from the persisted Product, never from the request.
+      expect(db.product.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { id: productId },
+        select: { id: true, tenantId: true },
+      });
+      expect(reader.read).toHaveBeenCalledWith(
+        { actorId, tenantId: productTenant, productId },
+        revision,
+      );
+    };
+    beforeEach(() => {
+      principal = { userId: actorId, tenantId: null, isSuperAdmin: true };
+      // No membership in the Product's tenant: authority is the global role.
+      db.tenantMembership.findMany.mockResolvedValue([]);
+      db.product.findFirst.mockResolvedValue({
+        id: productId,
+        tenantId: productTenant,
+      });
+    });
+
+    test('global Super Admin (system role, tenantId null) reads readiness of any tenant Product', async () => {
+      roles = [superAdminRole([actorId])];
+      await expectGlobalRead();
+    });
+
+    test('global manage:all role (tenantId null) reads readiness of any tenant Product', async () => {
+      roles = [globalManageAllRole([actorId])];
+      await expectGlobalRead();
+    });
+
+    test('Super Admin with a selected tenant reads within that tenant only', async () => {
+      roles = [superAdminRole([actorId])];
+      principal = { userId: actorId, tenantId, isSuperAdmin: true };
+      db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
+      const response = await get();
+      expect(response.status).toBe(200);
+      expect(db.product.findFirst).toHaveBeenNthCalledWith(1, {
+        where: { id: productId, tenantId },
+        select: { id: true, tenantId: true },
+      });
+      expect(reader.read).toHaveBeenCalledWith(
+        { actorId, tenantId, productId },
+        revision,
+      );
+    });
+
+    test('tenant role with manage:all reads readiness in its tenant', async () => {
+      principal = { userId: actorId, tenantId, isSuperAdmin: false };
+      db.product.findFirst.mockResolvedValue({ id: productId, tenantId });
+      db.tenantMembership.findMany.mockResolvedValue([
+        {
+          userId: actorId,
+          tenantId,
+          role: {
+            permissions: [{ permission: { subject: 'all', action: 'manage' } }],
+          },
+        },
+      ]);
+      expect((await get()).status).toBe(200);
+      expect(reader.read).toHaveBeenCalledWith(
+        { actorId, tenantId, productId },
+        revision,
+      );
+    });
+
+    test.each([
+      [
+        'a non-system "Super Admin" lookalike',
+        () => [
+          { ...superAdminRole([actorId]), isSystem: false, permissions: [] },
+        ],
+      ],
+      [
+        'a global role without membership',
+        () => [superAdminRole(['someone-else'])],
+      ],
+      [
+        'a tenant-scoped manage:all role',
+        () => [{ ...globalManageAllRole([actorId]), tenantId }],
+      ],
+    ])('rejects %s before reading', async (_, stored) => {
+      roles = stored();
+      await rejected(get(), 403, 'FORBIDDEN');
+    });
   });
 });

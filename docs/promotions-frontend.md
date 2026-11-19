@@ -260,7 +260,7 @@ Endpoint: `POST /promotions`
 
 - `type = ORDER_DISCOUNT`
 - `discountType`, `discountValue`
-- `minPurchaseAmountCents` opcional
+- `minPurchaseAmountCents` opcional (se compara contra el subtotal neto de descuentos manuales del cajero y antes de promociones de línea; ver §16.1)
 
 ```json
 {
@@ -751,9 +751,15 @@ export interface PromotionResponse {
 | `PRODUCT_DISCOUNT` | una línea elegible | mejor descuento en centavos (`lineTotalSavingCents`) |
 | `BUY_X_GET_Y` | línea que matchea el `targetItems` (per-line `quantity >= buyQuantity`) | idem, 2-way max entre PD y BXGY |
 | `ADVANCED` | línea del lado GET, recompensada cuando la suma agregada de líneas BUY-side alcanza `buyQuantity` | idem, 3-way max entre PD, BXGY y ADVANCED |
-| `ORDER_DISCOUNT` | subtotal post-línea | único AUTO/MANUAL activo (sin stacking) |
+| `ORDER_DISCOUNT` | subtotal post-línea (después de **todos** los descuentos de línea: promociones y descuentos manuales) | único AUTO/MANUAL activo (sin stacking) |
 
 Tie-break: `promotionId` ascendente. No hay stacking de ganadores en una misma línea.
+
+Base de `ORDER_DISCOUNT` (aplica a toda venta):
+
+- El porcentaje (o el tope del monto fijo) se calcula sobre el subtotal **ya descontado**: precio de cada línea menos su promoción de línea **y** menos su descuento manual del cajero (incluido el descuento global, que se guarda como descuento manual en cada línea). Ejemplo: $689.00 con 10% manual + promoción de orden 10% → $689.00 − $68.90 = $620.10; − $62.01 = **$558.09** (antes se calculaba sobre $689.00 y daba $551.20).
+- Cada descuento de línea se resta por la **línea completa** (descuento por unidad × cantidad). Ejemplo: 2 × $689.00 con promoción de línea 10% + promoción de orden 10% → base 2 × $620.10 = $1,240.20; descuento de orden **$124.02**; total $1,116.18.
+- `minPurchaseAmountCents` se compara contra el subtotal **neto de descuentos manuales** pero **antes** de las promociones de línea. Ejemplo: mínimo $650.00 con una línea de $689.00 y 10% manual ($620.10) → la promoción de orden **no** aplica.
 
 Restricciones de elegibilidad:
 

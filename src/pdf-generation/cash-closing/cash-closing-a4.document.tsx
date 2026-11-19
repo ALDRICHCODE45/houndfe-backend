@@ -245,6 +245,9 @@ function MetaCard({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
         label="Cerró"
         actor={{ name: snapshot.closedByName, id: snapshot.closedByUserId }}
       />
+      {snapshot.openedAt === null ? null : (
+        <Field label="Apertura" value={formatInstant(snapshot.openedAt)} />
+      )}
       <Field label="Conteo" value={formatInstant(snapshot.countedAt)} />
       <Field
         label="Verificación"

@@ -54,6 +54,18 @@ export function clampPercentageToSafeRange(percent: number): number {
 }
 
 /**
+ * order-promo-base-net-of-manual (S2) — whole-line cents of a seller's
+ * manual discount, read only on `hasManualDiscount` lines and clamped to
+ * `[0, line gross]` so a malformed input never inflates or flips the base.
+ */
+function manualLineDiscountCents(line: PosEvalLine): number {
+  if (!line.hasManualDiscount) return 0;
+  const cents = line.manualDiscountCents ?? 0;
+  if (!Number.isFinite(cents) || cents <= 0) return 0;
+  return Math.min(cents, line.effectiveUnitPriceCents * line.quantity);
+}
+
+/**
  * WU1 — Pure helper for BUY_X_GET_Y reward computation (design.md Decision 2;
  * spec.md:60-91,102-106). Per-line (Q2): a single line must have
  * `quantity >= buyQuantity` to trigger; the engine gates on that BEFORE
@@ -492,10 +504,17 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
       remainingProductUnitsById.set(promo.id, promo.remainingProductUnits);
     }
 
-    // 2. Pre-promo subtotal (pre-ANY-promo: pre-line-discount AND pre-order).
-    //    Used by ORDER_DISCOUNT eligibility (minPurchaseAmountCents).
+    // 2. Pre-promo subtotal (pre-ANY-promo: pre-engine-line-discount AND
+    //    pre-order). Used by ORDER_DISCOUNT eligibility
+    //    (minPurchaseAmountCents).
+    //    order-promo-base-net-of-manual (S2): a seller's manual line
+    //    discount is NOT a promotion — it lowers the price the customer
+    //    pays (like a custom price), so the minimum is checked net of it.
     const prePromoSubtotalCents = input.lines.reduce(
-      (sum, line) => sum + line.effectiveUnitPriceCents * line.quantity,
+      (sum, line) =>
+        sum +
+        line.effectiveUnitPriceCents * line.quantity -
+        manualLineDiscountCents(line),
       0,
     );
 
@@ -552,21 +571,29 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
     this.evaluateAdvancedPass(input.lines, candidates, input, lineResults);
 
     // 4. Sale-level ORDER_DISCOUNT best-wins.
-    //    Subtotal after per-line discounts has been applied.
+    //    Subtotal after EVERY per-line discount: the engine-applied
+    //    promotion discounts AND (order-promo-base-net-of-manual, S2) the
+    //    seller's manual line discounts. The two never overlap — engine
+    //    line passes skip `hasManualDiscount` lines.
+    //    T2 — WHOLE-line cents: per-unit results (PRODUCT_DISCOUNT) are
+    //    multiplied by quantity; BXGY / ADVANCED already carry the
+    //    whole-line reward. (`computeAppliedDiscountCents` alone is
+    //    per-unit for PRODUCT_DISCOUNT and under-netted qty > 1 lines.)
     const lineDiscountByItemId = new Map<string, number>();
     for (const result of lineResults) {
       const line = input.lines.find((l) => l.itemId === result.itemId);
       if (!line) continue;
       lineDiscountByItemId.set(
         result.itemId,
-        this.computeAppliedDiscountCents(line, result),
+        this.existingLineResultTotalCents(line, result),
       );
     }
     const postLineSubtotalCents = input.lines.reduce(
       (sum, line) =>
         sum +
         line.effectiveUnitPriceCents * line.quantity -
-        (lineDiscountByItemId.get(line.itemId) ?? 0),
+        (lineDiscountByItemId.get(line.itemId) ?? 0) -
+        manualLineDiscountCents(line),
       0,
     );
 
@@ -1650,10 +1677,12 @@ export class PosEvaluatePromotionsUseCase implements IPosEvaluatePromotionsUseCa
   }
 
   /**
-   * Compute the per-line discount the entity-side `applyDiscount`
-   * would produce given the emitted result. Used to compute the
-   * post-line-discount subtotal feeding ORDER_DISCOUNT best-wins.
-   * Matches the math used in `pickBestPerLine`.
+   * Compute the discount the entity-side `applyDiscount` would produce
+   * given the emitted result: PER-UNIT for PRODUCT_DISCOUNT, whole-line
+   * for BXGY / ADVANCED. Callers needing whole-line cents (e.g. the
+   * ORDER_DISCOUNT post-line subtotal) go through
+   * `existingLineResultTotalCents`, which multiplies the per-unit case
+   * by quantity. Matches the math used in `pickBestPerLine`.
    *
    * WU3 (buy-x-get-y) — discriminated `PosEvalLineResult`: when the
    * winning result is BXGY (kind === 'buy-x-get-y'), the LINE-TOTAL

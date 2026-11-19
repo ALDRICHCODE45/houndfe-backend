@@ -522,9 +522,44 @@ describe('ReceiptReviewService', () => {
           file: null,
           extracted: null,
           mismatch: null,
+          destinationCheck: 'unknown',
           createdAt: new Date('2026-06-13T10:01:00.000Z'),
         },
       ]);
+    });
+
+    it('exposes the persisted destinationCheck; rows without it read as unknown', async () => {
+      const { service, repository } = makeService();
+      repository.findPendingForSale.mockResolvedValue([
+        makeReceipt({
+          extracted: {
+            amountCents: 25000,
+            destinationName: 'Abril Alejandra Vazquez Ramos',
+            destinationAccountLast4: '9616',
+          },
+          mismatch: {
+            debtCents: 25000,
+            extractedDiffCents: 0,
+            flagged: false,
+            destinationCheck: 'mismatch',
+          },
+        }),
+        makeReceipt({
+          id: 'receipt-2',
+          mismatch: { debtCents: 1500, extractedDiffCents: 0, flagged: false },
+        }),
+      ]);
+
+      const [flagged, older] = await service.listPending('sale-1');
+
+      expect(flagged.destinationCheck).toBe('mismatch');
+      expect(flagged.extracted).toMatchObject({
+        destinationName: 'Abril Alejandra Vazquez Ramos',
+        destinationAccountLast4: '9616',
+      });
+      // The amount flag keeps its meaning.
+      expect(flagged.mismatch?.flagged).toBe(false);
+      expect(older.destinationCheck).toBe('unknown');
     });
 
     it('maps a private upload to relative file routes, extracted data and mismatch', async () => {
@@ -630,6 +665,7 @@ describe('ReceiptReviewService', () => {
           'file',
           'extracted',
           'mismatch',
+          'destinationCheck',
           'createdAt',
         ].sort(),
       );

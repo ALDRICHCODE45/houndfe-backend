@@ -134,4 +134,50 @@ export const TENANT_SCOPED_MODELS = new Set([
   // shipping-zones / T7 — sucursal opening hours for store pickup. Same
   // fail-open allowlist semantics; the service also filters by `tenantId`.
   'TenantOpeningHours',
+  // human-intervention / unit 2 — chatbot request inbox. Same fail-open
+  // allowlist semantics: without these entries a request, its audit, a
+  // customer group or the folio counter of another sucursal could be read or
+  // rewritten through TenantPrismaService.
+  'ChatbotRequest',
+  'ChatbotRequestEvent',
+  'ChatbotCustomerGroup',
+  'ChatbotRequestFolioCounter',
+  // Slice 2b — staff command idempotency receipts.
+  'StaffCommandReceipt',
+  // Slice 5a — bot idempotency receipts (merged creates, customer cancels).
+  'ChatbotBotReceipt',
+  // Slice 5b — the bot feed and its retention watermark. Same fail-open
+  // allowlist semantics: without them one sucursal's bot could read another's
+  // items or acknowledge its deliveries.
+  'ChatbotFeedItem',
+  'ChatbotFeedRetention',
+  // Unit 6 — in-app notices. Same fail-open allowlist semantics: without it
+  // a person could list or mark read another sucursal's notices through
+  // TenantPrismaService. `NotificationPreference` is per person, not per
+  // tenant, and is read by `userId` from the JWT.
+  'Notification',
+  // Unit 7a — per-sucursal attention settings and their audit trail. Same
+  // fail-open allowlist semantics: without these entries a sucursal could read
+  // or rewrite another sucursal's business hours, SLA windows or audit events
+  // through TenantPrismaService.
+  'ChatbotAttentionSettings',
+  'ChatbotAttentionSettingsEvent',
+  'RealtimeEvent',
+  'RealtimeEventRetention',
+  // Conversation mirror (human-intervention / unit 9). Same fail-open allowlist
+  // semantics: without these entries a read through TenantPrismaService would
+  // not inject `tenantId` and could return another sucursal's messages or files.
+  'ChatbotConversation',
+  'ConversationMessage',
+  'ConversationMedia',
+  // S2: the durable record of objects written (or orphaned) in storage. It has
+  // a `tenantId` and no foreign key (it outlives the tenant on purpose); the
+  // sweep that settles it is a system flow on the global client.
+  'ConversationMediaIntent',
+  // Live conversation (human-intervention / unit 11): sessions and the paid
+  // template record. Both carry `tenantId` and a tenant FK.
+  'ChatbotLiveSession',
+  'ChatbotSessionTemplate',
+  // Unit 14 (§4.9): the per-block capacity counter. `tenantId` + tenant FK.
+  'ScheduledSlotCounter',
 ]);

@@ -180,7 +180,8 @@ export class SaleCanceledEvent {
       | 'ORDER_ERROR'
       | 'OUT_OF_STOCK'
       | 'DUPLICATE_SALE'
-      | 'OTHER',
+      | 'OTHER'
+      | 'HOLD_EXPIRED',
     public readonly refundedCents: number,
     public readonly restockedItems: Array<{
       productId: string;

@@ -13,8 +13,9 @@
  * write; the same key with another payload is IDEMPOTENCY_CONFLICT; a
  * different key against a resolved row is ALREADY_RESOLVED.
  */
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { ChatbotRequestWrapper } from '../../chatbot-requests/infrastructure/chatbot-request-wrapper';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { ZoneSettings } from '../domain/delivery-zone.policy';
 import {
@@ -119,7 +120,12 @@ function settingsOf(
 
 @Injectable()
 export class PrismaDeliveryZoneValidationRepository implements IDeliveryZoneValidationRepository {
-  constructor(private readonly tenantPrisma: TenantPrismaService) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaService,
+    // Optional so specs that build the repository alone keep their behavior;
+    // the module always provides it (unit 3 wrapping).
+    @Optional() private readonly wrapper?: ChatbotRequestWrapper,
+  ) {}
 
   async listPending(
     query: ListPendingValidationsQuery,
@@ -196,6 +202,8 @@ export class PrismaDeliveryZoneValidationRepository implements IDeliveryZoneVali
         return fail('DELIVERY_ZONE_VALIDATION_NOT_FOUND');
       }
       await lockZipCode(db, tenantId, located.zipCode);
+      // Lock order: postal code, the wrapping requests, then the validation.
+      await this.wrapper?.lockLegacy({ validationId: command.validationId });
       const current = await this.readRow(db, tenantId, command.validationId);
 
       if (current.status === 'RESOLVED') {
@@ -261,6 +269,19 @@ export class PrismaDeliveryZoneValidationRepository implements IDeliveryZoneVali
           resolvedAt,
         },
       });
+
+      // Every requester of the validation was settled above; close their
+      // chatbot requests with it (R9, §2.4).
+      await this.wrapper?.closeLegacy(
+        { validationId: current.id },
+        { userId: actor.id, displayName: actor.displayName },
+        command.action,
+        {
+          zoneType: settings.type,
+          surchargeCents: settings.surchargeCents,
+          etaDays: settings.etaDays,
+        },
+      );
 
       const committed = await this.readRow(db, tenantId, current.id);
       return this.result(db, tenantId, committed, 'resolved');

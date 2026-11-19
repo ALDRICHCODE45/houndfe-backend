@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { chatbotMgSpacingQueries } from './chatbot-mg-spacing';
+import {
+  ACCENT_FROM,
+  ACCENT_TO,
+  chatbotSearchTokenSets,
+} from './chatbot-token-search';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { PublicBranchDto } from '../application/dto/public-branch.dto';
@@ -11,6 +16,7 @@ import type {
   PublicBranchProfile,
   PublicCartCandidate,
   PublicProductDetailProjection,
+  ProductSearchMatch,
   PublicProductListProjection,
   ResolvedPublicCatalogContext,
 } from '../application/ports/public-catalog.repository';
@@ -266,9 +272,11 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     };
   }
 
-  async findProducts(
-    params: ListProductsParams,
-  ): Promise<{ items: ProductWithIncludes[]; total: number }> {
+  async findProducts(params: ListProductsParams): Promise<{
+    items: ProductWithIncludes[];
+    total: number;
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
+  }> {
     const client = this.tenantPrisma.getClient();
 
     const where: Prisma.ProductWhereInput = {
@@ -278,6 +286,17 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
     };
 
     if (params.categoryId) where.categoryId = params.categoryId;
+    if (params.q && params.chatbotTokenSearch) {
+      const tokenSets = chatbotSearchTokenSets(
+        params.chatbotMgSpacing
+          ? chatbotMgSpacingQueries(params.q)
+          : [params.q],
+      );
+      // No searchable word (e.g. punctuation only): keep the whole-phrase path.
+      if (tokenSets.length > 0) {
+        return this.findProductsByTokens(client, params, where, tokenSets);
+      }
+    }
     if (params.q) {
       const queries = params.chatbotMgSpacing
         ? chatbotMgSpacingQueries(params.q)
@@ -337,40 +356,7 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
       orderBy,
       skip: (params.page - 1) * params.limit,
       take: params.limit,
-      include: {
-        category: { select: { id: true, name: true } },
-        brand: { select: { name: true } },
-        images: {
-          where: { variantId: null },
-          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-          take: 1,
-          select: { url: true },
-        },
-        priceLists: {
-          where: priceListWhere,
-          select: { priceCents: true },
-          take: 1,
-        },
-        variants: {
-          where: { catalogPublishMode: { not: 'OFF' } },
-          select: {
-            id: true,
-            name: true,
-            option: true,
-            value: true,
-            quantity: true,
-            minQuantity: true,
-            // F1.WU5c2 — carried so the mapper can defensively filter OFF
-            // variants for alternate/legacy callers.
-            catalogPublishMode: true,
-            variantPrices: {
-              where: variantPriceWhere,
-              select: { priceCents: true },
-              take: 1,
-            },
-          },
-        },
-      },
+      include: this.productListInclude(priceListWhere, variantPriceWhere),
     });
 
     const [items, total] = await Promise.all([
@@ -385,6 +371,144 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
         params.sort,
       ),
       total,
+    };
+  }
+
+  /**
+   * Chatbot token search. Text matching runs in one tenant-scoped SQL query
+   * that folds accents with `translate()` (no `unaccent` extension) and checks
+   * each word with `strpos` over name + brand + category + non-OFF variant
+   * text (no LIKE wildcards to escape). It returns, per candidate product and
+   * per token set, which words match. The usual Prisma gates (publication
+   * survivorship, online-catalog flag, category) are then applied to those ids
+   * BEFORE the AND/OR decision, so a gated-out AND match never suppresses the
+   * OR fallback.
+   *
+   * S5 — "effective" words: a word that matches no product that SURVIVED the
+   * gates (so also a word found only in unpublished/hidden products, or only
+   * in another tenant) is ignored when deciding "all". If every word of a set
+   * is ignored the set matches nothing (0 items). "All" = every effective
+   * word; otherwise OR fallback ranked by matched-word count, marked
+   * `partial`. Cost is one tenant-bounded scan of products, the same order as
+   * the existing unindexed `ILIKE '%q%'`.
+   */
+  private async findProductsByTokens(
+    client: ReturnType<TenantPrismaService['getClient']>,
+    params: ListProductsParams,
+    where: Prisma.ProductWhereInput,
+    tokenSets: string[][],
+  ): Promise<{
+    items: ProductWithIncludes[];
+    total: number;
+    matches?: ReadonlyMap<string, ProductSearchMatch>;
+  }> {
+    const tenantId = this.tenantPrisma.getTenantId();
+
+    // One boolean[] column per token set: m{i}[j] = token j of set i matches.
+    const columns = tokenSets.map((tokens, i) => ({
+      column: Prisma.raw(`m${i}`),
+      expr: Prisma.sql`ARRAY[${Prisma.join(
+        tokens.map((t) => Prisma.sql`(strpos(h.hay, ${t}) > 0)`),
+        ', ',
+      )}]`,
+    }));
+    const anyMatch = Prisma.join(
+      columns.map((c) => Prisma.sql`true = ANY(${c.column})`),
+      ' OR ',
+    );
+    type Candidate = { id: string } & Record<string, unknown>;
+    const candidates = await client.$queryRaw<Candidate[]>(Prisma.sql`
+      SELECT p.id, ${Prisma.join(
+        columns.map((c) => c.column),
+        ', ',
+      )}
+      FROM products p
+      LEFT JOIN brands b ON b.id = p."brandId"
+      LEFT JOIN categories c ON c.id = p."categoryId"
+      CROSS JOIN LATERAL (
+        SELECT lower(translate(
+                 concat_ws(' ', p.name, b.name, c.name, (
+                   SELECT string_agg(concat_ws(' ', v.name, v.option, v.value), ' ')
+                   FROM variants v
+                   WHERE v."productId" = p.id
+                     AND v."tenantId" = p."tenantId"
+                     AND v."catalogPublishMode" <> 'OFF'
+                 )),
+                 ${ACCENT_FROM}, ${ACCENT_TO}
+               )) AS hay
+      ) h
+      CROSS JOIN LATERAL (SELECT ${Prisma.join(
+        columns.map((c) => Prisma.sql`${c.expr} AS ${c.column}`),
+        ', ',
+      )}) m
+      WHERE p."tenantId" = ${tenantId}
+        AND p."includeInOnlineCatalog" = true
+        AND p.type = 'PRODUCT'
+        AND (${anyMatch})
+    `);
+
+    if (candidates.length === 0) return { items: [], total: 0 };
+
+    const byCandidate = new Map(candidates.map((c) => [c.id, c]));
+    const gated = await client.product.findMany({
+      where: { ...where, id: { in: [...byCandidate.keys()] } },
+      orderBy: this.resolveOrderBy(params.sort),
+      select: { id: true },
+    });
+    const survivors = gated.map(({ id }) => byCandidate.get(id)!);
+
+    // Effective words per set: those matching at least one surviving product.
+    const effective = tokenSets.map((tokens, i) => {
+      const key = `m${i}`;
+      return tokens.map((_, j) =>
+        survivors.some((c) => (c[key] as boolean[])[j]),
+      );
+    });
+    const scored = survivors.map((c) => {
+      let score = 0;
+      let all = false;
+      tokenSets.forEach((_, i) => {
+        const flags = c[`m${i}`] as boolean[];
+        const used = flags.filter((hit, j) => effective[i][j] && hit).length;
+        const needed = effective[i].filter(Boolean).length;
+        score = Math.max(score, used);
+        if (needed > 0 && used === needed) all = true;
+      });
+      return { id: c.id, score, all };
+    });
+    const matching = scored.filter((c) => c.score > 0);
+    const allMatches = matching.filter((c) => c.all);
+    const chosen = allMatches.length > 0 ? allMatches : matching;
+    const kind: ProductSearchMatch = allMatches.length > 0 ? 'all' : 'partial';
+    const ranked = chosen
+      // Array#sort is stable: ties keep the existing (newest-first) order.
+      .map((c, index) => ({ c, index }))
+      .sort((a, b) => b.c.score - a.c.score || a.index - b.index)
+      .map(({ c }) => c.id);
+
+    const pageIds = ranked.slice(
+      (params.page - 1) * params.limit,
+      params.page * params.limit,
+    );
+    if (pageIds.length === 0) return { items: [], total: ranked.length };
+
+    const { priceListWhere, variantPriceWhere } = this.resolvePriceFilters(
+      params.globalPriceListId,
+    );
+    const rows = await client.product.findMany({
+      where: { id: { in: pageIds } },
+      include: this.productListInclude(priceListWhere, variantPriceWhere),
+    });
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const items = pageIds.flatMap((id) => byId.get(id) ?? []);
+    return {
+      items: this.sortByPriceIfNeeded(
+        // SAFETY: same include shape as findProducts (ProductWithIncludes).
+        items as unknown as ProductWithIncludes[],
+        params.sort,
+      ),
+      total: ranked.length,
+      matches: new Map(pageIds.map((id) => [id, kind] as const)),
     };
   }
 
@@ -1310,6 +1434,47 @@ export class PrismaPublicCatalogRepository implements IPublicCatalogRepository {
 
     // SAFETY: The include shape above matches ProductDetailWithIncludes; this bridges Prisma's conditional query inference.
     return product as unknown as ProductDetailWithIncludes;
+  }
+
+  /** Shared include shape of the product list read (ProductWithIncludes). */
+  private productListInclude(
+    priceListWhere: Prisma.PriceListWhereInput,
+    variantPriceWhere: Prisma.VariantPriceWhereInput,
+  ) {
+    return {
+      category: { select: { id: true, name: true } },
+      brand: { select: { name: true } },
+      images: {
+        where: { variantId: null },
+        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        take: 1,
+        select: { url: true },
+      },
+      priceLists: {
+        where: priceListWhere,
+        select: { priceCents: true },
+        take: 1,
+      },
+      variants: {
+        where: { catalogPublishMode: { not: 'OFF' } },
+        select: {
+          id: true,
+          name: true,
+          option: true,
+          value: true,
+          quantity: true,
+          minQuantity: true,
+          // F1.WU5c2 — carried so the mapper can defensively filter OFF
+          // variants for alternate/legacy callers.
+          catalogPublishMode: true,
+          variantPrices: {
+            where: variantPriceWhere,
+            select: { priceCents: true },
+            take: 1,
+          },
+        },
+      },
+    } satisfies Prisma.ProductInclude;
   }
 
   /**

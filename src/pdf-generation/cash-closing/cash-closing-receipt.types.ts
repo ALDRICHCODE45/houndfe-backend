@@ -15,9 +15,9 @@
  * `verifiedCents`, `verifierUserId`, `channels`, `handovers`, `countedAt`,
  * `verifiedAt`, `closedAt`, `closedByUserId`.
  *
- * Optional extras (`registerName`, actor names, notes) are normalized to
- * `string | null` — never guessed — and are used ONLY for display. No live
- * lookup or catalog read ever touches this receipt.
+ * Optional extras (`registerName`, actor names, notes, `openedAt`) are
+ * normalized to `string | null` — never guessed — and are used ONLY for
+ * display. No live lookup or catalog read ever touches this receipt.
  */
 import type { CashClosingSnapshot } from '../../cash-register/domain/cash-snapshot';
 
@@ -42,6 +42,12 @@ export interface CashClosingReceiptSnapshot extends CashClosingSnapshot {
   readonly verificationNotes: string | null;
   /** Closer's closing notes. */
   readonly closingNotes: string | null;
+  /**
+   * Session opening time (ISO, verbatim), frozen by CLOSE since
+   * cash-redesign-reads T2. `null` for snapshots frozen before it — never
+   * looked up live.
+   */
+  readonly openedAt: string | null;
 }
 
 /** Validated closing envelope handed to the A4 template. */

@@ -407,4 +407,301 @@ describe('cash-adapter-queries — direct module contract', () => {
       });
     });
   });
+
+  describe('DB-side list pagination (cash-redesign-reads S5)', () => {
+    function seedThree(host: Host): void {
+      seedSession(host, {
+        id: 's-1',
+        cashierUserId: 'u1',
+        openedAt: new Date('2026-01-01T10:00:00Z'),
+      });
+      seedSession(host, {
+        id: 's-2',
+        cashierUserId: 'u2',
+        openedAt: new Date('2026-01-01T11:00:00Z'),
+      });
+      seedSession(host, {
+        id: 's-3',
+        cashierUserId: 'u1',
+        openedAt: new Date('2026-01-01T12:00:00Z'),
+      });
+    }
+
+    it('pushes skip/take/count to the DB for unconditional audit grants', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+      const count = jest.spyOn(tx.cashSession, 'count');
+
+      const doc = asJson(
+        await querySessions(tx, host.tenantId, actor('u1'), {
+          kind: 'SESSIONS',
+          page: { page: 2, limit: 1 },
+        }),
+      );
+
+      expect(doc.total).toBe(3);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['s-2']);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 1, take: 1 }),
+      );
+    });
+
+    it('scopes own-only unconditional readers in the DB where clause', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+
+      const doc = asJson(
+        await querySessions(
+          tx,
+          host.tenantId,
+          actor('u1', [['read', 'CashSession']]),
+          { kind: 'SESSIONS', page: { page: 1, limit: 25 } },
+        ),
+      );
+
+      expect(doc.total).toBe(2);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['s-3', 's-1']);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 25 }),
+      );
+    });
+
+    it('keeps the per-row path (no DB skip/take) for conditional grants', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+      can('read', 'CashSession');
+      can('read', 'CashSessionAudit', { cashierUserId: 'u2' });
+      const conditional: CashActor = { userId: 'u1', ability: build() };
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+
+      const doc = asJson(
+        await querySessions(tx, host.tenantId, conditional, {
+          kind: 'SESSIONS',
+          page: { page: 1, limit: 25 },
+        }),
+      );
+
+      expect(asItems(doc.items).map((item) => item.id)).toEqual([
+        's-3',
+        's-2',
+        's-1',
+      ]);
+      expect(findMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ take: expect.anything() }),
+      );
+    });
+
+    it('pushes closing pagination to the DB and honors cashierUserId', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      for (const [index, sessionId] of ['s-1', 's-2', 's-3'].entries()) {
+        host.db.closings.push({
+          id: `cl-${index + 1}`,
+          tenantId: host.tenantId,
+          sessionId,
+          folio: `CC-${index + 1}`,
+          closedByUserId: 'u9',
+          snapshotJson: {},
+          createdAt: new Date(Date.UTC(2026, 0, 2, index)),
+        });
+      }
+      const findMany = jest.spyOn(tx.cashClosing, 'findMany');
+      const count = jest.spyOn(tx.cashClosing, 'count');
+
+      const doc = asJson(
+        await queryClosings(tx, host.tenantId, actor('u9'), {
+          page: 1,
+          limit: 1,
+          cashierUserId: 'u1',
+        }),
+      );
+
+      expect(doc.total).toBe(2);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['cl-3']);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 1 }),
+      );
+    });
+  });
+
+  describe('closing list fields (cash-redesign-reads T2/S7)', () => {
+    function seedClosed(host: Host): void {
+      seedActors(host, ['u1', 'u2', 'u9']);
+      seedRegister(host, 'reg-1', 'Caja 1');
+      seedRegister(host, 'reg-2', 'Caja 2');
+      const rows: Array<[string, string, string, Record<string, unknown>]> = [
+        [
+          's-1',
+          'reg-1',
+          'u1',
+          {
+            comparison: { declarationDifferenceCents: -500 },
+            declaredCents: 1,
+            expectedCents: 1,
+          },
+        ],
+        ['s-2', 'reg-2', 'u2', { declaredCents: 1200, expectedCents: 1000 }],
+        ['s-3', 'reg-1', 'u1', {}],
+      ];
+      for (const [
+        index,
+        [id, registerId, cashier, snapshot],
+      ] of rows.entries()) {
+        seedSession(host, {
+          id,
+          registerId,
+          cashierUserId: cashier,
+          status: 'CLOSED',
+          openedAt: new Date(Date.UTC(2026, 0, 1, index)),
+          closedAt: new Date(Date.UTC(2026, 0, 1, index, 30)),
+        });
+        host.db.closings.push({
+          id: `cl-${index + 1}`,
+          tenantId: host.tenantId,
+          sessionId: id,
+          folio: `CC-${index + 1}`,
+          closedByUserId: 'u9',
+          snapshotJson: snapshot,
+          createdAt: new Date(Date.UTC(2026, 0, 2, index)),
+        });
+      }
+    }
+
+    const expectedItems = [
+      {
+        id: 'cl-3',
+        register: { id: 'reg-1', name: 'Caja 1' },
+        cashier: { userId: 'u1', displayName: 'Name u1' },
+        differenceCents: null,
+      },
+      {
+        id: 'cl-2',
+        register: { id: 'reg-2', name: 'Caja 2' },
+        cashier: { userId: 'u2', displayName: 'Name u2' },
+        differenceCents: 200,
+      },
+      {
+        id: 'cl-1',
+        register: { id: 'reg-1', name: 'Caja 1' },
+        cashier: { userId: 'u1', displayName: 'Name u1' },
+        differenceCents: -500,
+      },
+    ];
+
+    it('adds register, cashier and the frozen difference on the DB path', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedClosed(host);
+
+      const doc = asJson(
+        await queryClosings(tx, host.tenantId, actor('u9'), {
+          page: 1,
+          limit: 25,
+        }),
+      );
+
+      expect(asItems(doc.items)).toEqual(
+        expectedItems.map((item): unknown => expect.objectContaining(item)),
+      );
+    });
+
+    it('returns the same fields on the per-row (conditional grant) path', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedClosed(host);
+      const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+      can('read', 'CashClosing');
+      can('read', 'CashSessionAudit', { tenantId: host.tenantId });
+      const conditional: CashActor = { userId: 'u9', ability: build() };
+
+      const doc = asJson(
+        await queryClosings(tx, host.tenantId, conditional, {
+          page: 1,
+          limit: 25,
+        }),
+      );
+
+      expect(asItems(doc.items)).toEqual(
+        expectedItems.map((item): unknown => expect.objectContaining(item)),
+      );
+    });
+
+    it('batches the per-page lookups instead of reading per row', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedClosed(host);
+      const sessions = jest.spyOn(tx.cashSession, 'findMany');
+      const registers = jest.spyOn(tx.cashRegister, 'findMany');
+      const users = jest.spyOn(tx.user, 'findMany');
+      const findFirst = [
+        jest.spyOn(tx.cashSession, 'findFirst'),
+        jest.spyOn(tx.cashRegister, 'findFirst'),
+        jest.spyOn(tx.user, 'findFirst'),
+      ];
+
+      await queryClosings(tx, host.tenantId, actor('u9'), {
+        page: 1,
+        limit: 25,
+      });
+
+      expect(sessions).toHaveBeenCalledTimes(1);
+      expect(registers).toHaveBeenCalledTimes(1);
+      expect(users).toHaveBeenCalledTimes(1);
+      for (const spy of findFirst) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    });
+
+    it('exposes openedAt as null on an old snapshot and verbatim on a new one', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      host.db.closings.push({
+        id: 'cl-old',
+        tenantId: host.tenantId,
+        sessionId: 's-1',
+        folio: 'CC-old',
+        closedByUserId: 'u1',
+        snapshotJson: { sessionId: 's-1', folio: 'CC-old' },
+        createdAt: new Date(),
+      });
+      seedSession(host, { id: 's-2', status: 'CLOSED', closedAt: new Date() });
+      host.db.closings.push({
+        id: 'cl-new',
+        tenantId: host.tenantId,
+        sessionId: 's-2',
+        folio: 'CC-new',
+        closedByUserId: 'u1',
+        snapshotJson: {
+          sessionId: 's-2',
+          openedAt: '2026-01-01T09:00:00.000Z',
+        },
+        createdAt: new Date(),
+      });
+
+      const old = await queryClosing(tx, host.tenantId, actor('u1'), 'cl-old');
+      const fresh = await queryClosing(
+        tx,
+        host.tenantId,
+        actor('u1'),
+        'cl-new',
+      );
+
+      expect(asJson(old.snapshot)).toEqual({
+        sessionId: 's-1',
+        folio: 'CC-old',
+        openedAt: null,
+      });
+      expect(asJson(fresh.snapshot).openedAt).toBe('2026-01-01T09:00:00.000Z');
+    });
+  });
 });

@@ -530,6 +530,98 @@ describe('QuotationsService — WU2', () => {
     });
   });
 
+  describe('saleStatus of the linked sale ("Ver venta")', () => {
+    const converted = (saleId: string | null) =>
+      makeQuotation({
+        status: 'CONVERTED_TO_SALE',
+        convertedSaleId: saleId,
+        convertedAt: new Date(),
+      });
+
+    it('findAll resolves every linked sale status with ONE tenant-scoped batched query (no N+1)', async () => {
+      const rows = [
+        converted('sale-draft'),
+        converted('sale-confirmed'),
+        converted('sale-deleted'),
+        converted(null),
+        makeQuotation(),
+      ];
+      const repo = makeRepo({
+        findAll: jest.fn(async () => ({ data: rows, total: rows.length })),
+      });
+      const sale = {
+        findMany: jest.fn(async () => [
+          { id: 'sale-draft', status: 'DRAFT' },
+          { id: 'sale-confirmed', status: 'CONFIRMED' },
+        ]),
+        findUnique: jest.fn(),
+        findFirst: jest.fn(),
+      };
+      const prisma = makeTenantPrisma({ sale });
+      const service = buildService(repo, prisma);
+
+      const result = await service.findAll({ page: 1, limit: 20 });
+
+      expect(result.data.map((q) => q.saleStatus)).toEqual([
+        'DRAFT',
+        'CONFIRMED',
+        null,
+        null,
+        null,
+      ]);
+      expect(sale.findMany).toHaveBeenCalledTimes(1);
+      expect(sale.findMany).toHaveBeenCalledWith({
+        where: {
+          id: { in: ['sale-draft', 'sale-confirmed', 'sale-deleted'] },
+          tenantId: TENANT,
+        },
+        select: { id: true, status: true },
+      });
+      expect(sale.findUnique).not.toHaveBeenCalled();
+      expect(sale.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('findAll does not query sales when no row is linked', async () => {
+      const repo = makeRepo({
+        findAll: jest.fn(async () => ({
+          data: [makeQuotation()],
+          total: 1,
+        })),
+      });
+      const sale = { findMany: jest.fn() };
+      const service = buildService(repo, makeTenantPrisma({ sale }));
+
+      const result = await service.findAll({ page: 1, limit: 20 });
+
+      expect(result.data[0]?.saleStatus).toBeNull();
+      expect(sale.findMany).not.toHaveBeenCalled();
+    });
+
+    it('findOne exposes the linked sale status (CANCELED), null when the sale is gone', async () => {
+      const q = converted('sale-1');
+      const repo = makeRepo({ findById: jest.fn(async () => q) });
+      const sale = {
+        findMany: jest.fn(async () => [{ id: 'sale-1', status: 'CANCELED' }]),
+      };
+      const service = buildService(repo, makeTenantPrisma({ sale }));
+
+      expect((await service.findOne(q.id)).saleStatus).toBe('CANCELED');
+
+      sale.findMany.mockResolvedValueOnce([]);
+      expect((await service.findOne(q.id)).saleStatus).toBeNull();
+    });
+
+    it('findOne on a non-converted quotation is null without a sale query', async () => {
+      const q = makeQuotation();
+      const repo = makeRepo({ findById: jest.fn(async () => q) });
+      const sale = { findMany: jest.fn() };
+      const service = buildService(repo, makeTenantPrisma({ sale }));
+
+      expect((await service.findOne(q.id)).saleStatus).toBeNull();
+      expect(sale.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('findAll (T014)', () => {
     it('returns paginated data + total', async () => {
       const items = [makeQuotation(), makeQuotation(), makeQuotation()];
@@ -1357,7 +1449,10 @@ describe('QuotationsService — WU2', () => {
       // the display name, not the raw UUID.
       const prisma = makeTenantPrisma({
         user: {
-          findUnique: jest.fn(async () => ({ id: SELLER, name: 'Berlín Pérez' })),
+          findUnique: jest.fn(async () => ({
+            id: SELLER,
+            name: 'Berlín Pérez',
+          })),
         },
         customer: {
           findUnique: jest.fn(async () => ({
@@ -2329,5 +2424,56 @@ describe('QuotationsService — WU2', () => {
       expect(sumBases).toBe(9900);
       expect(sumIva).toBe(result.totalCents - sumBases);
     });
+  });
+});
+
+// ── quotation-sale-conversion / T1 follow-up — send vs conversion race ──
+describe('QuotationsService.send — a quotation converted mid-send is never emailed', () => {
+  it('re-reads the status right before emailing and rejects with QUOTATION_NOT_DRAFT without calling the mailer or saving', async () => {
+    const item = {
+      id: 'item-1',
+      quotationId: 'q-1',
+      productId: 'prod-1',
+      variantId: null,
+      productName: 'Camisa',
+      variantName: null,
+      quantity: 1,
+      unitPriceCents: 5000,
+      unitPriceCurrency: 'MXN',
+    };
+    const draft = makeQuotation({ items: [item], customerId: 'cust-1' });
+    const converted = makeQuotation({
+      id: draft.id,
+      items: [item],
+      customerId: 'cust-1',
+      status: 'CONVERTED_TO_SALE',
+      convertedSaleId: 'sale-1',
+    });
+    const repo = makeRepo({
+      // First read: still DRAFT. A conversion commits while the PDF renders.
+      findById: jest
+        .fn()
+        .mockResolvedValueOnce(draft)
+        .mockResolvedValue(converted),
+      save: jest.fn(async (q) => q),
+    });
+    const mailer = makeMailer();
+    const prisma = makeTenantPrisma({
+      customer: {
+        findUnique: jest.fn(async () => ({
+          id: 'cust-1',
+          firstName: 'Maria',
+          lastName: null,
+          email: 'maria@example.com',
+        })),
+      },
+    });
+    const service = buildService(repo, prisma, undefined, undefined, mailer);
+
+    await expect(service.send(draft.id)).rejects.toMatchObject({
+      code: 'QUOTATION_NOT_DRAFT',
+    });
+    expect(mailer.send).not.toHaveBeenCalled();
+    expect(repo.save).not.toHaveBeenCalled();
   });
 });

@@ -23,7 +23,15 @@ describe('supplier permission registry', () => {
         String(p.subject) !== 'InventoryJournal' &&
         String(p.subject) !== 'InventoryAdjustment' &&
         String(p.subject) !== 'DeliveryZone' &&
-        String(p.subject) !== 'ShippingSettings',
+        String(p.subject) !== 'ShippingSettings' &&
+        // human-intervention / T1: additive chatbot-request permissions.
+        String(p.subject) !== 'ChatbotRequest' &&
+        String(p.subject) !== 'ChatbotRequestAssignment' &&
+        String(p.subject) !== 'ChatbotConversation' &&
+        String(p.subject) !== 'ChatbotEscalation' &&
+        String(p.subject) !== 'CustomerPhone' &&
+        String(p.subject) !== 'ChatbotSettings' &&
+        String(p.subject) !== 'ChatbotSettingsAllBranches',
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),

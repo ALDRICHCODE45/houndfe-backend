@@ -62,6 +62,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { RequiredScopes } from '../../chatbot-api/presentation/decorators/required-scopes.decorator';
+import { BotRouteClass } from '../../chatbot-api/presentation/guards/route-class';
 import { ServiceAuthGuard } from '../../chatbot-api/presentation/guards/service-auth.guard';
 import {
   DELIVERY_ZONE_BOT_REPOSITORY,
@@ -139,6 +140,7 @@ function readIntakeType(value: unknown): IntakeTypeDiscriminant {
 
 @Controller('chatbot-api/human-decisions')
 @UseGuards(ServiceAuthGuard)
+@BotRouteClass('humanDecisions')
 @UseFilters(HumanDecisionHttpFilter)
 export class BotRestockIntakeController {
   constructor(

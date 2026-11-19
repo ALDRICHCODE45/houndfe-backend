@@ -13,6 +13,7 @@ const {
   parseArgs,
   rotatedName,
   writeSecret,
+  carriedOver,
 } = require('./rotate-bot-credential.cjs');
 
 test('tokens carry the svc_ prefix and hash to 64 hex chars', () => {
@@ -58,4 +59,31 @@ test('writeSecret leaves a 0600 file even when one existed', () => {
   assert.equal(fs.readFileSync(file, 'utf8'), 'svc_new\n');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   fs.rmSync(dir, { recursive: true });
+});
+
+test('carriedOver keeps scopes, rateLimit and the per-class rateLimits', () => {
+  assert.deepEqual(
+    carriedOver([
+      {
+        scopes: ['requests:create', 'catalog:read'],
+        rateLimit: 90,
+        rateLimits: { write: 600, humanDecisions: 120 },
+      },
+      {
+        scopes: ['catalog:read', 'feed:read'],
+        rateLimit: 60,
+        rateLimits: { write: 10, feed: 30 },
+      },
+    ]),
+    {
+      scopes: ['catalog:read', 'feed:read', 'requests:create'],
+      rateLimit: 90,
+      rateLimits: { write: 600, humanDecisions: 120, feed: 30 },
+    },
+  );
+  assert.equal(
+    carriedOver([{ scopes: ['a'], rateLimit: 60, rateLimits: null }])
+      .rateLimits,
+    null,
+  );
 });

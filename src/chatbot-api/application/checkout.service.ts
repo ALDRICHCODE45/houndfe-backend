@@ -1,8 +1,9 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, type CustomerAddress } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { SalesService } from '../../sales/sales.service';
+import { SaleHoldService } from '../../sales/sale-hold.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
 import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
@@ -148,6 +149,9 @@ export class CheckoutService {
     private readonly config: ConfigService,
     private readonly quoteVerifier: ShippingQuoteVerifier,
     private readonly pickupLocations: PickupLocationService,
+    // pay-in-store-pickup / T1 — live hold next to the cached receipt.
+    // Always provided by SalesModule; optional only for partial test graphs.
+    @Optional() private readonly holds?: SaleHoldService,
   ) {}
 
   async status(key: string): Promise<CheckoutStatusResponse> {
@@ -165,9 +169,14 @@ export class CheckoutService {
       });
     if (!receipt || receipt.status !== 'SUCCEEDED')
       return { status: 'not_observed', checkout: null };
+    const checkout = cachedResponse(receipt.responseJson);
+    if (!this.holds) return { status: 'succeeded', checkout };
+    // `checkout` stays the byte-identical creation receipt; `hold` is the
+    // sale's CURRENT pay-in-store hold (null when no intent was declared).
     return {
       status: 'succeeded',
-      checkout: cachedResponse(receipt.responseJson),
+      checkout,
+      hold: await this.holds.findHold(checkout.sale.saleId),
     };
   }
 
