@@ -343,18 +343,21 @@ export async function queryClosings(
   const where: Prisma.CashClosingWhereInput = { tenantId };
   const and: Prisma.CashClosingWhereInput[] = [];
   // `registerId` and (cash-redesign-reads S4) `cashierUserId` describe the
-  // CLOSED SESSION, so both resolve to its tenant session ids and narrow.
+  // CLOSED SESSION, so both narrow through the (tenant-scoped) session
+  // relation instead of an id list that grows with history.
   if (input.registerId !== undefined || input.cashierUserId !== undefined) {
-    const sessionIds = await sessionIdsWhere(tx, {
-      tenantId,
-      ...(input.registerId !== undefined
-        ? { registerId: input.registerId }
-        : {}),
-      ...(input.cashierUserId !== undefined
-        ? { cashierUserId: input.cashierUserId }
-        : {}),
+    and.push({
+      session: {
+        is: {
+          ...(input.registerId !== undefined
+            ? { registerId: input.registerId }
+            : {}),
+          ...(input.cashierUserId !== undefined
+            ? { cashierUserId: input.cashierUserId }
+            : {}),
+        },
+      },
     });
-    and.push({ sessionId: { in: sessionIds } });
   }
   if (range.from || range.to) {
     where.createdAt = {
@@ -407,14 +410,10 @@ export async function queryClosings(
     // S5 — unconditional grants: OWN means closed by the actor OR of one of
     // the actor's sessions, exactly like `isClosingVisible`.
     if (scope === 'OWN') {
-      const ownSessionIds = await sessionIdsWhere(tx, {
-        tenantId,
-        cashierUserId: actor.userId,
-      });
       and.push({
         OR: [
           { closedByUserId: actor.userId },
-          { sessionId: { in: ownSessionIds } },
+          { session: { is: { cashierUserId: actor.userId } } },
         ],
       });
     }
@@ -460,17 +459,6 @@ export async function queryClosing(
 }
 
 // ── Shared query helpers ────────────────────────────────────────────
-
-async function sessionIdsWhere(
-  tx: TenantClient,
-  where: Prisma.CashSessionWhereInput,
-): Promise<string[]> {
-  const rows = await tx.cashSession.findMany({
-    where,
-    select: { id: true },
-  });
-  return rows.map((row) => row.id);
-}
 
 /**
  * fe-design-pass T1 (S1, S2) — additive display fields for session reads.

@@ -471,6 +471,37 @@ describe('cash redesign reads (PostgreSQL)', () => {
       expect(ids(foreign)).toEqual([]);
       expect(foreign.total).toBe(0);
     });
+
+    it('shows a non-audit reader the closings they closed on another cashier session (OWN, DB path)', async () => {
+      const cashierA = await member(BASELINE_TENANT_ID, 'Cajera A', {
+        abilityGrants: [['read', 'CashClosing']],
+      });
+      const cashierB = await member(BASELINE_TENANT_ID, 'Cajero B');
+      const closer = await member(BASELINE_TENANT_ID, 'Supervisor');
+      const sessions = await seedSessions([
+        { cashier: cashierB.userId, status: 'CLOSED', released: true },
+        { cashier: cashierB.userId, status: 'CLOSED', released: true },
+        { cashier: cashierA.userId, status: 'CLOSED', released: true },
+      ]);
+      const [closedByA] = await seedClosings([sessions[0]], cashierA.userId);
+      const [foreign, ownSession] = await seedClosings(
+        [sessions[1], sessions[2]],
+        closer.userId,
+      );
+      const app = application(BASELINE_TENANT_ID);
+
+      const all = await app.query(cashierA, { kind: 'CLOSINGS', page: {} });
+      const byB = await app.query(cashierA, {
+        kind: 'CLOSINGS',
+        page: { cashierUserId: cashierB.userId },
+      });
+
+      expect(new Set(ids(all))).toEqual(new Set([closedByA, ownSession]));
+      expect(ids(all)).not.toContain(foreign);
+      expect(all.total).toBe(2);
+      expect(ids(byB)).toEqual([closedByA]);
+      expect(byB.total).toBe(1);
+    });
   });
 
   // ── S5 — DB pagination equivalence with the per-row path ────────────

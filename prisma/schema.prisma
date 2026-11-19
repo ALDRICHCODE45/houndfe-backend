@@ -3310,6 +3310,7 @@ model CashSession {
   @@unique([tenantId, openingHandoverId])
   @@index([tenantId, registerId, status])
   @@index([tenantId, cashierUserId, openedAt])
+  @@index([tenantId, openedAt])
   @@map("cash_sessions")
 }
 
