@@ -95,6 +95,7 @@ const PERMISSIONS: Record<string, PermissionTuple[]> = {
   'user-cash-in-only': [['create', 'CashIn']],
   'user-count-only': [['create', 'CashCount']],
   'user-custody-reader': [['read', 'CashHandover']],
+  'user-handover-sender': [['create', 'CashHandover']],
   'user-audit-only': [['read', 'CashSessionAudit']],
   'user-no-perms': [],
   'user-super': [['manage', 'all']],
@@ -499,6 +500,54 @@ describe('Cash register HTTP contract (T3 presentation)', () => {
       ['a float limit', { limit: '1.5' }],
       ['an unknown query key', { tenantId: TENANT_ID }],
       ['a non-boolean pendingOnly', { pendingOnly: 'maybe' }],
+    ])('rejects %s with 400', async (_case, queryParams) => {
+      await get('/cash-sessions').query(queryParams).expect(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('forwards repeated status params as statuses (cash-redesign-reads S3)', async () => {
+      await get('/cash-sessions?status=OPEN&status=COUNTING').expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'SESSIONS',
+        page: { page: 1, limit: 25 },
+        statuses: ['OPEN', 'COUNTING'],
+      });
+    });
+
+    it('forwards a comma status list and drawerOpen', async () => {
+      await get('/cash-sessions')
+        .query({ status: 'SUBMITTED,CLOSED', drawerOpen: 'false' })
+        .expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'SESSIONS',
+        page: { page: 1, limit: 25 },
+        statuses: ['SUBMITTED', 'CLOSED'],
+        drawerOpen: false,
+      });
+    });
+
+    it('forwards drawerOpen=true together with pendingOnly', async () => {
+      await get('/cash-sessions')
+        .query({ drawerOpen: 'true', pendingOnly: 'true', status: 'COUNTING' })
+        .expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'SESSIONS',
+        page: { page: 1, limit: 25 },
+        pendingOnly: true,
+        statuses: ['COUNTING'],
+        drawerOpen: true,
+      });
+    });
+
+    it.each([
+      ['an unknown status', { status: 'PENDING' }],
+      ['a lowercase status', { status: 'open' }],
+      ['an empty status', { status: '' }],
+      ['a non-boolean drawerOpen', { drawerOpen: 'yes' }],
+      ['an empty drawerOpen', { drawerOpen: '' }],
     ])('rejects %s with 400', async (_case, queryParams) => {
       await get('/cash-sessions').query(queryParams).expect(400);
       expect(query).not.toHaveBeenCalled();
@@ -916,6 +965,55 @@ describe('Cash register HTTP contract (T3 presentation)', () => {
     });
   });
 
+  describe('handover recipients (GET /cash-handovers/recipients)', () => {
+    it.each(['WITHDRAWAL', 'FLOAT'])(
+      'forwards kind=%s as the HANDOVER_RECIPIENTS query',
+      async (kind) => {
+        const res = await get('/cash-handovers/recipients')
+          .query({ kind })
+          .expect(200);
+
+        expect(res.body).toEqual(FIXED_DOCUMENT);
+        expect(lastQuery()).toEqual({
+          kind: 'HANDOVER_RECIPIENTS',
+          handoverKind: kind,
+        });
+        expect(lastQueryActor().userId).toBe('user-full');
+      },
+    );
+
+    it('needs only create:CashHandover (no read:User)', async () => {
+      await get('/cash-handovers/recipients', 'user-handover-sender')
+        .query({ kind: 'WITHDRAWAL' })
+        .expect(200);
+
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['a missing kind', {}],
+      ['an unknown kind', { kind: 'DEPOSIT' }],
+      ['an empty kind', { kind: '' }],
+      ['an extra key', { kind: 'FLOAT', tenantId: TENANT_ID }],
+    ])(
+      'rejects %s with 400 and never calls the application',
+      async (_case, params) => {
+        await get('/cash-handovers/recipients').query(params).expect(400);
+        expect(query).not.toHaveBeenCalled();
+      },
+    );
+
+    it('denies a caller without create:CashHandover with 403', async () => {
+      await get('/cash-handovers/recipients', 'user-custody-reader')
+        .query({ kind: 'FLOAT' })
+        .expect(403);
+      await get('/cash-handovers/recipients', 'user-no-perms')
+        .query({ kind: 'FLOAT' })
+        .expect(403);
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
+
   describe('closing', () => {
     it('maps POST close to CLOSE and forwards optional notes', async () => {
       await command(`/cash-sessions/${SESSION_ID}/close`, {
@@ -955,6 +1053,17 @@ describe('Cash register HTTP contract (T3 presentation)', () => {
       expect(lastQuery()).toEqual({
         kind: 'CLOSINGS',
         page: { page: 1, limit: 25 },
+      });
+    });
+
+    it('forwards the cashierUserId filter on GET /cash-closings', async () => {
+      await get('/cash-closings')
+        .query({ cashierUserId: RECIPIENT_ID })
+        .expect(200);
+
+      expect(lastQuery()).toEqual({
+        kind: 'CLOSINGS',
+        page: { page: 1, limit: 25, cashierUserId: RECIPIENT_ID },
       });
     });
 

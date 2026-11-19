@@ -1,0 +1,186 @@
+# Caja redesign — recipients, session filters, closing filter, close contract
+
+**Status:** implemented on branch `feat/cash-redesign-reads`, **not merged, not pushed, not deployed**. **No migration.** Task: `odd/tasks/cash-redesign-reads.md` (T1, S1–S6).
+
+Shapes come from the code and its specs: `src/cash-register/presentation/cash-handover.controller.ts`, `cash-session.controller.ts`, `cash-closing.controller.ts`, `presentation/dto/query.dto.ts`, `infrastructure/cash-adapter-recipients.ts`, `cash-adapter-queries.ts`, `cash-adapter-list-scope.ts`, `cash-adapter-closing.ts`, `src/shared/filters/domain-exception.filter.ts`, and the specs `presentation/cash-register.controller.spec.ts`, `infrastructure/cash-adapter-queries.spec.ts`, `infrastructure/prisma-cash-register.redesign-reads.integration.spec.ts` (real PostgreSQL). Nothing was sent to the dev API.
+
+Everything else (auth, `Idempotency-Key`, blind rules, envelopes) is in the full contract [docs/cash-register-closing.md](../cash-register-closing.md). This file adds, it does not repeat.
+
+## 1. `GET /cash-handovers/recipients?kind=WITHDRAWAL|FLOAT` (new, S2)
+
+Who the cashier can hand cash to. It replaces the raw UUID field.
+
+- **Permission:** `create:CashHandover` (the sender's own permission). `read:User` is **not** needed.
+- **Query:** `kind` is **required** and must be `WITHDRAWAL` or `FLOAT`. A missing/other value or any other key → `400`.
+- **Response `200`:**
+
+```json
+{
+  "items": [
+    { "userId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f", "displayName": "Beatriz Admin", "roleName": "Administrador" },
+    { "userId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "displayName": "Luis Supervisor", "roleName": "Supervisor" }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `userId` | UUID string | Send it as `recipientUserId` in `POST /cash-sessions/:id/handovers`. |
+| `displayName` | string | `User.name`. |
+| `roleName` | string | The name of the role in this sucursal that grants receipt. If several of the user's roles grant it, the names are sorted and joined with `", "`. |
+
+Rules:
+
+- A user is listed when they are **active** (`isActive`), are a **member of the current sucursal** (tenant from the JWT), and one of their roles in this sucursal grants **`update:CashHandover`** (the receipt permission). A role with `manage:all` (or `manage:CashHandover`, `update:all`) counts, exactly like the app's own permission check.
+- **Self rule:** for `kind=WITHDRAWAL` the caller is **never** listed, because the backend rejects a withdrawal to oneself (`422 CASH_HANDOVER_SELF_WITHDRAWAL`). For `kind=FLOAT` the caller **is** listed when they hold `update:CashHandover` (keeping one's own float is allowed).
+- Sorted by `displayName` (Spanish collation, case- and accent-insensitive), then `userId`. No paging (it is the sucursal staff).
+- No email and no other user data is returned.
+- The list is a hint. Creating and receiving the handover still run the authoritative checks.
+
+Errors: `401` (no/invalid token), `403 INSUFFICIENT_PERMISSIONS` (no `create:CashHandover`), `400` (query), `422 CASH_ACTOR_INACTIVE` / `CASH_TENANT_MEMBERSHIP_REQUIRED` (the caller is inactive or not in the sucursal).
+
+## 2. `GET /cash-sessions` — new `status` and `drawerOpen` filters (S3)
+
+| Param | Values | Meaning |
+| --- | --- | --- |
+| `status` | `OPEN`, `COUNTING`, `SUBMITTED`, `CLOSED` | Exact lifecycle, **any of**. Repeat the param (`status=OPEN&status=COUNTING`) or send a comma list (`status=OPEN,COUNTING`); both work and duplicates are ignored. Unknown or lowercase value, or empty `status=` → `400`. |
+| `drawerOpen` | `true` \| `false` | `true` = the drawer is still held (`drawerReleasedAt: null`); `false` = released. Anything else → `400`. |
+
+- **Every filter narrows.** `status`, `drawerOpen`, `pendingOnly`, `cashierUserId`, `registerId`, `from`/`to` combine with AND. `pendingOnly=true` (`COUNTING` or `SUBMITTED`) together with `status` gives the **intersection**: `pendingOnly=true&status=OPEN,SUBMITTED` returns only `SUBMITTED`; `pendingOnly=true&status=OPEN` returns an empty page (`total: 0`).
+- **Visibility unchanged.** Without `read:CashSessionAudit` you only see your own sessions; filtering by another cashier returns an empty page. The blind projection rules are unchanged.
+- Suggested use: «Tu turno» = `status=OPEN,COUNTING,SUBMITTED&drawerOpen=true` with the own-sessions scope; supervisor = `status=SUBMITTED` (to verify/close) and `drawerOpen=true` (drawers still held).
+- Order: `openedAt` newest first; equal `openedAt` values are ordered by `id` (descending) so pages are stable.
+
+## 3. `GET /cash-closings` — `cashierUserId` now filters (S4)
+
+`cashierUserId` (UUID) keeps only cuts whose **closed session** belongs to that cashier (not who closed it). It narrows together with `registerId` and `from`/`to`. Without `read:CashSessionAudit` you still only see cuts you closed or cuts of your own sessions, so filtering by another cashier returns only the cuts you closed for them. Order: `createdAt` newest first, then `id`.
+
+## 4. Real paging (S5)
+
+Both lists (`/cash-sessions`, `/cash-closings`) now filter, count and page **in the database** (`skip`/`take`, `total` from a count) when the caller's cash permissions are plain grants, which is every role the app builds today. Results, `total` and order are the same as before (proved by a spec comparing both paths page by page). The response shape `{ items, page, limit, total }` does not change.
+
+## 5. `POST /cash-sessions/:id/close` — exact contract (S6)
+
+**Permission:** `create:CashClosing`. **Headers:** `Authorization: Bearer …`, `Idempotency-Key: <1–200 chars after trim>`, `Content-Type: application/json`.
+
+**Body** (optional; it may be empty or omitted):
+
+```json
+{ "notes": "Cierre sin novedad" }
+```
+
+`notes`: optional string, trimmed, must not be empty after trim, max 2000 chars. `null` or any other key → `400`.
+
+**Response `201`** (`snapshot` keys in §6):
+
+```json
+{
+  "id": "9a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
+  "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+  "createdAt": "2026-11-05T22:45:30.120Z",
+  "snapshot": {
+    "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
+    "tenantId": "ced6cc10-a037-4f41-92af-ee69bbb51c8b",
+    "registerId": "a1f3e0b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+    "cashierUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f",
+    "openingCents": 100000,
+    "expectedCents": 150000,
+    "declaredCents": 149500,
+    "verifiedCents": 149500,
+    "verifierUserId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+    "channels": [
+      { "channelKey": "CASH", "channelLabel": "Efectivo", "method": "CASH", "expectedCents": 150000, "declaredCents": 149500, "verifiedCents": 149500, "differenceCents": -500 },
+      { "channelKey": "METHOD:CARD_DEBIT", "channelLabel": "Tarjeta de débito", "method": "CARD_DEBIT", "expectedCents": 32000, "declaredCents": 32000, "verifiedCents": 32000, "differenceCents": 0 }
+    ],
+    "handovers": [
+      { "handoverId": "e4b1c7d2-9a3f-4e6b-8c5d-1f2a3b4c5d6e", "kind": "WITHDRAWAL", "declaredCents": 49500, "receivedCents": 49500, "senderUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "receiverUserId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f", "receiptActorUserId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f", "declaredAt": "2026-11-05T22:20:00.000Z", "receivedAt": "2026-11-05T22:25:00.000Z" },
+      { "handoverId": "f5c2d8e3-0b4a-4f7c-9d6e-2a3b4c5d6e7f", "kind": "FLOAT", "declaredCents": 100000, "receivedCents": 100000, "senderUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "receiverUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "receiptActorUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "declaredAt": "2026-11-05T22:21:00.000Z", "receivedAt": "2026-11-05T22:22:00.000Z" }
+    ],
+    "countedAt": "2026-11-05T22:12:00.000Z",
+    "verifiedAt": "2026-11-05T22:18:00.000Z",
+    "closedAt": "2026-11-05T22:45:30.000Z",
+    "closedByUserId": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+    "registerName": "Caja Mostrador 2",
+    "cashierName": "Ana Cajera",
+    "verifierName": "Luis Supervisor",
+    "closedByName": "Luis Supervisor",
+    "declarationNotes": "Faltan 5 pesos de cambio",
+    "verificationNotes": null,
+    "comparison": {
+      "expectedCents": 150000,
+      "declaredCents": 149500,
+      "verifiedCents": 149500,
+      "declarationDifferenceCents": -500,
+      "verificationDifferenceCents": 0,
+      "verifiedVsExpectedDifferenceCents": -500,
+      "requiresDeclarationNotes": true,
+      "requiresVerificationNotes": false,
+      "hasDiscrepancy": true
+    },
+    "closingNotes": "Cierre sin novedad"
+  }
+}
+```
+
+(Fictional, self-consistent values.) `GET /cash-closings/:id` returns the same document. Replaying the same `Idempotency-Key` with the same body returns the stored `201` document again, even after the session is closed.
+
+### Errors, in the order the backend checks them
+
+The first failing check wins. Guards run before pipes. When several of `:id`, the body and `Idempotency-Key` are invalid at once, which 400 is returned is not guaranteed (all are 400); after them, the domain checks below run in this order.
+
+Body shapes: guard/domain errors are `{ "statusCode", "error": "<CODE>", "message", "timestamp" }` plus the listed detail keys at top level; a `400` from DTO validation is Nest's `{ "statusCode": 400, "error": "Bad Request", "message": [<ValidationError>…] }`; a `400` from the UUID pipe is `{ "statusCode": 400, "error": "Bad Request", "message": "Validation failed (uuid is expected)" }`. Switch on `error`, never on `message`. **There is no cash `404`/`409`: every `CASH_*` error is `422`.**
+
+| # | HTTP | `error` | Requirement not met | Detail keys |
+| --- | --- | --- | --- | --- |
+| 1 | 401 | `Unauthorized` | Bearer token missing/invalid, or no tenant in it | — |
+| 2 | 403 | `INSUFFICIENT_PERMISSIONS` | Caller lacks `create:CashClosing` | — |
+| 3 | 400 | `Bad Request` | `:id` is not a UUID | — |
+| 4 | 400 | `Bad Request` | Body: `notes` `null`, not a string, empty after trim, > 2000 chars, or an extra key | — |
+| 5 | 400 | `INVALID_IDEMPOTENCY_KEY` | `Idempotency-Key` missing, empty after trim, or > 200 chars | — |
+| 6 | 422 | `CASH_IDEMPOTENCY_CONFLICT` | Same key already used with a different body/actor/session (or a concurrent request with the same key won) | `key` |
+| 7 | 422 | `CASH_ACTOR_INACTIVE` | Caller user is inactive | `userId` |
+| 8 | 422 | `CASH_TENANT_MEMBERSHIP_REQUIRED` | Caller is not a member of the sucursal | `userId`, `tenantId` |
+| 9 | 422 | `CASH_SESSION_NOT_FOUND` | No such session in this sucursal (also another sucursal's id) | `sessionId` |
+| 10 | 422 | `CASH_PERMISSION_DENIED` | `create:CashClosing` rechecked against the session fails | `action`, `subject`, `userId` |
+| 11 | 422 | `CASH_SESSION_NOT_WRITABLE` | Status is not `SUBMITTED` (`OPEN`, `COUNTING`, or already `CLOSED` — a second close lands here) | `sessionId`, `status` |
+| 12 | 422 | `CASH_SELF_CLOSING_FORBIDDEN` | Closer is the session's cashier | `cashierUserId` |
+| 13 | 422 | `CASH_DRAWER_NOT_RELEASED` | `release-drawer` has not been done | `sessionId` |
+| 14 | 422 | `CASH_VERIFICATION_REQUIRED` | No independent verification exists | `sessionId` |
+| 15 | 422 | `CASH_DISCREPANCY_NOTES_REQUIRED` | A channel (any channel, then the cash totals) has a declared≠expected difference without declaration notes (`stage: "DECLARATION"`), or a verified≠declared difference without verification notes (`stage: "VERIFICATION"`). Fix with `declaration-notes` (stage DECLARATION). | `stage` |
+| 16 | 422 | `CASH_CUSTODY_NOT_RECEIVED` | A handover of this session is not received yet | `handoverId` |
+| 17 | 422 | `CASH_HANDOVER_ALLOCATION_MISMATCH` | The handovers' declared amounts do not add up exactly to the declared cash | `declaredCents`, `allocatedCents` |
+
+Defensive codes that the normal flow cannot reach (the earlier steps guarantee their data), listed so the UI can map them to a generic error: `CASH_SESSION_NOT_WRITABLE` with message "Expected snapshot is missing for closing" (`sessionId`), `CASH_DECLARATION_NOT_FOUND` (`sessionId`), `CASH_COUNT_MISSING_CHANNEL` (`channelKey`), `CASH_HANDOVER_DUPLICATE_ALLOCATION` (`handoverId`), `CASH_CENTS_OUT_OF_RANGE` / `CASH_ARITHMETIC_OVERFLOW`, `CASH_SNAPSHOT_SESSION_NOT_CLOSED`, `CASH_FOLIO_REQUIRED`, `CASH_IDENTITY_REQUIRED`, `CASH_DATE_INVALID`, and `CASH_IDEMPOTENCY_KEY_REQUIRED` / `CASH_IDEMPOTENCY_KEY_TOO_LONG` (the header pipe answers `400` first). Concurrent closes are serialized by a row lock: the loser gets `CASH_SESSION_NOT_WRITABLE` (row 11).
+
+Suggested readiness checklist for the detail screen (all from `GET /cash-sessions/:id`): `session.status === "SUBMITTED"`; `session.cashierUserId !== me`; `session.drawerReleasedAt !== null`; a `counts[]` entry with `kind: "VERIFICATION"`; every `handovers[]` item has `receivedAt`; the backend still decides.
+
+## 6. Closing snapshot fields (verified against the code)
+
+The snapshot is frozen at close; it is never recomputed. Field list checked against `createCashClosingSnapshot` (`src/cash-register/domain/cash-snapshot.ts`) and `close()` (`cash-adapter-closing.ts`); it matches [cash-register-closing.md](../cash-register-closing.md#frozen-snapshot-closing-detail-and-pdf).
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `sessionId`, `tenantId`, `registerId` | UUID string | Source session, sucursal, register. |
+| `folio` | string | `CC-<uuid>`; same as the top-level `folio`. |
+| `cashierUserId` | UUID string | Session owner. |
+| `openingCents` | integer | Opening fund (counted once). |
+| `expectedCents` | integer | Expected **physical cash** (`CASH` channel) at freeze. |
+| `declaredCents` | integer | Cash in the latest declaration revision (same amounts as revision 1). |
+| `verifiedCents` | integer \| null | Cash counted by the verifier. Always a number in a cut made by close (verification is required). |
+| `verifierUserId` | UUID string \| null | Verifier. Always set by close. |
+| `channels[]` | array | One per frozen channel: `channelKey` (string), `channelLabel` (string), `method` (`CASH`\|`CARD_CREDIT`\|`CARD_DEBIT`\|`TRANSFER`), `expectedCents` (int), `declaredCents` (int), `verifiedCents` (int \| null), `differenceCents` (int, **declared − expected only**). |
+| `handovers[]` | array | Every handover of the session: `handoverId` (UUID), `kind` (`WITHDRAWAL`\|`FLOAT`), `declaredCents` (int), `receivedCents` (int \| null), `senderUserId` (UUID), `receiverUserId` (UUID \| null; the designated recipient), `receiptActorUserId` (UUID \| null), `declaredAt` (ISO), `receivedAt` (ISO \| null). At close all are received, so the nullable ones are set. No guaranteed order: sort by `declaredAt` in the UI. |
+| `countedAt` | ISO string | Time of the **original** declaration (revision 1), not of later notes. |
+| `verifiedAt` | ISO string \| null | Verification time. Always set by close. |
+| `closedAt` | ISO string | Close time (server clock, can differ by milliseconds from the top-level `createdAt`). |
+| `closedByUserId` | UUID string | Closer. |
+| `registerName` | string \| null | Register name at close. |
+| `cashierName`, `verifierName`, `closedByName` | string \| null | `User.name` at close (`null` only if the user row is missing). |
+| `declarationNotes` | string \| null | Notes of the latest declaration revision. |
+| `verificationNotes` | string \| null | Verifier notes. |
+| `comparison` | object | Cash totals: `expectedCents`, `declaredCents`, `verifiedCents` (int \| null), `declarationDifferenceCents` (declared − expected), `verificationDifferenceCents` (verified − declared, int \| null), `verifiedVsExpectedDifferenceCents` (int \| null), `requiresDeclarationNotes`, `requiresVerificationNotes`, `hasDiscrepancy` (booleans). |
+| `closingNotes` | string \| null | Body `notes` of the close. |
+
+Totals are physical cash only; never add non-cash channels into them. Show the two differences separately.

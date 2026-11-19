@@ -67,6 +67,7 @@ import {
 } from './cash-adapter-custody';
 import { queryCustody } from './cash-adapter-custody-queries';
 import { recheckReplayAbility } from './cash-adapter-instances';
+import { queryHandoverRecipients } from './cash-adapter-recipients';
 import {
   assertOpenSession as ledgerAssertOpenSession,
   recordPayments as ledgerRecordPayments,
@@ -191,6 +192,8 @@ export class PrismaCashRegisterApplication
         return queryClosing(tx, tenantId, actor, query.id);
       case 'CUSTODY':
         return queryCustody(tx, tenantId, actor, query.page);
+      case 'HANDOVER_RECIPIENTS':
+        return queryHandoverRecipients(tx, tenantId, actor, query.handoverKind);
       default: {
         throw cashAppError(
           CASH_APPLICATION_CODES.UNSUPPORTED_COMMAND,

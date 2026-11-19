@@ -122,11 +122,14 @@ function matches(row: Row, where?: Where): boolean {
   });
 }
 
-function sortRows(rows: Row[], orderBy?: Row): Row[] {
+function sortRows(rows: Row[], orderBy?: Row | Row[]): Row[] {
   if (!orderBy) {
     return rows;
   }
-  const entries = Object.entries(orderBy);
+  // Prisma accepts one object or an array of single-key objects.
+  const entries = Array.isArray(orderBy)
+    ? orderBy.flatMap((entry) => Object.entries(entry))
+    : Object.entries(orderBy);
   return [...rows].sort((left, right) => {
     for (const [key, direction] of entries) {
       const a = left[key];
@@ -175,7 +178,7 @@ function delegate<K extends keyof FakeDb>(
     },
     findFirst: async (args: {
       where?: Where;
-      orderBy?: Row;
+      orderBy?: Row | Row[];
     }): Promise<Row | null> =>
       sortRows(
         rows().filter((row) => matches(row, args.where)),
@@ -183,7 +186,7 @@ function delegate<K extends keyof FakeDb>(
       )[0] ?? null,
     findMany: async (args: {
       where?: Where;
-      orderBy?: Row;
+      orderBy?: Row | Row[];
       skip?: number;
       take?: number;
     }): Promise<Row[]> => {

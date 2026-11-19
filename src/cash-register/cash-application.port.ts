@@ -3,6 +3,7 @@ import type {
   CashCountLine,
   CashDenominationLine,
   CashHandoverKind,
+  CashSessionStatus,
 } from './domain/cash-register.types';
 
 export const CASH_APPLICATION = Symbol('CASH_APPLICATION');
@@ -75,12 +76,25 @@ export interface CashPageInput {
 export type CashQuery =
   | { kind: 'REGISTERS' }
   | { kind: 'SESSION'; id: string }
-  | { kind: 'SESSIONS'; page: CashPageInput; pendingOnly?: boolean }
+  | {
+      kind: 'SESSIONS';
+      page: CashPageInput;
+      pendingOnly?: boolean;
+      // cash-redesign-reads S3 — exact lifecycle filter (any of) and the
+      // physical drawer state (`true` = drawerReleasedAt IS NULL). Both
+      // narrow, together with `pendingOnly` and the page filters.
+      statuses?: CashSessionStatus[];
+      drawerOpen?: boolean;
+    }
   | { kind: 'CLOSINGS'; page: CashPageInput }
   | { kind: 'CLOSING'; id: string }
   // S2 — recipient custody discovery. Scoped to the authenticated recipient
   // by the application; the page holds no actor/recipient override.
-  | { kind: 'CUSTODY'; page: CashPageInput };
+  | { kind: 'CUSTODY'; page: CashPageInput }
+  // cash-redesign-reads S2 — who may receive a handover of this kind from
+  // the authenticated sender (active tenant members granted
+  // update:CashHandover; the sender is excluded for WITHDRAWAL).
+  | { kind: 'HANDOVER_RECIPIENTS'; handoverKind: CashHandoverKind };
 
 /** HTTP adapters supply authenticated actors; the service rechecks instance scope. */
 export interface ICashApplication {

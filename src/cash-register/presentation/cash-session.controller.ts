@@ -94,6 +94,10 @@ export class CashSessionController {
       ...(query.pendingOnly !== undefined
         ? { pendingOnly: query.pendingOnly }
         : {}),
+      ...(query.status !== undefined ? { statuses: [...query.status] } : {}),
+      ...(query.drawerOpen !== undefined
+        ? { drawerOpen: query.drawerOpen }
+        : {}),
     });
   }
 

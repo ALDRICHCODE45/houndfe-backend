@@ -6,9 +6,14 @@
  * against a tagged instance BEFORE pagination and counting, so a conditional
  * rule can never widen the total or leak an inaccessible row. A declarant's
  * own pre-submission projection never carries expected values or movements.
+ *
+ * cash-redesign-reads S5: when every relevant grant is unconditional (see
+ * `cash-adapter-list-scope.ts`) the same visibility is a DB clause, so the
+ * session and closing lists page (`skip`/`take`) and count in PostgreSQL;
+ * conditional grants keep the per-row path above.
  */
 import { Prisma } from '@prisma/client';
-import type { CashCount, CashSession } from '@prisma/client';
+import type { CashClosing, CashCount, CashSession } from '@prisma/client';
 import { expectedCashCents, projectCashSession } from '../domain';
 import {
   CASH_AUDIT_REQUIREMENT,
@@ -45,6 +50,7 @@ import {
   toDomainMovement,
   toDomainSession,
 } from './cash-adapter-mappers';
+import { resolveListScope } from './cash-adapter-list-scope';
 import { normalizePage, parseRange } from './cash-adapter-paging';
 import { userNames } from './cash-adapter-storage';
 import { document, iso } from './cash-adapter-values';
@@ -211,6 +217,9 @@ export async function querySessions(
   const { page, limit, skip } = normalizePage(query.page);
   const range = parseRange(query.page.from, query.page.to);
   const where: Prisma.CashSessionWhereInput = { tenantId };
+  // Every filter NARROWS: `pendingOnly` and `statuses` intersect, and both
+  // combine with the drawer, cashier, register and date filters.
+  const and: Prisma.CashSessionWhereInput[] = [];
   if (query.page.cashierUserId !== undefined) {
     where.cashierUserId = query.page.cashierUserId;
   }
@@ -218,7 +227,15 @@ export async function querySessions(
     where.registerId = query.page.registerId;
   }
   if (query.pendingOnly === true) {
-    where.status = { in: ['COUNTING', 'SUBMITTED'] };
+    and.push({ status: { in: ['COUNTING', 'SUBMITTED'] } });
+  }
+  if (query.statuses !== undefined) {
+    and.push({ status: { in: [...query.statuses] } });
+  }
+  if (query.drawerOpen === true) {
+    where.drawerReleasedAt = null;
+  } else if (query.drawerOpen === false) {
+    where.drawerReleasedAt = { not: null };
   }
   if (range.from || range.to) {
     where.openedAt = {
@@ -226,16 +243,47 @@ export async function querySessions(
       ...(range.to ? { lt: range.to } : {}),
     };
   }
-  const rows = await tx.cashSession.findMany({
-    where,
-    orderBy: { openedAt: 'desc' },
-  });
-  // S3 — evaluate base/audit visibility PER ROW (tagged instance) BEFORE
-  // pagination and counting, so a conditional audit or base rule can never
-  // widen the total or leak an inaccessible row.
-  const visible = rows.filter((row) => isSessionVisible(actor, row));
-  const total = visible.length;
-  const pageRows = visible.slice(skip, skip + limit);
+  if (and.length > 0) {
+    where.AND = and;
+  }
+  // `id` breaks `openedAt` ties so DB pages are deterministic.
+  const orderBy: Prisma.CashSessionOrderByWithRelationInput[] = [
+    { openedAt: 'desc' },
+    { id: 'desc' },
+  ];
+  let total: number;
+  let pageRows: CashSession[];
+  const scope = resolveListScope(
+    actor,
+    CASH_SESSION_READ_REQUIREMENT,
+    CASH_AUDIT_REQUIREMENT,
+  );
+  if (scope === 'PER_ROW') {
+    // S3 — conditional grants: evaluate base/audit visibility PER ROW
+    // (tagged instance) BEFORE pagination and counting, so a conditional
+    // audit or base rule can never widen the total or leak a row.
+    const rows = await tx.cashSession.findMany({ where, orderBy });
+    const visible = rows.filter((row) => isSessionVisible(actor, row));
+    total = visible.length;
+    pageRows = visible.slice(skip, skip + limit);
+  } else if (scope === 'NONE') {
+    total = 0;
+    pageRows = [];
+  } else {
+    // S5 — unconditional grants: the same visibility as a DB clause, so
+    // the count and the page come straight from PostgreSQL.
+    const scoped: Prisma.CashSessionWhereInput =
+      scope === 'OWN'
+        ? { AND: [where, { cashierUserId: actor.userId }] }
+        : where;
+    total = await tx.cashSession.count({ where: scoped });
+    pageRows = await tx.cashSession.findMany({
+      where: scoped,
+      orderBy,
+      skip,
+      take: limit,
+    });
+  }
   const ids = pageRows.map((row) => row.id);
   const movementsBySession = await movementsForSessions(tx, tenantId, ids);
   const countsBySession = await countsForSessions(tx, tenantId, ids);
@@ -280,6 +328,7 @@ export async function queryClosings(
     page?: number;
     limit?: number;
     registerId?: string;
+    cashierUserId?: string;
     from?: string;
     to?: string;
   },
@@ -291,13 +340,20 @@ export async function queryClosings(
   });
   const range = parseRange(input.from, input.to);
   const where: Prisma.CashClosingWhereInput = { tenantId };
-  if (input.registerId !== undefined) {
-    const sessionIds = (
-      await tx.cashSession.findMany({
-        where: { tenantId, registerId: input.registerId },
-      })
-    ).map((row) => row.id);
-    where.sessionId = { in: sessionIds };
+  const and: Prisma.CashClosingWhereInput[] = [];
+  // `registerId` and (cash-redesign-reads S4) `cashierUserId` describe the
+  // CLOSED SESSION, so both resolve to its tenant session ids and narrow.
+  if (input.registerId !== undefined || input.cashierUserId !== undefined) {
+    const sessionIds = await sessionIdsWhere(tx, {
+      tenantId,
+      ...(input.registerId !== undefined
+        ? { registerId: input.registerId }
+        : {}),
+      ...(input.cashierUserId !== undefined
+        ? { cashierUserId: input.cashierUserId }
+        : {}),
+    });
+    and.push({ sessionId: { in: sessionIds } });
   }
   if (range.from || range.to) {
     where.createdAt = {
@@ -305,26 +361,70 @@ export async function queryClosings(
       ...(range.to ? { lt: range.to } : {}),
     };
   }
-  const rows = await tx.cashClosing.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-  });
-  // S3 — per-row audit/base visibility BEFORE pagination and count. The
-  // closing instance carries the source session's register/cashier so a
-  // conditional audit rule is evaluated against real server-owned context.
-  const sessionIds = [...new Set(rows.map((row) => row.sessionId))];
-  const sessions =
-    sessionIds.length > 0
-      ? await tx.cashSession.findMany({
-          where: { tenantId, id: { in: sessionIds } },
-        })
-      : [];
-  const sessionById = new Map(sessions.map((session) => [session.id, session]));
-  const visible = rows.filter((row) =>
-    isClosingVisible(actor, row, sessionById.get(row.sessionId) ?? null),
+  const orderBy: Prisma.CashClosingOrderByWithRelationInput[] = [
+    { createdAt: 'desc' },
+    { id: 'desc' },
+  ];
+  const scope = resolveListScope(
+    actor,
+    CASH_CLOSING_READ_REQUIREMENT,
+    CASH_AUDIT_REQUIREMENT,
   );
-  const total = visible.length;
-  const items = visible.slice(skip, skip + limit).map((row) => ({
+  let total: number;
+  let pageRows: CashClosing[];
+  if (scope === 'PER_ROW') {
+    if (and.length > 0) {
+      where.AND = and;
+    }
+    const rows = await tx.cashClosing.findMany({ where, orderBy });
+    // S3 — per-row audit/base visibility BEFORE pagination and count. The
+    // closing instance carries the source session's register/cashier so a
+    // conditional audit rule is evaluated against real server-owned context.
+    const sessionIds = [...new Set(rows.map((row) => row.sessionId))];
+    const sessions =
+      sessionIds.length > 0
+        ? await tx.cashSession.findMany({
+            where: { tenantId, id: { in: sessionIds } },
+          })
+        : [];
+    const sessionById = new Map(
+      sessions.map((session) => [session.id, session]),
+    );
+    const visible = rows.filter((row) =>
+      isClosingVisible(actor, row, sessionById.get(row.sessionId) ?? null),
+    );
+    total = visible.length;
+    pageRows = visible.slice(skip, skip + limit);
+  } else if (scope === 'NONE') {
+    total = 0;
+    pageRows = [];
+  } else {
+    // S5 — unconditional grants: OWN means closed by the actor OR of one of
+    // the actor's sessions, exactly like `isClosingVisible`.
+    if (scope === 'OWN') {
+      const ownSessionIds = await sessionIdsWhere(tx, {
+        tenantId,
+        cashierUserId: actor.userId,
+      });
+      and.push({
+        OR: [
+          { closedByUserId: actor.userId },
+          { sessionId: { in: ownSessionIds } },
+        ],
+      });
+    }
+    if (and.length > 0) {
+      where.AND = and;
+    }
+    total = await tx.cashClosing.count({ where });
+    pageRows = await tx.cashClosing.findMany({
+      where,
+      orderBy,
+      skip,
+      take: limit,
+    });
+  }
+  const items = pageRows.map((row) => ({
     id: row.id,
     sessionId: row.sessionId,
     folio: row.folio,
@@ -360,6 +460,17 @@ export async function queryClosing(
 }
 
 // ── Shared query helpers ────────────────────────────────────────────
+
+async function sessionIdsWhere(
+  tx: TenantClient,
+  where: Prisma.CashSessionWhereInput,
+): Promise<string[]> {
+  const rows = await tx.cashSession.findMany({
+    where,
+    select: { id: true },
+  });
+  return rows.map((row) => row.id);
+}
 
 /**
  * fe-design-pass T1 (S1, S2) — additive display fields for session reads.

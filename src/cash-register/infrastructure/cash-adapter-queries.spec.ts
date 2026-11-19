@@ -407,4 +407,129 @@ describe('cash-adapter-queries — direct module contract', () => {
       });
     });
   });
+
+  describe('DB-side list pagination (cash-redesign-reads S5)', () => {
+    function seedThree(host: Host): void {
+      seedSession(host, {
+        id: 's-1',
+        cashierUserId: 'u1',
+        openedAt: new Date('2026-01-01T10:00:00Z'),
+      });
+      seedSession(host, {
+        id: 's-2',
+        cashierUserId: 'u2',
+        openedAt: new Date('2026-01-01T11:00:00Z'),
+      });
+      seedSession(host, {
+        id: 's-3',
+        cashierUserId: 'u1',
+        openedAt: new Date('2026-01-01T12:00:00Z'),
+      });
+    }
+
+    it('pushes skip/take/count to the DB for unconditional audit grants', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+      const count = jest.spyOn(tx.cashSession, 'count');
+
+      const doc = asJson(
+        await querySessions(tx, host.tenantId, actor('u1'), {
+          kind: 'SESSIONS',
+          page: { page: 2, limit: 1 },
+        }),
+      );
+
+      expect(doc.total).toBe(3);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['s-2']);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 1, take: 1 }),
+      );
+    });
+
+    it('scopes own-only unconditional readers in the DB where clause', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+
+      const doc = asJson(
+        await querySessions(
+          tx,
+          host.tenantId,
+          actor('u1', [['read', 'CashSession']]),
+          { kind: 'SESSIONS', page: { page: 1, limit: 25 } },
+        ),
+      );
+
+      expect(doc.total).toBe(2);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['s-3', 's-1']);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 25 }),
+      );
+    });
+
+    it('keeps the per-row path (no DB skip/take) for conditional grants', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+      can('read', 'CashSession');
+      can('read', 'CashSessionAudit', { cashierUserId: 'u2' });
+      const conditional: CashActor = { userId: 'u1', ability: build() };
+      const findMany = jest.spyOn(tx.cashSession, 'findMany');
+
+      const doc = asJson(
+        await querySessions(tx, host.tenantId, conditional, {
+          kind: 'SESSIONS',
+          page: { page: 1, limit: 25 },
+        }),
+      );
+
+      expect(asItems(doc.items).map((item) => item.id)).toEqual([
+        's-3',
+        's-2',
+        's-1',
+      ]);
+      expect(findMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ take: expect.anything() }),
+      );
+    });
+
+    it('pushes closing pagination to the DB and honors cashierUserId', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedThree(host);
+      for (const [index, sessionId] of ['s-1', 's-2', 's-3'].entries()) {
+        host.db.closings.push({
+          id: `cl-${index + 1}`,
+          tenantId: host.tenantId,
+          sessionId,
+          folio: `CC-${index + 1}`,
+          closedByUserId: 'u9',
+          snapshotJson: {},
+          createdAt: new Date(Date.UTC(2026, 0, 2, index)),
+        });
+      }
+      const findMany = jest.spyOn(tx.cashClosing, 'findMany');
+      const count = jest.spyOn(tx.cashClosing, 'count');
+
+      const doc = asJson(
+        await queryClosings(tx, host.tenantId, actor('u9'), {
+          page: 1,
+          limit: 1,
+          cashierUserId: 'u1',
+        }),
+      );
+
+      expect(doc.total).toBe(2);
+      expect(asItems(doc.items).map((item) => item.id)).toEqual(['cl-3']);
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 1 }),
+      );
+    });
+  });
 });

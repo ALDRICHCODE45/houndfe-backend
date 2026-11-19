@@ -4,6 +4,8 @@
  *
  *   POST /cash-handovers/:id/receive → update:CashHandover (RECEIVE_HANDOVER)
  *   GET  /cash-handovers/custody     → read:CashHandover   (query CUSTODY)
+ *   GET  /cash-handovers/recipients  → create:CashHandover (query
+ *                                      HANDOVER_RECIPIENTS)
  *
  * The receiving actor is the authenticated JWT subject; the application
  * re-checks that it matches the handover's bound recipient and that the
@@ -42,7 +44,10 @@ import {
 import { requireCashActor, type CashRequestWithAbility } from './cash-actor';
 import { IdempotencyKey } from './decorators/idempotency-key.decorator';
 import { ReceiveHandoverDto } from './dto/handover.dto';
-import { ListCustodyQueryDto } from './dto/query.dto';
+import {
+  ListCustodyQueryDto,
+  ListHandoverRecipientsQueryDto,
+} from './dto/query.dto';
 
 @Controller('cash-handovers')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -62,6 +67,24 @@ export class CashHandoverController {
     return this.application.query(requireCashActor(user, request), {
       kind: 'CUSTODY',
       page: { page: query.page, limit: query.limit },
+    });
+  }
+
+  /**
+   * cash-redesign-reads S2 — who the sender may address a handover to. Gated
+   * by the sender's own `create:CashHandover`; no `read:User` is needed and
+   * only `{ userId, displayName, roleName }` is exposed.
+   */
+  @Get('recipients')
+  @RequirePermissions(['create', 'CashHandover'])
+  listRecipients(
+    @Query() query: ListHandoverRecipientsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: CashRequestWithAbility,
+  ): Promise<CashDocument> {
+    return this.application.query(requireCashActor(user, request), {
+      kind: 'HANDOVER_RECIPIENTS',
+      handoverKind: query.kind,
     });
   }
 

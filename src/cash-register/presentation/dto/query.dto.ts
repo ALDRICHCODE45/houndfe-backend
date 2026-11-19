@@ -11,7 +11,20 @@
  * a client tries to supply them.
  */
 import { Transform } from 'class-transformer';
-import { IsBoolean, IsInt, IsUUID, Max, Min } from 'class-validator';
+import {
+  ArrayNotEmpty,
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
+import { CsvEnum, type MultiValue } from '../../../shared/listing';
+import type {
+  CashHandoverKind,
+  CashSessionStatus,
+} from '../../domain/cash-register.types';
 import {
   CASH_LIST_DEFAULT_LIMIT,
   CASH_LIST_DEFAULT_PAGE,
@@ -63,14 +76,54 @@ export class CashListQueryDto {
   to?: string;
 }
 
+/** Exact lifecycle values accepted by the `status` session filter. */
+export const CASH_SESSION_STATUS_FILTER = {
+  OPEN: 'OPEN',
+  COUNTING: 'COUNTING',
+  SUBMITTED: 'SUBMITTED',
+  CLOSED: 'CLOSED',
+} as const satisfies Record<CashSessionStatus, CashSessionStatus>;
+
 export class ListSessionsQueryDto extends CashListQueryDto {
   @IsCashOptional()
   @Transform(({ value }: { value: unknown }) => parseStrictBoolean(value))
   @IsBoolean()
   pendingOnly?: boolean;
+
+  /**
+   * cash-redesign-reads S3 — exact status filter (any of). Repeated params
+   * (`status=OPEN&status=COUNTING`) and a comma list (`status=OPEN,CLOSED`)
+   * are both accepted, following the shared listing `CsvEnum` convention;
+   * values are deduplicated and an empty value is rejected.
+   */
+  @IsCashOptional()
+  @CsvEnum(CASH_SESSION_STATUS_FILTER, { max: 4, field: 'status' })
+  @ArrayNotEmpty()
+  status?: MultiValue<CashSessionStatus>;
+
+  /**
+   * cash-redesign-reads S3 — physical drawer state: `true` keeps sessions
+   * whose drawer is still held (`drawerReleasedAt` null), `false` keeps
+   * released drawers.
+   */
+  @IsCashOptional()
+  @Transform(({ value }: { value: unknown }) => parseStrictBoolean(value))
+  @IsBoolean()
+  drawerOpen?: boolean;
 }
 
 export class ListClosingsQueryDto extends CashListQueryDto {}
+
+/**
+ * cash-redesign-reads S2 — handover recipient discovery. `kind` is required
+ * because the self-recipient rule depends on it (a WITHDRAWAL can never be
+ * addressed to its own sender; a FLOAT can). No paging: the list is the
+ * tenant's eligible staff.
+ */
+export class ListHandoverRecipientsQueryDto {
+  @IsIn(['WITHDRAWAL', 'FLOAT'])
+  kind!: CashHandoverKind;
+}
 
 /**
  * S2 — recipient custody discovery. Deliberately exposes ONLY the shared
