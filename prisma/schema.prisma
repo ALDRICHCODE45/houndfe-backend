@@ -537,6 +537,7 @@ model Tenant {
   cashCounts    CashCount[]
   cashHandovers CashHandover[]
   cashClosings  CashClosing[]
+  cashClosingFolioCounter CashClosingFolioCounter?
   cashCommands  CashCommand[]
 
   // human-intervention / unit 2 — common chatbot request inbox.
@@ -3422,6 +3423,22 @@ model CashClosing {
   @@unique([tenantId, folio])
   @@index([tenantId, createdAt])
   @@map("cash_closings")
+}
+
+// pdf-a4-redesign T6 (S4): per-tenant consecutive closing folio (CC-000124).
+// One row per tenant, incremented atomically by `upsert` inside the closing
+// transaction (same proven pattern as SaleFolioCounter, without a period).
+// Closings created before this table keep their stored UUID-shaped folio.
+model CashClosingFolioCounter {
+  id         String   @id @default(uuid())
+  tenantId   String   @unique
+  lastNumber Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("cash_closing_folio_counters")
 }
 
 // Request idempotency log: `(tenantId, key)` identifies a write, and a

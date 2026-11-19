@@ -57,6 +57,12 @@ Errors: `401` (no/invalid token), `403 INSUFFICIENT_PERMISSIONS` (no `create:Cas
 
 ### 3.1 List item fields: register, cashier, difference (S7)
 
+### Closing folio format (pdf-a4-redesign T6)
+
+New closings get a **per-sucursal consecutive folio**: `CC-` + the sequence zero-padded to 6 digits (`CC-000001`, `CC-000124`); past `999999` it simply grows (`CC-1000000`), never truncated. Each sucursal has its own sequence starting at `CC-000001`, and concurrent closings in one sucursal never share a number.
+
+Closings created **before** this change keep their stored folio untouched, which is UUID-shaped (`CC-3f9a1c2b-7d4e-4b8a-9c01-5e6f7a8b9c0d`). There is no backfill: `GET /cash-closings` can return both shapes, so treat `folio` as an opaque string (the field is still unique per sucursal). The closing PDF shortens an old UUID folio to `CC-3f9a1c2b` when it prints it; the API value is unchanged.
+
 Each item of `GET /cash-closings` now also carries the register, the cashier and the cut's difference, so the list no longer needs `GET /cash-closings/:id` per row. Existing keys are unchanged.
 
 ```json
@@ -65,7 +71,7 @@ Each item of `GET /cash-closings` now also carries the register, the cashier and
     {
       "id": "9a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
       "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
-      "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+      "folio": "CC-000124",
       "createdAt": "2026-11-05T22:45:30.120Z",
       "register": { "id": "a1f3e0b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b", "name": "Caja Mostrador 2" },
       "cashier": { "userId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f", "displayName": "Ana Cajera" },
@@ -111,13 +117,13 @@ Both lists (`/cash-sessions`, `/cash-closings`) now filter, count and page **in 
 {
   "id": "9a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
   "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
-  "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+  "folio": "CC-000124",
   "createdAt": "2026-11-05T22:45:30.120Z",
   "snapshot": {
     "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
     "tenantId": "ced6cc10-a037-4f41-92af-ee69bbb51c8b",
     "registerId": "a1f3e0b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
-    "folio": "CC-2f6d9c1e-8b7a-4c3d-9e2f-1a0b9c8d7e6f",
+    "folio": "CC-000124",
     "cashierUserId": "7d2e9c10-4b8a-4f6e-9c1d-2a3b4c5d6e7f",
     "openingCents": 100000,
     "expectedCents": 150000,
@@ -198,7 +204,7 @@ The snapshot is frozen at close; it is never recomputed. Field list checked agai
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `sessionId`, `tenantId`, `registerId` | UUID string | Source session, sucursal, register. |
-| `folio` | string | `CC-<uuid>`; same as the top-level `folio`. |
+| `folio` | string | Same as the top-level `folio`. New closings: `CC-000124` (see *Closing folio format*); closings made before that change keep `CC-<uuid>`. |
 | `cashierUserId` | UUID string | Session owner. |
 | `openingCents` | integer | Opening fund (counted once). |
 | `expectedCents` | integer | Expected **physical cash** (`CASH` channel) at freeze. |

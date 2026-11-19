@@ -24,7 +24,6 @@ import {
   iso,
   json,
   ledgerMethodToCashMethod,
-  newFolio,
   prismaJson,
 } from './cash-adapter-values';
 
@@ -40,14 +39,6 @@ function expectCode(fn: () => unknown, code: string): void {
 }
 
 describe('cash-adapter-values — primitives', () => {
-  it('Given calls, when minting a folio, then it is opaque, prefixed and unique', () => {
-    const first = newFolio();
-    const second = newFolio();
-    expect(first).toMatch(/^CC-/);
-    expect(second).toMatch(/^CC-/);
-    expect(first).not.toBe(second);
-  });
-
   it('Given a date or null, when serializing, then it is ISO text or null', () => {
     expect(iso(new Date('2025-01-02T03:04:05.000Z'))).toBe(
       '2025-01-02T03:04:05.000Z',

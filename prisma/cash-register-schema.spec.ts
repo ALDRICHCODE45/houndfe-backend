@@ -428,6 +428,45 @@ describe('cash-register-closing schema + migration drift guard (T2)', () => {
     );
   });
 
+  it('adds a per-tenant closing folio counter additively and keeps the unique folio (pdf-a4-redesign T6/S4)', () => {
+    const counter = model('CashClosingFolioCounter');
+    expect(counter).toMatch(/^\s*tenantId\s+String\s+@unique\s*$/m);
+    expect(counter).toMatch(/^\s*lastNumber\s+Int\s+@default\(0\)\s*$/m);
+    expect(counter).toMatch(TENANT_FK);
+    expect(counter).toContain('@@map("cash_closing_folio_counters")');
+    // The closing keeps its tenant-unique folio; no backfill needed.
+    expect(model('CashClosing')).toMatch(
+      /@@unique\(\s*\[tenantId,\s*folio\]\s*\)/,
+    );
+
+    const folioSql = fs.readFileSync(
+      path.join(
+        __dirname,
+        'migrations/20261119010000_cash_closing_folio_sequence/migration.sql',
+      ),
+      'utf8',
+    );
+    const folioDdl = flat(folioSql.replace(/^\s*--.*$/gm, ''));
+    expect(folioDdl).toContain('CREATE TABLE "cash_closing_folio_counters"');
+    expect(folioDdl).toContain('"lastNumber" INTEGER NOT NULL DEFAULT 0');
+    expect(folioDdl).toContain(
+      'CREATE UNIQUE INDEX "cash_closing_folio_counters_tenantId_key" ON "cash_closing_folio_counters"("tenantId")',
+    );
+    expect(folioDdl).toContain(
+      'FOREIGN KEY ("tenantId") REFERENCES "tenants"("id") ON DELETE CASCADE ON UPDATE CASCADE',
+    );
+    // Additive: no DML (no backfill/rewrite of stored folios), no destructive
+    // DDL and no alteration of any existing table.
+    expect(folioDdl).not.toMatch(/\bDROP\s+(TABLE|TYPE|INDEX|CONSTRAINT)\b/i);
+    expect(folioDdl).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(folioDdl).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(folioDdl).not.toMatch(/\bUPDATE\s+"\w+"\s+SET\b/i);
+    expect(folioDdl).not.toMatch(
+      /\bALTER TABLE "(?!cash_closing_folio_counters")/,
+    );
+    expect(folioDdl).not.toContain('"cash_closings"');
+  });
+
   it('rejects CREDIT and pins the signed delta direction per movement kind', () => {
     expect(ddlFlat).toContain(
       'CONSTRAINT "cash_movements_method_not_credit" CHECK ("method" <> \'CREDIT\')',

@@ -135,7 +135,7 @@ describe('cash-adapter-closing — direct module contract', () => {
       sessionId: 's-1',
     });
 
-    expect(doc.folio).toMatch(/^CC-/);
+    expect(doc.folio).toBe('CC-000001');
     const snapshot = asJson(doc.snapshot);
     expect(snapshot.sessionId).toBe('s-1');
     expect(snapshot.folio).toBe(doc.folio);
@@ -155,6 +155,31 @@ describe('cash-adapter-closing — direct module contract', () => {
     expect(host.db.closings).toHaveLength(1);
     expect(host.db.sessions[0].status).toBe('CLOSED');
     expect(host.db.sessions[0].closedAt).toBeInstanceOf(Date);
+  });
+
+  it('keeps a legacy UUID-shaped folio untouched and numbers the new closing from the tenant counter (pdf-a4-redesign T6/S4)', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedReady(host);
+    const legacyFolio = 'CC-3f9a1c2b-7d4e-4b8a-9c01-5e6f7a8b9c0d';
+    host.db.closings.push({
+      id: 'legacy-closing',
+      tenantId: host.tenantId,
+      sessionId: 's-old',
+      folio: legacyFolio,
+      createdAt: new Date(),
+    });
+
+    const doc = await close(tx, host.tenantId, actor('u2'), {
+      kind: 'CLOSE',
+      sessionId: 's-1',
+    });
+
+    expect(doc.folio).toBe('CC-000001');
+    expect(host.db.closings[0].folio).toBe(legacyFolio);
+    expect(host.db.folioCounters).toEqual([
+      expect.objectContaining({ tenantId: host.tenantId, lastNumber: 1 }),
+    ]);
   });
 
   it('freezes sender, receiver and receipt-actor names into each handover (pdf-a4-redesign T2/S1)', async () => {

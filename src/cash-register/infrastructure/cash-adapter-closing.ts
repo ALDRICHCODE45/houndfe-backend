@@ -45,7 +45,8 @@ import {
   userName,
   userNames,
 } from './cash-adapter-storage';
-import { json, newFolio, prismaJson } from './cash-adapter-values';
+import { allocateClosingFolio } from './cash-adapter-folio';
+import { json, prismaJson } from './cash-adapter-values';
 
 export async function close(
   tx: TenantClient,
@@ -177,7 +178,9 @@ export async function close(
   );
   const nameOf = (userId: string | null): string | null =>
     userId === null ? null : (handoverNames.get(userId) ?? null);
-  const folio = newFolio();
+  // pdf-a4-redesign T6 (S4) — per-tenant consecutive folio, allocated inside
+  // this transaction so a failed close releases the number.
+  const folio = await allocateClosingFolio(tx, tenantId);
   const now = new Date();
   const domain = toDomainSession(session);
   const baseSnapshot = createCashClosingSnapshot({

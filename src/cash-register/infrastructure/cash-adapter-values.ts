@@ -7,7 +7,6 @@
  * instance state is touched here.
  */
 import { type Prisma } from '@prisma/client';
-import { randomUUID } from 'crypto';
 import {
   CASH_APPLICATION_CODES,
   cashAppError,
@@ -19,11 +18,6 @@ import type {
 } from '../cash-application.port';
 import type { CashPaymentMethod } from '../cash-ledger.port';
 import type { CashCountLine, CashMethod } from '../domain';
-
-/** Opaque, tenant-unique folio; no guessable date counter. */
-export function newFolio(): string {
-  return `CC-${randomUUID()}`;
-}
 
 export function iso(value: Date | null): string | null {
   return value ? value.toISOString() : null;

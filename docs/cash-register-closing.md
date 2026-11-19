@@ -263,6 +263,7 @@ permission; releasing a drawer does not require granting receipt permission.
 `GET /cash-handovers/recipients` → `{ items: [{ userId, displayName, roleName }] }` (active sucursal members whose role grants `update:CashHandover`, including `manage:all`; the caller is excluded for `kind=WITHDRAWAL`; sorted by `displayName`; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 `POST .../release-drawer` → `{ sessionId, drawerReleasedAt }`
 `POST .../close` and `GET /cash-closings/:id` → `{ id, sessionId, folio, createdAt, snapshot }`
+`folio` format: new closings get a per-tenant consecutive `CC-000124` (`CC-` + sequence zero-padded to 6 digits, wider past `999999`, starting at `CC-000001` per tenant; see *Closing folio sequence*). Closings stored before that keep their UUID-shaped `CC-<uuid>` folio untouched (no backfill).
 `GET /cash-closings` → `{ items: [{ id, sessionId, folio, createdAt, register: { id, name|null }|null, cashier: { userId, displayName|null }|null, differenceCents|null }], page, limit, total }` (`register`/`cashier` are the closed session's, with current names; `differenceCents` is the frozen declared − expected cash difference from the snapshot; see [frontend-handoff/25-cash-redesign.md](./frontend-handoff/25-cash-redesign.md))
 
 `CashSessionProjection`:
@@ -1056,6 +1057,23 @@ Rules:
 - Lists are ordered newest first (`openedAt` / `createdAt`), ties by `id`
   descending. With unconditional grants they filter, count and page in the
   database; conditional grants keep per-row filtering before the count.
+
+## Closing folio sequence
+
+`close` allocates the folio inside the closing transaction from the
+`cash_closing_folio_counters` table (one row per tenant, `lastNumber`), via an
+atomic `upsert` with `{ increment: 1 }` (`INSERT … ON CONFLICT ("tenantId") DO
+UPDATE`), the same pattern as the sales folio counter without a period. A
+concurrent closing in the same tenant waits on that row lock, so two closings
+never get the same number; a rolled-back close releases its number (the
+sequence has no gaps). The first closing of a tenant is `CC-000001`; the number
+is formatted by `formatClosingFolio` (`cash-adapter-folio.ts`) and only grows
+past 6 digits after `999999`.
+
+The `@@unique([tenantId, folio])` index is unchanged. Closings created before
+the counter (opaque `CC-<uuid>` folios) are neither backfilled nor rewritten;
+the two shapes cannot collide. The migration
+`20261119010000_cash_closing_folio_sequence` is additive (new table only).
 
 ## Closing PDF
 

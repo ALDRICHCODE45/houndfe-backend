@@ -31,6 +31,7 @@ interface FakeDb {
   counts: Row[];
   handovers: Row[];
   closings: Row[];
+  folioCounters: Row[];
   commands: Row[];
   users: Row[];
   memberships: Row[];
@@ -50,6 +51,7 @@ function emptyDb(): FakeDb {
     counts: [],
     handovers: [],
     closings: [],
+    folioCounters: [],
     commands: [],
     users: [],
     memberships: [],
@@ -210,6 +212,32 @@ function delegate<K extends keyof FakeDb>(
       }
       return found;
     },
+    // Mirrors Prisma's `upsert` for the single-unique counter shape: create
+    // the row when absent, otherwise apply `{ increment }` numeric updates.
+    upsert: async (args: {
+      where: Where;
+      create: Row;
+      update: Row;
+    }): Promise<Row> => {
+      const found = rows().find((row) => matches(row, args.where, host.db));
+      if (!found) {
+        const row = {
+          ...defaults(),
+          ...args.create,
+          id:
+            typeof args.create.id === 'string' ? args.create.id : randomUUID(),
+        };
+        rows().push(row);
+        return row;
+      }
+      for (const [field, value] of Object.entries(args.update)) {
+        found[field] =
+          isObj(value) && typeof value.increment === 'number'
+            ? Number(found[field]) + value.increment
+            : value;
+      }
+      return found;
+    },
     count: async (args: { where?: Where }): Promise<number> =>
       rows().filter((row) => matches(row, args.where, host.db)).length,
     update: async (args: { where: Where; data: Row }): Promise<Row> => {
@@ -275,6 +303,11 @@ function makeClient(host: Host) {
       createdAt: new Date(),
     })),
     cashClosing: delegate(host, 'closings', () => ({ createdAt: new Date() })),
+    cashClosingFolioCounter: delegate(host, 'folioCounters', () => ({
+      lastNumber: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })),
     cashCommand: delegate(host, 'commands', () => ({ createdAt: new Date() })),
     user: delegate(host, 'users', () => ({ isActive: true })),
     tenantMembership: delegate(host, 'memberships', () => ({
