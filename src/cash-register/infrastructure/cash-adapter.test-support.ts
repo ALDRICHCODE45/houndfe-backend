@@ -107,16 +107,24 @@ function matchCond(value: unknown, cond: unknown): boolean {
   return value === cond;
 }
 
-function matches(row: Row, where?: Where): boolean {
+function matches(row: Row, where?: Where, db?: FakeDb): boolean {
   if (!where) {
     return true;
   }
   return Object.entries(where).every(([key, cond]) => {
     if (key === 'AND') {
-      return (cond as Where[]).every((entry) => matches(row, entry));
+      return (cond as Where[]).every((entry) => matches(row, entry, db));
     }
     if (key === 'OR') {
-      return (cond as Where[]).some((entry) => matches(row, entry));
+      return (cond as Where[]).some((entry) => matches(row, entry, db));
+    }
+    // `session: { is }` — the composite (tenantId, sessionId) relation.
+    if (key === 'session' && isObj(cond) && isObj(cond.is) && db) {
+      const session = db.sessions.find(
+        (candidate) =>
+          candidate.tenantId === row.tenantId && candidate.id === row.sessionId,
+      );
+      return session !== undefined && matches(session, cond.is, db);
     }
     return matchCond(row[key], cond);
   });
@@ -181,7 +189,7 @@ function delegate<K extends keyof FakeDb>(
       orderBy?: Row | Row[];
     }): Promise<Row | null> =>
       sortRows(
-        rows().filter((row) => matches(row, args.where)),
+        rows().filter((row) => matches(row, args.where, host.db)),
         args.orderBy,
       )[0] ?? null,
     findMany: async (args: {
@@ -191,7 +199,7 @@ function delegate<K extends keyof FakeDb>(
       take?: number;
     }): Promise<Row[]> => {
       let found = sortRows(
-        rows().filter((row) => matches(row, args.where)),
+        rows().filter((row) => matches(row, args.where, host.db)),
         args.orderBy,
       );
       if (args.skip !== undefined) {
@@ -203,7 +211,7 @@ function delegate<K extends keyof FakeDb>(
       return found;
     },
     count: async (args: { where?: Where }): Promise<number> =>
-      rows().filter((row) => matches(row, args.where)).length,
+      rows().filter((row) => matches(row, args.where, host.db)).length,
     update: async (args: { where: Where; data: Row }): Promise<Row> => {
       const row = rows().find((candidate) => candidate.id === args.where.id);
       if (!row) {
