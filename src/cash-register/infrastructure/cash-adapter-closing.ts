@@ -43,6 +43,7 @@ import {
   latestCount,
   requireSessionLocked,
   userName,
+  userNames,
 } from './cash-adapter-storage';
 import { json, newFolio, prismaJson } from './cash-adapter-values';
 
@@ -162,6 +163,20 @@ export async function close(
   const register = await tx.cashRegister.findFirst({
     where: { tenantId, id: session.registerId },
   });
+  // pdf-a4-redesign T2 (S1) — ONE batched read for every handover actor, so
+  // the printed closing shows people instead of user ids (no per-row reads).
+  const handoverNames = await userNames(
+    tx,
+    handovers.flatMap((handover) =>
+      [
+        handover.createdByUserId,
+        handover.recipientUserId,
+        handover.receivedByUserId,
+      ].filter((id): id is string => id !== null),
+    ),
+  );
+  const nameOf = (userId: string | null): string | null =>
+    userId === null ? null : (handoverNames.get(userId) ?? null);
   const folio = newFolio();
   const now = new Date();
   const domain = toDomainSession(session);
@@ -184,6 +199,9 @@ export async function close(
         receiptActorUserId: handover.receivedByUserId,
         declaredAt: handover.createdAt,
         receivedAt: handover.receivedAt,
+        senderName: nameOf(handover.createdByUserId),
+        receiverName: nameOf(handover.recipientUserId),
+        receiptActorName: nameOf(handover.receivedByUserId),
       }),
     ),
     countedAt: originalDeclaration.createdAt,

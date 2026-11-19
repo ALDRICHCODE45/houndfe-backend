@@ -882,7 +882,19 @@ verifiedCents|null, differenceCents }` where `differenceCents = declaredCents �
 expectedCents` per channel.
 `handovers[]` = `{ handoverId, kind, declaredCents, receivedCents|null,
 senderUserId, receiverUserId|null, receiptActorUserId|null, declaredAt,
-receivedAt|null }`.
+receivedAt|null, senderName?, receiverName?, receiptActorName? }`.
+
+`senderName`, `receiverName` and `receiptActorName` (pdf-a4-redesign T2) are
+**optional** display names frozen by CLOSE with ONE batched users read: each is
+`User.name` at close, or `null` when the user row is missing or the id is null.
+Snapshots frozen before T2 do not carry them (the keys are absent; the stored
+row is not rewritten), so every reader must tolerate absence. The snapshot shape
+is additive: old snapshots still parse. `GET /cash-closings/:id` fills a missing
+handover name (and a missing `cashierName`/`verifierName`/`closedByName`) with
+the user's **current** name at read time, display only: one batched users query
+built from ids inside the tenant-scoped closing row, frozen names always win,
+and an unresolvable user stays without a name. The A4 PDF prints names only and
+**never a user id**; an actor with no name reads «Usuario sin nombre».
 
 Totals note: `snapshot.expectedCents`, `declaredCents` and `verifiedCents` are the
 **physical cash** totals (the `CASH` channel), not the sum of all channels.
@@ -1057,9 +1069,18 @@ Rules:
 The receipt is rendered exclusively from the frozen `snapshot`; it never reads
 sales or catalog live. A malformed snapshot fails closed with
 `500 CASH_CLOSING_SNAPSHOT_INVALID` rather than rendering guessed values. The
-existing Spanish labels are kept (`CORTE DE CAJA`, `FONDO INICIAL (APERTURA)`,
-`Detalle por canal`, `TOTALES DEL CORTE`, `Custodia y entregas`,
-`ENTREGAS Y RECEPCIONES`, `DECLARADO`, `VERIFICADO`, `RECIBIDO`).
+Spanish labels are kept (`Corte de caja`, `Fondo inicial`, `Detalle por canal`,
+`Totales del corte`, `Custodia y entregas`, `Entregas y recepciones`,
+`Declarado`, `Verificado`, `Recibido`; headings are uppercased by the template).
+
+The A4 layout is the shared «libro mayor» kit (pdf-a4-redesign T2): one
+wrapping page that react-pdf paginates by itself, a fixed footer with the real
+`Página X de Y`, and a compact header repeated on pages 2+. Cash differences
+print the word, in the warning amber (never red): `$50.00 faltante`,
+`$5.00 sobrante`, or `Sin diferencia`; a pending handover reception reads
+`Pendiente` in the same amber. The session prints as a short reference
+(`SES-` + the first 8 hex characters), never the full id; an unnamed register
+reads «Caja sin nombre».
 
 ## Errors
 

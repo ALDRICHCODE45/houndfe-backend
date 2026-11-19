@@ -30,6 +30,7 @@ import {
 import type {
   CashActor,
   CashDocument,
+  CashJson,
   CashQuery,
 } from '../cash-application.port';
 import { decodeClosingSnapshot, decodeExpectedSnapshot } from './cash-json';
@@ -455,7 +456,104 @@ export async function queryClosing(
   if (!isClosingVisible(actor, row, session)) {
     assertAbility(actor, CASH_AUDIT_REQUIREMENT, closingInstance(row, session));
   }
-  return closingDocument(row, decodeClosingSnapshot(row.snapshotJson));
+  return closingDocument(
+    row,
+    await withReadTimeNames(tx, decodeClosingSnapshot(row.snapshotJson)),
+  );
+}
+
+type ClosingSnapshotJson = ReturnType<typeof decodeClosingSnapshot>;
+
+const HANDOVER_NAME_FIELDS = [
+  ['senderUserId', 'senderName'],
+  ['receiverUserId', 'receiverName'],
+  ['receiptActorUserId', 'receiptActorName'],
+] as const;
+
+const SNAPSHOT_NAME_FIELDS = [
+  ['cashierUserId', 'cashierName'],
+  ['verifierUserId', 'verifierName'],
+  ['closedByUserId', 'closedByName'],
+] as const;
+
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/** Ids whose frozen display name is absent (snapshots frozen before T2). */
+function missingNameIds(
+  owner: Record<string, unknown>,
+  fields: ReadonlyArray<readonly [string, string]>,
+): string[] {
+  return fields.flatMap(([idKey, nameKey]) =>
+    hasText(owner[idKey]) && !hasText(owner[nameKey]) ? [owner[idKey]] : [],
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function fillNames(
+  owner: Record<string, CashJson>,
+  fields: ReadonlyArray<readonly [string, string]>,
+  names: ReadonlyMap<string, string>,
+): Record<string, CashJson> {
+  const filled: Record<string, CashJson> = { ...owner };
+  for (const [idKey, nameKey] of fields) {
+    const id = owner[idKey];
+    const name = typeof id === 'string' ? names.get(id) : undefined;
+    if (!hasText(owner[nameKey]) && name !== undefined) {
+      filled[nameKey] = name;
+    }
+  }
+  return filled;
+}
+
+/**
+ * pdf-a4-redesign T2 (S1) — snapshots frozen before display names were
+ * captured (handover sender/receiver/receipt actor, and older actor names)
+ * get CURRENT names resolved at read time for display only; the stored row is
+ * never rewritten and frozen names always win. The lookup is ONE batched
+ * users query built exclusively from ids inside this tenant-scoped closing
+ * row (the closing was already fetched by `tenantId`), and it is skipped
+ * entirely when the snapshot already carries every name. An unresolvable id
+ * stays nameless so the PDF prints «Usuario sin nombre», never the id.
+ */
+async function withReadTimeNames(
+  tx: TenantClient,
+  snapshot: ClosingSnapshotJson,
+): Promise<ClosingSnapshotJson> {
+  const handovers = Array.isArray(snapshot.handovers)
+    ? snapshot.handovers
+    : null;
+  const ids = new Set<string>(missingNameIds(snapshot, SNAPSHOT_NAME_FIELDS));
+  for (const handover of handovers ?? []) {
+    const record = asRecord(handover);
+    if (record !== null) {
+      missingNameIds(record, HANDOVER_NAME_FIELDS).forEach((id) => ids.add(id));
+    }
+  }
+  if (ids.size === 0) {
+    return snapshot;
+  }
+  const names = await userNames(tx, [...ids]);
+  const filled = fillNames(snapshot, SNAPSHOT_NAME_FIELDS, names);
+  if (handovers !== null) {
+    filled.handovers = handovers.map((handover) => {
+      const record = asRecord(handover);
+      return record === null
+        ? handover
+        : fillNames(
+            record as Record<string, CashJson>,
+            HANDOVER_NAME_FIELDS,
+            names,
+          );
+    });
+  }
+  return filled;
 }
 
 // ── Shared query helpers ────────────────────────────────────────────

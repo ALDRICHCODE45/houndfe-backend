@@ -704,4 +704,161 @@ describe('cash-adapter-queries — direct module contract', () => {
       expect(asJson(fresh.snapshot).openedAt).toBe('2026-01-01T09:00:00.000Z');
     });
   });
+  describe('read-time names for old snapshots (pdf-a4-redesign T2/S1)', () => {
+    const handoverRow = (over: Record<string, unknown> = {}) => ({
+      handoverId: 'h-1',
+      kind: 'WITHDRAWAL',
+      declaredCents: 1000,
+      receivedCents: 1000,
+      senderUserId: 'u1',
+      receiverUserId: 'u2',
+      receiptActorUserId: 'u3',
+      declaredAt: '2026-01-01T10:00:00.000Z',
+      receivedAt: '2026-01-01T10:05:00.000Z',
+      ...over,
+    });
+
+    function seedClosing(
+      host: Host,
+      snapshotJson: Record<string, unknown>,
+      tenantId = host.tenantId,
+    ): void {
+      host.db.closings.push({
+        id: 'cl-names',
+        tenantId,
+        sessionId: 's-1',
+        folio: 'CC-names',
+        closedByUserId: 'u1',
+        snapshotJson: { sessionId: 's-1', folio: 'CC-names', ...snapshotJson },
+        createdAt: new Date(),
+      });
+    }
+
+    it('fills missing handover names with ONE batched users query and never rewrites the row', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2', 'u3']);
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      seedClosing(host, { handovers: [handoverRow(), handoverRow()] });
+      const findMany = jest.spyOn(tx.user, 'findMany');
+
+      const doc = await queryClosing(
+        tx,
+        host.tenantId,
+        actor('u1'),
+        'cl-names',
+      );
+
+      const [first] = asItems(asJson(doc.snapshot).handovers);
+      expect(first).toMatchObject({
+        senderName: 'Name u1',
+        receiverName: 'Name u2',
+        receiptActorName: 'Name u3',
+      });
+      expect(findMany).toHaveBeenCalledTimes(1);
+      const where = (
+        findMany.mock.calls[0][0] as { where: { id: { in: string[] } } }
+      ).where;
+      expect([...where.id.in].sort()).toEqual(['u1', 'u2', 'u3']);
+      expect(host.db.closings[0].snapshotJson).not.toHaveProperty(
+        'handovers.0.senderName',
+      );
+    });
+
+    it('keeps frozen names and skips the users query when nothing is missing', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2', 'u3']);
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      seedClosing(host, {
+        handovers: [
+          handoverRow({
+            senderName: 'Congelada Uno',
+            receiverName: 'Congelada Dos',
+            receiptActorName: 'Congelada Tres',
+          }),
+        ],
+      });
+      const findMany = jest.spyOn(tx.user, 'findMany');
+
+      const doc = await queryClosing(
+        tx,
+        host.tenantId,
+        actor('u1'),
+        'cl-names',
+      );
+
+      expect(asItems(asJson(doc.snapshot).handovers)[0]).toMatchObject({
+        senderName: 'Congelada Uno',
+        receiverName: 'Congelada Dos',
+        receiptActorName: 'Congelada Tres',
+      });
+      expect(findMany).not.toHaveBeenCalled();
+    });
+
+    it('leaves an unresolvable user nameless instead of inventing a value', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1']);
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      seedClosing(host, {
+        handovers: [
+          handoverRow({ receiverUserId: 'ghost', receiptActorUserId: null }),
+        ],
+      });
+
+      const doc = await queryClosing(
+        tx,
+        host.tenantId,
+        actor('u1'),
+        'cl-names',
+      );
+
+      const [first] = asItems(asJson(doc.snapshot).handovers);
+      expect(first.senderName).toBe('Name u1');
+      expect(first).not.toHaveProperty('receiverName');
+      expect(first).not.toHaveProperty('receiptActorName');
+    });
+
+    it('never looks up names for another tenant closing (not found, zero users queries)', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2', 'u3']);
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      seedClosing(host, { handovers: [handoverRow()] }, 'other-tenant');
+      const findMany = jest.spyOn(tx.user, 'findMany');
+      const findFirst = jest.spyOn(tx.user, 'findFirst');
+
+      await expect(
+        queryClosing(tx, host.tenantId, actor('u1'), 'cl-names'),
+      ).rejects.toMatchObject({ code: 'CASH_CLOSING_NOT_FOUND' });
+      expect(findMany).not.toHaveBeenCalled();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it('also fills missing cashier/verifier/closer names on old snapshots', async () => {
+      const { host, tenantPrisma } = makeTenantHarness();
+      const tx = tenantPrisma.getClient();
+      seedActors(host, ['u1', 'u2']);
+      seedSession(host, { status: 'CLOSED', closedAt: new Date() });
+      seedClosing(host, {
+        cashierUserId: 'u1',
+        verifierUserId: 'u2',
+        closedByUserId: 'u2',
+        closedByName: 'Ya congelado',
+        handovers: [],
+      });
+
+      const snapshot = asJson(
+        (await queryClosing(tx, host.tenantId, actor('u1'), 'cl-names'))
+          .snapshot,
+      );
+
+      expect(snapshot).toMatchObject({
+        cashierName: 'Name u1',
+        verifierName: 'Name u2',
+        closedByName: 'Ya congelado',
+      });
+    });
+  });
 });

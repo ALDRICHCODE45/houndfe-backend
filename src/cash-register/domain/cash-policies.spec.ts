@@ -78,6 +78,9 @@ interface MutableHandover {
   receiptActorUserId: string | null;
   declaredAt: Date;
   receivedAt: Date | null;
+  senderName?: string | null;
+  receiverName?: string | null;
+  receiptActorName?: string | null;
 }
 
 // ── Fixtures ────────────────────────────────────────────────────────
@@ -1385,6 +1388,36 @@ describe('cash-register closing snapshot (S7/S8)', () => {
     expect(clone.handovers[0]).not.toBe(snapshot.handovers[0]);
     expect(typeof snapshot.countedAt).toBe('string');
     expect(clone.countedAt).toBe(snapshot.countedAt);
+  });
+
+  it('Given handover display names (pdf-a4-redesign T2), when building the snapshot, then they are frozen with the handover and survive a clone', () => {
+    const input = snapshotInput();
+    input.handovers[0] = {
+      ...input.handovers[0],
+      senderName: 'Ana Cajera',
+      receiverName: 'Beto Encargado',
+      receiptActorName: null,
+    };
+    const snapshot = createCashClosingSnapshot(input);
+
+    expect(snapshot.handovers[0]).toMatchObject({
+      senderName: 'Ana Cajera',
+      receiverName: 'Beto Encargado',
+      receiptActorName: null,
+    });
+    expect(cloneCashClosingSnapshot(snapshot).handovers[0]).toEqual(
+      snapshot.handovers[0],
+    );
+  });
+
+  it('Given handovers without names (old callers), when building the snapshot, then the name keys are absent', () => {
+    const snapshot = createCashClosingSnapshot(snapshotInput());
+
+    expect(Object.keys(snapshot.handovers[0])).not.toEqual(
+      expect.arrayContaining(['senderName']),
+    );
+    expect('receiverName' in snapshot.handovers[0]).toBe(false);
+    expect('receiptActorName' in snapshot.handovers[0]).toBe(false);
   });
 
   it('Given a catalog label resolved at operation time, when the catalog is renamed later, then the snapshot keeps the original label', () => {

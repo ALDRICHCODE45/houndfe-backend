@@ -46,6 +46,14 @@ export interface CashSnapshotHandoverInput {
   readonly receiptActorUserId: string | null;
   readonly declaredAt: Date;
   readonly receivedAt: Date | null;
+  /**
+   * pdf-a4-redesign T2 (S1) — optional display names frozen with the cut so
+   * the printed closing shows people instead of user ids. `null` = the user
+   * row could not be resolved at close; absent = not offered (old callers).
+   */
+  readonly senderName?: string | null;
+  readonly receiverName?: string | null;
+  readonly receiptActorName?: string | null;
 }
 
 export interface CashSnapshotHandover {
@@ -58,6 +66,13 @@ export interface CashSnapshotHandover {
   readonly receiptActorUserId: string | null;
   readonly declaredAt: string;
   readonly receivedAt: string | null;
+  /**
+   * Optional display names frozen at close (pdf-a4-redesign T2). Snapshots
+   * frozen before it do not carry them; readers must tolerate absence.
+   */
+  readonly senderName?: string | null;
+  readonly receiverName?: string | null;
+  readonly receiptActorName?: string | null;
 }
 
 export interface CashClosingSnapshot {
@@ -135,6 +150,27 @@ function toSnapshotHandover(
     receiptActorUserId: handover.receiptActorUserId,
     declaredAt: handover.declaredAt.toISOString(),
     receivedAt: handover.receivedAt ? handover.receivedAt.toISOString() : null,
+    ...frozenNames(handover),
+  };
+}
+
+/** Only keys the caller offered are written, so old shapes stay identical. */
+function frozenNames(
+  handover: CashSnapshotHandoverInput,
+): Pick<
+  CashSnapshotHandover,
+  'senderName' | 'receiverName' | 'receiptActorName'
+> {
+  return {
+    ...(handover.senderName !== undefined
+      ? { senderName: handover.senderName }
+      : {}),
+    ...(handover.receiverName !== undefined
+      ? { receiverName: handover.receiverName }
+      : {}),
+    ...(handover.receiptActorName !== undefined
+      ? { receiptActorName: handover.receiptActorName }
+      : {}),
   };
 }
 

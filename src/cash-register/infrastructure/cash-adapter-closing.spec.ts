@@ -157,6 +157,37 @@ describe('cash-adapter-closing — direct module contract', () => {
     expect(host.db.sessions[0].closedAt).toBeInstanceOf(Date);
   });
 
+  it('freezes sender, receiver and receipt-actor names into each handover (pdf-a4-redesign T2/S1)', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedReady(host);
+    host.db.handovers[0].recipientUserId = 'u2';
+    host.db.handovers[0].receivedByUserId = 'u2';
+    const findMany = jest.spyOn(tx.user, 'findMany');
+
+    const doc = await close(tx, host.tenantId, actor('u2'), {
+      kind: 'CLOSE',
+      sessionId: 's-1',
+    });
+
+    const [handover] = asItems(asJson(doc.snapshot).handovers);
+    expect(handover).toMatchObject({
+      senderUserId: 'u1',
+      senderName: 'Ana',
+      receiverUserId: 'u2',
+      receiverName: 'Beto',
+      receiptActorUserId: 'u2',
+      receiptActorName: 'Beto',
+    });
+    // The stored row carries the same frozen names.
+    expect(
+      (host.db.closings[0].snapshotJson as { handovers: unknown[] })
+        .handovers[0],
+    ).toMatchObject({ senderName: 'Ana', receiverName: 'Beto' });
+    // One batched read for every handover actor — never one query per row.
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
   it('requires a submitted declaration', async () => {
     const { host, tenantPrisma } = makeTenantHarness();
     const tx = tenantPrisma.getClient();
