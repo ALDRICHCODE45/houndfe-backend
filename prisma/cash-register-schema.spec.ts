@@ -414,6 +414,20 @@ describe('cash-register-closing schema + migration drift guard (T2)', () => {
     );
   });
 
+  it('indexes cash_sessions by (tenantId, openedAt) for the audit session list', () => {
+    expect(model('CashSession')).toContain('@@index([tenantId, openedAt])');
+    const indexSql = fs.readFileSync(
+      path.join(
+        __dirname,
+        'migrations/20261119000000_cash_sessions_tenant_opened_at_idx/migration.sql',
+      ),
+      'utf8',
+    );
+    expect(indexSql).toContain(
+      'CREATE INDEX "cash_sessions_tenantId_openedAt_idx" ON "cash_sessions"("tenantId", "openedAt");',
+    );
+  });
+
   it('rejects CREDIT and pins the signed delta direction per movement kind', () => {
     expect(ddlFlat).toContain(
       'CONSTRAINT "cash_movements_method_not_credit" CHECK ("method" <> \'CREDIT\')',
