@@ -33,6 +33,15 @@ export const FEED_TYPE = {
   pickupExtended: 'sale.pickup_extended',
   /** T6 / S12: the hold lapsed with a payment or a pending receipt; NOT cancelled. */
   pickupExpiredReview: 'sale.pickup_expired_review',
+  // Restock backorder (restock-backorder / T2b, contract §10): the only
+  // BACKORDER-level items (`requestId` and `saleId` NULL, `backorderId` set).
+  backorderReserved: 'backorder.reserved',
+  backorderReservationReminder: 'backorder.reservation_reminder',
+  backorderReservationExpired: 'backorder.reservation_expired',
+  backorderCancelledByStaff: 'backorder.cancelled_by_staff',
+  backorderEtaUpdated: 'backorder.eta_updated',
+  backorderEtaUnavailable: 'backorder.eta_unavailable',
+  backorderReservationLost: 'backorder.reservation_lost',
 } as const;
 export type FeedType = (typeof FEED_TYPE)[keyof typeof FEED_TYPE];
 
@@ -46,6 +55,20 @@ const SALE_FEED_TYPES: readonly string[] = [
 /** A sale-level item: it has a `saleId` and no request (no request audit). */
 export const isSaleFeedType = (type: string): boolean =>
   SALE_FEED_TYPES.includes(type);
+
+const BACKORDER_FEED_TYPES: readonly string[] = [
+  FEED_TYPE.backorderReserved,
+  FEED_TYPE.backorderReservationReminder,
+  FEED_TYPE.backorderReservationExpired,
+  FEED_TYPE.backorderCancelledByStaff,
+  FEED_TYPE.backorderEtaUpdated,
+  FEED_TYPE.backorderEtaUnavailable,
+  FEED_TYPE.backorderReservationLost,
+];
+
+/** A backorder-level item: it has a `backorderId`, no request and no sale. */
+export const isBackorderFeedType = (type: string): boolean =>
+  BACKORDER_FEED_TYPES.includes(type);
 
 /** §3.3 and §6.4: 30 days of retention, a 25 s long-poll, 2 per credential. */
 export const FEED_LIMITS = {
@@ -125,6 +148,9 @@ export const FEED_OUTCOMES = [
   'DEFERRED_WINDOW_CLOSED',
   'DEFERRED_HUMAN_SESSION',
   'STALE',
+  // Restock backorder (T2b, §10): the provider refused the message. Terminal;
+  // accepted only for `backorder.*` items, always with a `reason`.
+  'PROVIDER_REJECTED',
 ] as const;
 export type FeedOutcome = (typeof FEED_OUTCOMES)[number];
 
@@ -160,7 +186,11 @@ export interface FeedOutcomeInput {
   outcome: FeedOutcome;
   attemptedAt?: string;
   providerMessageId?: string;
+  /** `PROVIDER_REJECTED` only (1 to 280 characters, trimmed). */
+  reason?: string;
 }
+
+const REASON_MAX = 280;
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -209,7 +239,13 @@ export function parseFeedOutcome(body: unknown): FeedOutcomeInput {
   const raw = Object.fromEntries(
     Object.entries(body).filter(([, value]) => value !== undefined),
   );
-  const allowed = ['attemptId', 'outcome', 'attemptedAt', 'providerMessageId'];
+  const allowed = [
+    'attemptId',
+    'outcome',
+    'attemptedAt',
+    'providerMessageId',
+    'reason',
+  ];
   if (Object.keys(raw).some((key) => !allowed.includes(key))) return bad();
   const outcome = FEED_OUTCOMES.find((value) => value === raw.outcome);
   if (!outcome) return bad();
@@ -232,6 +268,16 @@ export function parseFeedOutcome(body: unknown): FeedOutcomeInput {
   }
   if (hasMessageId)
     result.providerMessageId = readMessageId(raw.providerMessageId);
+  // The reason is required for PROVIDER_REJECTED and forbidden for any other
+  // outcome (a stray member is a 400, like a stray providerMessageId).
+  if (outcome === 'PROVIDER_REJECTED') {
+    if (typeof raw.reason !== 'string') return bad();
+    const reason = raw.reason.trim();
+    if (reason.length === 0 || reason.length > REASON_MAX) return bad();
+    result.reason = reason;
+  } else if ('reason' in raw) {
+    return bad();
+  }
   return result;
 }
 
@@ -244,6 +290,9 @@ export function hashFeedOutcome(input: FeedOutcomeInput): string {
         attemptedAt: input.attemptedAt ?? null,
         outcome: input.outcome,
         providerMessageId: input.providerMessageId ?? null,
+        // Only a PROVIDER_REJECTED carries one: the hash of every other
+        // outcome stays byte-identical to what the stored ACKs were hashed with.
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
       }),
       'utf8',
     )
@@ -281,6 +330,14 @@ export function classifyOutcome(
     return current.evidenceHash === hash ? 'REPLAY' : 'IDEMPOTENCY_CONFLICT';
   }
   if (current.ackedAt) return 'OUTCOME_ALREADY_RECORDED';
+  // Restock backorder (T2b): the provider's refusal is for backorder items
+  // only; any other item answers 422 like a refused deferral.
+  if (
+    input.outcome === 'PROVIDER_REJECTED' &&
+    !isBackorderFeedType(current.type)
+  ) {
+    return 'OUTCOME_NOT_ALLOWED';
+  }
   if (
     isDeferredOutcome(input.outcome) &&
     (current.type === FEED_TYPE.cancelled ||
@@ -297,7 +354,10 @@ export function classifyOutcome(
       current.type === FEED_TYPE.scheduledReminder ||
       // Pay-in-store hold (T3): a reminder after the deadline, or an expiry or
       // extension notice days later, is useless; nothing waits for a window.
-      isSaleFeedType(current.type))
+      isSaleFeedType(current.type) ||
+      // Restock backorder (T2b): an arrival or expiry notice that waits for a
+      // window or a session is stale by the time it is sent (24 h deadline).
+      isBackorderFeedType(current.type))
   ) {
     return 'OUTCOME_NOT_ALLOWED';
   }
@@ -837,5 +897,116 @@ export function buildRescheduledPayload(input: {
     timeZone: input.timeZone,
     whatsappWindowClosesAt: input.whatsappWindowClosesAt?.toISOString() ?? null,
     requiresTemplateAtStart: input.requiresTemplateAtStart,
+  };
+}
+
+// ------------------------------------------------ restock backorder (T2b)
+
+/**
+ * The common fields of a `backorder.*` payload (contract §10). `version` is the
+ * backorder's own `version` when the item was written: the partial unique
+ * index `chatbot_feed_items_backorder_stage_uq` keys on it (one item per
+ * backorder, type and version, so a retry, a second sweep replica or a repeated
+ * call cannot enqueue it twice, while a later reservation of the same backorder
+ * after `backorder.reservation_lost` is a new version and a new item). All
+ * timestamps are ISO 8601 UTC with `Z`, like every other bot payload.
+ * `variantName` is `null` for a product without variants.
+ */
+export interface BackorderPayloadBase {
+  backorderId: string;
+  folio: string;
+  productName: string;
+  variantName: string | null;
+  quantity: number;
+  branchName: string;
+  customerFirstName: string;
+  version: number;
+}
+
+const backorderBase = (input: BackorderPayloadBase) => ({
+  backorderId: input.backorderId,
+  folio: input.folio,
+  productName: input.productName,
+  variantName: input.variantName,
+  quantity: input.quantity,
+  branchName: input.branchName,
+  customerFirstName: input.customerFirstName,
+  version: input.version,
+});
+
+/** `backorder.reserved`: stock arrived and the backorder holds it for 24 h. */
+export function buildBackorderReservedPayload(
+  input: BackorderPayloadBase & {
+    referencePriceCents: number;
+    currentPriceCents: number;
+    finalPriceCents: number;
+    reservedUntil: Date;
+    reminderAt: Date;
+  },
+): Record<string, unknown> {
+  return {
+    ...backorderBase(input),
+    referencePriceCents: input.referencePriceCents,
+    currentPriceCents: input.currentPriceCents,
+    finalPriceCents: input.finalPriceCents,
+    reservedUntil: input.reservedUntil.toISOString(),
+    reminderAt: input.reminderAt.toISOString(),
+  };
+}
+
+/** `backorder.reservation_reminder`: 3 h before the reservation lapses. */
+export function buildBackorderReservationReminderPayload(
+  input: BackorderPayloadBase & { reservedUntil: Date },
+): Record<string, unknown> {
+  return {
+    ...backorderBase(input),
+    reservedUntil: input.reservedUntil.toISOString(),
+  };
+}
+
+/** `backorder.reservation_expired`: 24 h without confirming; terminal. */
+export function buildBackorderReservationExpiredPayload(
+  input: BackorderPayloadBase & { expiredAt: Date },
+): Record<string, unknown> {
+  return { ...backorderBase(input), expiredAt: input.expiredAt.toISOString() };
+}
+
+/** `backorder.cancelled_by_staff`: `reason` is `null` when staff gave none. */
+export function buildBackorderCancelledByStaffPayload(
+  input: BackorderPayloadBase & { reason: string | null },
+): Record<string, unknown> {
+  return { ...backorderBase(input), reason: input.reason };
+}
+
+/** `backorder.eta_updated`: the new estimate after the overdue re-estimate (T4). */
+export function buildBackorderEtaUpdatedPayload(
+  input: BackorderPayloadBase & { estimatedAt: Date; restockDays: number },
+): Record<string, unknown> {
+  return {
+    ...backorderBase(input),
+    estimatedAt: input.estimatedAt.toISOString(),
+    restockDays: input.restockDays,
+  };
+}
+
+/** `backorder.eta_unavailable`: staff have no new estimate (T4). */
+export function buildBackorderEtaUnavailablePayload(
+  input: BackorderPayloadBase,
+): Record<string, unknown> {
+  return backorderBase(input);
+}
+
+/**
+ * `backorder.reservation_lost`: the reserved lot expired and no valid lot could
+ * replace it (Q6). The backorder is `WAITING` again at its original place.
+ */
+export function buildBackorderReservationLostPayload(
+  input: BackorderPayloadBase & { queuePosition: number; estimatedAt: Date },
+): Record<string, unknown> {
+  return {
+    ...backorderBase(input),
+    reason: 'LOT_EXPIRED',
+    queuePosition: input.queuePosition,
+    estimatedAt: input.estimatedAt.toISOString(),
   };
 }

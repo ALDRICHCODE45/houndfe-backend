@@ -13,7 +13,8 @@
  * (`InventoryModule`) and runs in the same transaction after every stock
  * increase; `BACKORDER_RESERVATION_RELEASER` is bound to
  * `BackorderReservationService` (BACKORDER_RELEASE + next in queue) and
- * `BACKORDER_RESERVED_HOOK` is the no-op seam T2b rebinds to enqueue the feed.
+ * `BACKORDER_RESERVED_HOOK` is the seam T2b binds to `FeedBackorderReservedHook`
+ * (`backorder.reserved` + staff notice in the reserving transaction).
  */
 import { Module } from '@nestjs/common';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
@@ -21,6 +22,7 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { ProductsModule } from '../products/products.module';
 import { SalesModule } from '../sales/sales.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
+import { TenantModule } from '../shared/tenant/tenant.module';
 import { StockAlertsModule } from '../stock-alerts/stock-alerts.module';
 import { BackorderAllocator } from './application/backorder-allocator';
 import { BackorderReservationService } from './application/backorder-reservation.service';
@@ -29,8 +31,10 @@ import { BACKORDER_RESERVATION_RELEASER } from './application/ports/backorder-re
 import { BACKORDER_RESERVED_HOOK } from './application/ports/backorder-reserved-hook.port';
 import { BackorderCustomerResolver } from './infrastructure/backorder-customer.resolver';
 import { BackorderReferencePriceListResolver } from './infrastructure/backorder-reference-price-list.resolver';
+import { BackorderSweepScheduler } from './infrastructure/backorder-sweep.scheduler';
+import { BackorderSweepStore } from './infrastructure/backorder-sweep.store';
 import { BackorderStockReader } from './infrastructure/backorder-stock.reader';
-import { NoOpBackorderReservedHook } from './infrastructure/no-op-backorder-reserved.hook';
+import { FeedBackorderReservedHook } from './infrastructure/feed-backorder-reserved.hook';
 import { BackordersBotController } from './presentation/backorders-bot.controller';
 
 @Module({
@@ -41,6 +45,7 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     SalesModule,
     InventoryModule,
     StockAlertsModule,
+    TenantModule,
   ],
   controllers: [BackordersBotController],
   providers: [
@@ -50,13 +55,16 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     BackorderReferencePriceListResolver,
     BackorderAllocator,
     BackorderReservationService,
+    // T2b: reminder, expiry, expired-lot swap and the safety-net allocation.
+    BackorderSweepStore,
+    BackorderSweepScheduler,
     // T2a: the real releaser (BACKORDER_RELEASE + next in queue).
     {
       provide: BACKORDER_RESERVATION_RELEASER,
       useExisting: BackorderReservationService,
     },
-    // T2b rebinds this to enqueue the `backorder.reserved` feed item.
-    { provide: BACKORDER_RESERVED_HOOK, useClass: NoOpBackorderReservedHook },
+    // T2b: `backorder.reserved` + the staff notice, in the reserving transaction.
+    { provide: BACKORDER_RESERVED_HOOK, useClass: FeedBackorderReservedHook },
   ],
   exports: [
     BackordersBotService,

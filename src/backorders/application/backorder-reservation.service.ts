@@ -65,10 +65,13 @@ export class BackorderReservationService implements BackorderReservationReleaser
   async releaseReservation(
     reservation: BackorderReservationRef,
   ): Promise<void> {
-    const movements = await this.writer.releaseBackorder({
-      backorderId: reservation.backorderId,
-      actor: reservation.actor ?? BACKORDER_SYSTEM_ACTOR,
-    });
+    const movements = await this.writer.releaseBackorder(
+      {
+        backorderId: reservation.backorderId,
+        actor: reservation.actor ?? BACKORDER_SYSTEM_ACTOR,
+      },
+      reservation.now,
+    );
     // Release rows first, then the allocator's reservations: the edge sees the net change.
     await this.crossing.record(movements);
   }

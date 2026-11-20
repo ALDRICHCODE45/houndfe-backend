@@ -108,6 +108,8 @@ const at = (v: string) => new Date(v);
 const folioText = (n: number) => `S-${String(n).padStart(6, '0')}`;
 
 const ITEM_KEYS = [
+  // restock-backorder / T2b: additive, null on every request and sale notice.
+  'backorderId',
   'body',
   'cause',
   'createdAt',

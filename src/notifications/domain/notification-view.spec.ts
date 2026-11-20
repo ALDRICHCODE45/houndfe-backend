@@ -22,6 +22,7 @@ describe('toNotificationView (S10)', () => {
       body: 'Pregunta sin respuesta · S-000123',
       requestId: 'r-1',
       saleId: null,
+      backorderId: null,
       createdAt: '2026-11-12T10:00:00.000Z',
       readAt: null,
       folio: 'S-000123',
@@ -229,6 +230,7 @@ describe('toNotificationView (S10)', () => {
         body: 'Venta V-000042 · Comprobante pendiente de revisar',
         requestId: null,
         saleId: 's-1',
+        backorderId: null,
         createdAt: '2026-11-12T10:00:00.000Z',
         readAt: null,
         folio: 'V-000042',
@@ -250,6 +252,60 @@ describe('toNotificationView (S10)', () => {
         body: '',
         title: 'Apartado vencido: revisa la venta',
       });
+    });
+  });
+  describe('backorder notice (restock-backorder T2b)', () => {
+    it.each([
+      ['BACKORDER_RESERVED', 'Pedido por reposición apartado'],
+      ['BACKORDER_EXPIRED', 'Apartado de pedido por reposición vencido'],
+      [
+        'BACKORDER_NOTICE_UNDELIVERED',
+        'No se pudo avisar al cliente de su pedido por reposición',
+      ],
+    ])(
+      'a %s row names the backorder and its folio; no request or sale fields',
+      (type, title) => {
+        expect(
+          toNotificationView(
+            row({
+              type,
+              requestId: null,
+              requestStatus: null,
+              payload: {
+                backorderId: 'b-1',
+                folio: 'BO-000012',
+                productName: 'Croquetas',
+                variantName: null,
+                quantity: 2,
+              },
+            }),
+          ),
+        ).toEqual({
+          id: 'n-1',
+          type,
+          title,
+          body: expect.stringContaining('BO-000012') as string,
+          requestId: null,
+          saleId: null,
+          backorderId: 'b-1',
+          createdAt: '2026-11-12T10:00:00.000Z',
+          readAt: null,
+          folio: 'BO-000012',
+          subtype: null,
+          cause: null,
+          reason: null,
+          requestOpen: null,
+          level: null,
+        });
+      },
+    );
+
+    it('reads an odd payload with nulls instead of failing', () => {
+      expect(
+        toNotificationView(
+          row({ type: 'BACKORDER_EXPIRED', requestId: null, payload: null }),
+        ),
+      ).toMatchObject({ backorderId: null, folio: null, body: '' });
     });
   });
 });

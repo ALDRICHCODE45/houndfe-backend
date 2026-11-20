@@ -10,6 +10,8 @@
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { formatCursor } from '../../chatbot-requests/domain/chatbot-feed';
+import { backorderResumeAfterQuery } from '../../chatbot-requests/infrastructure/prisma-chatbot-recovery.store';
 import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
 import { SalesService } from '../../sales/sales.service';
 import { BOT_STOCK_ACTOR_NAME } from '../../sales/sale-stock.service';
@@ -195,6 +197,23 @@ export class BackordersBotService {
     return rows.map((row) =>
       toBackorderBot(row, positions.get(row.id) ?? null),
     );
+  }
+
+  /**
+   * Feed recovery pointer (T2b, contract §10): the feed `after` (a 12-digit
+   * cursor) that serves the sucursal's oldest `backorder.*` item with no
+   * terminal outcome again, or `null` when there is none. The bot resumes the
+   * feed from the smallest of this, `nextCursor` and the request pointers of
+   * `GET /chatbot-api/requests` after a `410 CURSOR_EXPIRED`.
+   */
+  async feedResumeAfter(): Promise<string | null> {
+    const tenantId = this.tenantPrisma.getTenantId();
+    const [row] = await this.tenantPrisma
+      .getClient()
+      .$queryRaw<
+        Array<{ after: bigint | null }>
+      >(backorderResumeAfterQuery(tenantId));
+    return row?.after == null ? null : formatCursor(row.after);
   }
 
   /**

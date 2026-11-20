@@ -69,6 +69,12 @@ export interface BackorderBotEnvelope {
 
 export interface BackorderBotListEnvelope {
   items: BackorderBot[];
+  /**
+   * Only on a recovery read (`updatedSince`): the feed `after` that serves the
+   * oldest unacknowledged `backorder.*` item again (restock-backorder T2b), or
+   * `null` when none is pending.
+   */
+  backorderUndeliveredResumeAfter?: string | null;
 }
 
 const iso = (value: Date | null): string | null => value?.toISOString() ?? null;

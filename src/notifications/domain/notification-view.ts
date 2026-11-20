@@ -21,6 +21,11 @@ import {
   type UnansweredLevel,
 } from './chatbot-request-notice';
 import {
+  backorderNoticeText,
+  isBackorderNoticeType,
+  type BackorderNoticePayload,
+} from './backorder-notice';
+import {
   SALE_HOLD_REVIEW_NOTICE,
   saleHoldReviewText,
   type SaleHoldReviewPayload,
@@ -37,11 +42,18 @@ export interface NotificationView {
    * points at; `null` for every request notice.
    */
   saleId: string | null;
+  /**
+   * restock-backorder / T2b: the backorder a backorder notice
+   * (`BACKORDER_RESERVED`, `BACKORDER_EXPIRED`, `BACKORDER_NOTICE_UNDELIVERED`)
+   * points at; `null` for every request and sale notice.
+   */
+  backorderId: string | null;
   createdAt: string;
   readAt: string | null;
   /**
    * `S-000123`, as the inbox shows it; the sale folio as stored for a sale
-   * notice; `null` on a row without one.
+   * notice and the `BO-000012` folio of a backorder notice; `null` on a row
+   * without one.
    */
   folio: string | null;
   /** The request subtype (`UNKNOWN_QUESTION`, `RESTOCK`, …), not its label. */
@@ -79,6 +91,8 @@ function payloadOf(value: unknown): Partial<NoticePayload> | null {
 
 export function toNotificationView(row: NotificationViewRow): NotificationView {
   if (row.type === SALE_HOLD_REVIEW_NOTICE) return toSaleNoticeView(row);
+  if (isBackorderNoticeType(row.type))
+    return toBackorderNoticeView(row, row.type);
   const payload = payloadOf(row.payload);
   const reason = (NOTICE_REASONS as readonly unknown[]).includes(
     payload?.reason,
@@ -91,6 +105,7 @@ export function toNotificationView(row: NotificationViewRow): NotificationView {
     ...noticeText(row.type, payload),
     requestId: row.requestId,
     saleId: null,
+    backorderId: null,
     createdAt: row.createdAt.toISOString(),
     readAt: row.readAt?.toISOString() ?? null,
     folio:
@@ -120,9 +135,36 @@ function toSaleNoticeView(row: NotificationViewRow): NotificationView {
     ...saleHoldReviewText(payload),
     requestId: null,
     saleId: typeof payload.saleId === 'string' ? payload.saleId : null,
+    backorderId: null,
     createdAt: row.createdAt.toISOString(),
     readAt: row.readAt?.toISOString() ?? null,
     folio: typeof payload.saleFolio === 'string' ? payload.saleFolio : null,
+    subtype: null,
+    cause: null,
+    reason: null,
+    requestOpen: null,
+    level: null,
+  };
+}
+
+/** A backorder notice: no request or sale fields, the backorder and its folio from the payload. */
+function toBackorderNoticeView(
+  row: NotificationViewRow,
+  type: Parameters<typeof backorderNoticeText>[0],
+): NotificationView {
+  const payload = (payloadOf(row.payload) ??
+    {}) as unknown as Partial<BackorderNoticePayload>;
+  return {
+    id: row.id,
+    type: row.type,
+    ...backorderNoticeText(type, payload),
+    requestId: null,
+    saleId: null,
+    backorderId:
+      typeof payload.backorderId === 'string' ? payload.backorderId : null,
+    createdAt: row.createdAt.toISOString(),
+    readAt: row.readAt?.toISOString() ?? null,
+    folio: typeof payload.folio === 'string' ? payload.folio : null,
     subtype: null,
     cause: null,
     reason: null,

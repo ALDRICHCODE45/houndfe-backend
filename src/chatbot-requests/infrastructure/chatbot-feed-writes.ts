@@ -32,16 +32,19 @@ import {
 import type { TenantClient } from './chatbot-request-writes';
 
 /**
- * One item: a request item (`requestId`) or a sale-level item (`saleId`,
- * pay-in-store hold, T3), never both (CHECK `chatbot_feed_items_subject_chk`).
+ * One item: a request item (`requestId`), a sale-level item (`saleId`,
+ * pay-in-store hold, T3) or a backorder-level item (`backorderId`, restock
+ * backorder, T2b); exactly one of the three (CHECK
+ * `chatbot_feed_items_subject_chk`).
  */
 export type FeedDraft = {
   type: string;
   conversationRef: string | null;
   payload: Record<string, unknown>;
 } & (
-  | { requestId: string; saleId?: never }
-  | { saleId: string; requestId?: never }
+  | { requestId: string; saleId?: never; backorderId?: never }
+  | { saleId: string; requestId?: never; backorderId?: never }
+  | { backorderId: string; requestId?: never; saleId?: never }
 );
 
 /** Returns how many items were inserted (fewer only with `skipDuplicates`). */
@@ -64,6 +67,7 @@ export async function insertFeedItems(
       tenantId,
       requestId: draft.requestId ?? null,
       saleId: draft.saleId ?? null,
+      backorderId: draft.backorderId ?? null,
       type: draft.type,
       conversationRef: draft.conversationRef,
       payload: draft.payload as Prisma.InputJsonObject,

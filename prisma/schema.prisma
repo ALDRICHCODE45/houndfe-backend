@@ -4126,11 +4126,13 @@ model ChatbotFeedItem {
   cursor            BigInt    @id @default(autoincrement())
   tenantId          String
   deliveryId        String    @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Exactly one of `requestId` / `saleId` is set (CHECK
-  // `chatbot_feed_items_subject_chk`, migration-only): request items, or the
-  // sale-level items of a pay-in-store hold (pay-in-store-pickup / T3).
+  // Exactly one of `requestId` / `saleId` / `backorderId` is set (CHECK
+  // `chatbot_feed_items_subject_chk`, migration-only): request items, the
+  // sale-level items of a pay-in-store hold (pay-in-store-pickup / T3) or the
+  // backorder-level items of a restock backorder (restock-backorder / T2b).
   requestId         String?
   saleId            String?
+  backorderId       String?
   type              String
   conversationRef   String?
   payload           Json
@@ -4141,11 +4143,16 @@ model ChatbotFeedItem {
   evidenceHash      String?
   attemptedAt       DateTime?
   providerMessageId String?
+  // Why the provider refused the message (outcome PROVIDER_REJECTED only, CHECK
+  // `chatbot_feed_items_outcome_reason_chk`, migration-only); max 280.
+  outcomeReason     String?   @db.VarChar(280)
 
-  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  request ChatbotRequest? @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  request   ChatbotRequest? @relation(fields: [tenantId, requestId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
   // Tenant-consistent: the item's tenant must own the sale.
-  sale    Sale?           @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  sale      Sale?           @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
+  // Tenant-consistent: the item's tenant must own the backorder.
+  backorder Backorder?      @relation(fields: [tenantId, backorderId], references: [tenantId, id], onDelete: Cascade, onUpdate: Cascade)
 
   // Migration-only (20261111070000_chatbot_sla_sweep; partial index, not
   // expressible in Prisma's DSL): `chatbot_feed_items_overdue_notice_uq`, UNIQUE
@@ -4159,6 +4166,10 @@ model ChatbotFeedItem {
   // `chatbot_feed_items_sale_hold_uq`, UNIQUE ("tenantId", "saleId", "type",
   // (payload->>'holdVersion')) WHERE "saleId" IS NOT NULL — one
   // `sale.pickup_*` item per sale, type and hold version.
+  // Migration-only (20261121000000_backorder_feed):
+  // `chatbot_feed_items_backorder_stage_uq`, UNIQUE ("tenantId", "backorderId",
+  // "type", (payload->>'version')) WHERE "backorderId" IS NOT NULL — one
+  // `backorder.*` item per backorder, type and backorder version.
   @@index([tenantId, cursor])
   @@index([tenantId, requestId])
   @@index([createdAt])
@@ -4670,6 +4681,7 @@ model Backorder {
   chatbotRequest     ChatbotRequest? @relation(fields: [tenantId, chatbotRequestId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
   sale               Sale?          @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
   cancelledBy        User?          @relation("BackorderCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  feedItems          ChatbotFeedItem[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, folio])
@@ -4680,6 +4692,11 @@ model Backorder {
   @@index([tenantId, updatedAt])
   @@index([customerId])
   @@index([reestimateDecisionId])
+  // Migration-only (20261121000000_backorder_feed; partial indexes, not
+  // expressible in Prisma's DSL): `backorders_reservation_due_idx` ON
+  // ("reservedUntil", "id") WHERE "status" = 'RESERVED' AND "reservationStage" < 2
+  // (the sweep's due candidates), `backorders_waiting_idx` ON ("tenantId",
+  // "productId", "variantId") WHERE "status" = 'WAITING' (products with a queue).
   @@map("backorders")
 }
 

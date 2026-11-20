@@ -96,6 +96,7 @@ import { ChatbotRequestEmailDispatcher } from '../notifications/outbox/chatbot-r
 import { NotificationRetentionScheduler } from '../notifications/infrastructure/notification-retention.scheduler';
 import { ConversationRetentionScheduler } from '../conversations/infrastructure/conversation-retention.scheduler';
 import { SaleHoldSweepScheduler } from '../sales/sale-hold-sweep.scheduler';
+import { BackorderSweepScheduler } from '../backorders/infrastructure/backorder-sweep.scheduler';
 import { NOTICE_EMAIL_FUNCTION_ID } from '../notifications/inngest/chatbot-request-email.functions';
 import { InngestService } from './inngest.service';
 import { MAILER, type IMailer } from '../notifications/email/mailer.port';
@@ -127,6 +128,7 @@ const HUMAN_INTERVENTION_INTERVAL_CLASSES = [
   ConversationRetentionScheduler,
   // pay-in-store T2: the hold sweep.
   SaleHoldSweepScheduler,
+  BackorderSweepScheduler,
 ] as const;
 
 /**

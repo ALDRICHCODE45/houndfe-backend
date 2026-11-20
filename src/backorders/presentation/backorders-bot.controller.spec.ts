@@ -61,6 +61,7 @@ describe('BackordersBotController (HTTP, mocked service)', () => {
     findById: jest.Mock;
     list: jest.Mock;
     cancel: jest.Mock;
+    feedResumeAfter: jest.Mock;
   };
   const cls = { set: jest.fn() };
 
@@ -76,6 +77,7 @@ describe('BackordersBotController (HTTP, mocked service)', () => {
         .mockResolvedValue({ replayed: false, backorder: BACKORDER }),
       findById: jest.fn().mockResolvedValue(BACKORDER),
       list: jest.fn().mockResolvedValue([BACKORDER]),
+      feedResumeAfter: jest.fn().mockResolvedValue(null),
       cancel: jest
         .fn()
         .mockResolvedValue({ ...BACKORDER, status: 'CANCELLED' }),
@@ -301,7 +303,7 @@ describe('BackordersBotController (HTTP, mocked service)', () => {
   });
 
   describe('GET /chatbot-api/backorders', () => {
-    it('200 with { items } and the parsed filter', async () => {
+    it('200 with { items } and the parsed filter (a recovery read also carries the feed pointer)', async () => {
       const response = await auth(
         http().get('/chatbot-api/backorders').query({
           phoneCountryCode: '52',
@@ -311,7 +313,10 @@ describe('BackordersBotController (HTTP, mocked service)', () => {
         }),
       );
       expect(response.status).toBe(200);
-      expect(response.body).toEqual({ items: [BACKORDER] });
+      expect(response.body).toEqual({
+        items: [BACKORDER],
+        backorderUndeliveredResumeAfter: null,
+      });
       expect(response.headers['cache-control']).toBe('no-store');
       expect(service.list).toHaveBeenCalledWith({
         phoneCountryCode: '52',
@@ -319,6 +324,29 @@ describe('BackordersBotController (HTTP, mocked service)', () => {
         statuses: ['WAITING', 'RESERVED'],
         updatedSince: new Date('2026-11-20T10:00:00.000Z'),
       });
+    });
+
+    it('recovery (updatedSince) returns the feed position of the oldest unacknowledged backorder item', async () => {
+      service.feedResumeAfter.mockResolvedValue('000000000041');
+      const response = await auth(
+        http()
+          .get('/chatbot-api/backorders')
+          .query({ updatedSince: '2026-11-20T10:00:00.000Z' }),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        items: [BACKORDER],
+        backorderUndeliveredResumeAfter: '000000000041',
+      });
+    });
+
+    it('without updatedSince the answer is exactly { items } (T1 shape) and never reads the pointer', async () => {
+      const response = await auth(
+        http().get('/chatbot-api/backorders').query({ status: 'WAITING' }),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ items: [BACKORDER] });
+      expect(service.feedResumeAfter).not.toHaveBeenCalled();
     });
 
     it.each([

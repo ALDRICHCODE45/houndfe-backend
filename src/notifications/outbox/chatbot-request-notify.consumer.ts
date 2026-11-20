@@ -36,6 +36,12 @@ import {
   type NotificationEventsPort,
 } from '../domain/notification-events.port';
 import {
+  BACKORDER_NOTICE_GRANTS,
+  asBackorderNotice,
+  type BackorderNotice,
+  type BackorderNoticePayload,
+} from '../domain/backorder-notice';
+import {
   SALE_HOLD_REVIEW_GRANTS,
   asSaleHoldReviewNotice,
   type SaleHoldReviewNotice,
@@ -136,6 +142,11 @@ export class ChatbotRequestNotifyConsumer {
       await this.applySaleHoldReview(tx, row, saleNotice);
       return;
     }
+    const backorderNotice = asBackorderNotice(row.payload);
+    if (backorderNotice) {
+      await this.applyBackorderNotice(tx, row, backorderNotice);
+      return;
+    }
     const notice = parseNotice(row.payload);
     // An SLA notice can be held until an opening: judge it against the request
     // as it is NOW. A drop is done, not failed (no retry), and delivers nothing.
@@ -218,25 +229,72 @@ export class ChatbotRequestNotifyConsumer {
     row: NotifyRow,
     notice: SaleHoldReviewNotice,
   ): Promise<void> {
-    const recipients = await usersWithGrants(
-      tx,
-      row.tenantId,
-      SALE_HOLD_REVIEW_GRANTS,
-    );
+    const payload: SaleHoldReviewPayload = {
+      saleId: notice.saleId,
+      saleFolio: notice.saleFolio,
+      reason: notice.reason,
+    };
+    await this.deliverStaffNotice(tx, row, {
+      type: notice.type,
+      grants: SALE_HOLD_REVIEW_GRANTS,
+      // SAFETY: the payload holds only strings.
+      payload: payload as unknown as Prisma.InputJsonObject,
+      dedupKey: notice.dedupKey,
+    });
+  }
+
+  /**
+   * restock-backorder / T2b: a backorder notice (reserved, expired, or the bot
+   * could not deliver the arrival notice). Same delivery as the sale notice:
+   * no request (`requestId` null), recipients from `read:Backorder`, no email.
+   */
+  private async applyBackorderNotice(
+    tx: Prisma.TransactionClient,
+    row: NotifyRow,
+    notice: BackorderNotice,
+  ): Promise<void> {
+    const payload: BackorderNoticePayload = {
+      backorderId: notice.backorderId,
+      folio: notice.folio,
+      productName: notice.productName,
+      variantName: notice.variantName,
+      quantity: notice.quantity,
+      ...(notice.feedType ? { feedType: notice.feedType } : {}),
+      ...(notice.reason ? { reason: notice.reason } : {}),
+    };
+    await this.deliverStaffNotice(tx, row, {
+      type: notice.type,
+      grants: BACKORDER_NOTICE_GRANTS,
+      // SAFETY: the payload holds only strings and a number.
+      payload: payload as unknown as Prisma.InputJsonObject,
+      dedupKey: notice.dedupKey,
+    });
+  }
+
+  /**
+   * The shared tail of a non-request notice: in-app rows for everyone holding
+   * the grants (idempotent per `dedupKey`), the realtime hook, and the outbox
+   * row PUBLISHED, all in the caller's transaction. No email.
+   */
+  private async deliverStaffNotice(
+    tx: Prisma.TransactionClient,
+    row: NotifyRow,
+    notice: {
+      type: string;
+      grants: ReadonlyArray<readonly [string, string]>;
+      payload: Prisma.InputJsonObject;
+      dedupKey: string;
+    },
+  ): Promise<void> {
+    const recipients = await usersWithGrants(tx, row.tenantId, notice.grants);
     if (recipients.length > 0) {
-      const payload: SaleHoldReviewPayload = {
-        saleId: notice.saleId,
-        saleFolio: notice.saleFolio,
-        reason: notice.reason,
-      };
       const created = await tx.notification.createManyAndReturn({
         data: recipients.map((userId) => ({
           tenantId: row.tenantId,
           userId,
           type: notice.type,
           requestId: null,
-          // SAFETY: the payload holds only strings.
-          payload: payload as unknown as Prisma.InputJsonObject,
+          payload: notice.payload,
           dedupKey: notice.dedupKey,
         })),
         skipDuplicates: true,

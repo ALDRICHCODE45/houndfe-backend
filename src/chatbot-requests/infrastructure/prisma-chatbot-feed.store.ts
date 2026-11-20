@@ -17,6 +17,11 @@ import {
   type OutcomeAck,
 } from '../application/chatbot-feed.service';
 import { emitRealtimeEvents } from '../../shared/realtime/realtime-event-writes';
+import {
+  BACKORDER_UNDELIVERED_FEED_TYPES,
+  type BackorderNotice,
+} from '../../notifications/domain/backorder-notice';
+import { enqueueBackorderUndeliveredNotice } from '../../notifications/infrastructure/backorder-notice.writer';
 import { ChatbotRequestCommandError } from '../application/chatbot-request-commands.service';
 import { messageStatusForOutcome } from '../domain/live-session';
 import {
@@ -35,8 +40,10 @@ import {
 
 interface LockedDelivery {
   cursor: bigint;
-  /** `null` for a sale-level item (pay-in-store hold, T3). */
+  /** `null` for a sale-level or a backorder-level item. */
   requestId: string | null;
+  /** Set only for a backorder-level item (restock backorder, T2b). */
+  backorderId: string | null;
   type: string;
   attemptId: string | null;
   evidenceHash: string | null;
@@ -44,6 +51,8 @@ interface LockedDelivery {
   ackedAt: Date | null;
   messageId: string | null;
   handoffEpoch: number | null;
+  /** The item's payload; read only for a backorder-level item's staff notice. */
+  payload: unknown;
 }
 
 const DAY_MS = 86_400_000;
@@ -64,6 +73,24 @@ export const tenantHeadCursor = (tenantId: string) => Prisma.sql`(
   SELECT "cursor" FROM "chatbot_feed_items"
   WHERE "tenantId" >= ${tenantId} AND "tenantId" <= ${tenantId}
   ORDER BY "tenantId" DESC, "cursor" DESC LIMIT 1)`;
+
+/**
+ * The notice subject of a backorder item, from the payload the item was written
+ * with (`backorderId`, `folio`, `productName`, `variantName`, `quantity`): no
+ * second read, and the notice names the backorder as the bot saw it.
+ */
+function backorderNoticeSubject(backorderId: string, payload: unknown) {
+  const p = (
+    payload !== null && typeof payload === 'object' ? payload : {}
+  ) as Record<string, unknown>;
+  return {
+    id: backorderId,
+    folio: typeof p.folio === 'string' ? p.folio : '',
+    productName: typeof p.productName === 'string' ? p.productName : '',
+    variantName: typeof p.variantName === 'string' ? p.variantName : null,
+    quantity: typeof p.quantity === 'number' ? p.quantity : 0,
+  };
+}
 
 @Injectable()
 export class PrismaChatbotFeedStore implements ChatbotFeedStore {
@@ -154,9 +181,11 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
     return this.tenantPrisma.runInTransaction(async () => {
       const { db, tenantId } = this;
       const [row] = await db.$queryRaw<LockedDelivery[]>(Prisma.sql`
-        SELECT "cursor", "requestId", "type", "attemptId", "evidenceHash",
-               "outcome", "ackedAt", "payload"->>'messageId' AS "messageId",
-               ("payload"->>'handoffEpoch')::int AS "handoffEpoch"
+        SELECT "cursor", "requestId", "backorderId", "type", "attemptId",
+               "evidenceHash", "outcome", "ackedAt",
+               "payload"->>'messageId' AS "messageId",
+               ("payload"->>'handoffEpoch')::int AS "handoffEpoch",
+               "payload"
         FROM "chatbot_feed_items"
         WHERE "tenantId" = ${tenantId} AND "deliveryId" = ${deliveryId}::uuid
         FOR UPDATE`);
@@ -242,12 +271,36 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
           evidenceHash: hash,
           attemptedAt: input.attemptedAt ? new Date(input.attemptedAt) : null,
           providerMessageId: input.providerMessageId ?? null,
+          // PROVIDER_REJECTED only (a backorder item; CHECK in the migration).
+          outcomeReason: input.reason ?? null,
           ackedAt,
         },
       });
-      // A sale-level item (T3) has no request: its outcome, attempt, evidence
-      // hash and wamid live on the item row only (one terminal ACK, never
-      // deferred, never a staff message).
+      // Restock backorder (T2b, contract §4 «24 h start»): the bot could not
+      // reach the customer with the arrival notice or its reminder, so staff
+      // call them. The ACK is terminal and applied once, so this is too (the
+      // notice's dedup key is the delivery as well).
+      if (
+        input.outcome === 'PROVIDER_REJECTED' &&
+        row.backorderId !== null &&
+        (BACKORDER_UNDELIVERED_FEED_TYPES as readonly string[]).includes(
+          row.type,
+        )
+      ) {
+        await enqueueBackorderUndeliveredNotice(
+          db,
+          tenantId,
+          backorderNoticeSubject(row.backorderId, row.payload),
+          {
+            deliveryId,
+            feedType: row.type as NonNullable<BackorderNotice['feedType']>,
+            reason: input.reason ?? '',
+          },
+        );
+      }
+      // A sale-level item (T3) and a backorder-level item (T2b) have no
+      // request: their outcome, attempt, evidence hash and wamid live on the
+      // item row only (one terminal ACK, never deferred, never a staff message).
       if (row.requestId === null) {
         return this.toAck(deliveryId, input.outcome, input.attemptId, ackedAt);
       }
@@ -285,7 +338,9 @@ export class PrismaChatbotFeedStore implements ChatbotFeedStore {
         row.messageId &&
         (row.type === FEED_TYPE.staffMessage ||
           row.type === FEED_TYPE.templateRequested) &&
-        input.outcome !== 'DEFERRED_HUMAN_SESSION'
+        input.outcome !== 'DEFERRED_HUMAN_SESSION' &&
+        // Never for a message (PROVIDER_REJECTED is backorder-only): narrows it.
+        input.outcome !== 'PROVIDER_REJECTED'
       ) {
         const applied = await applyStaffMessageOutcome(db, tenantId, {
           messageId: row.messageId,

@@ -22,6 +22,11 @@ export interface BackorderReservationRef {
   quantity: number;
   /** Who moves the stock; the system when omitted (sweep). */
   actor?: StockActor;
+  /**
+   * The instant of the movement and of the allocation it triggers (the sweep's
+   * clock); the real clock when omitted.
+   */
+  now?: Date;
 }
 
 export interface BackorderReservationReleaser {

@@ -100,11 +100,28 @@ describe('BackorderReservationService.releaseReservation', () => {
       variantId: null,
       quantity: 2,
     });
-    expect(writer.releaseBackorder).toHaveBeenCalledWith({
-      backorderId: 'bo',
-      actor: { id: null, displayName: 'Sistema' },
-    });
+    expect(writer.releaseBackorder).toHaveBeenCalledWith(
+      { backorderId: 'bo', actor: { id: null, displayName: 'Sistema' } },
+      undefined,
+    );
     expect(crossing.record).toHaveBeenCalledWith([mv('rel')]);
+  });
+
+  it('passes the caller’s clock to the journal (the sweep’s now stamps the release and the next reservation)', async () => {
+    const { service, writer } = setup();
+    const now = new Date('2026-11-21T15:00:01.000Z');
+    await service.releaseReservation({
+      tenantId: TENANT,
+      backorderId: 'bo',
+      productId: 'p1',
+      variantId: null,
+      quantity: 2,
+      now,
+    });
+    expect(writer.releaseBackorder).toHaveBeenCalledWith(
+      { backorderId: 'bo', actor: { id: null, displayName: 'Sistema' } },
+      now,
+    );
   });
 
   it('uses the actor of the caller (customer cancel through the bot)', async () => {
@@ -117,10 +134,10 @@ describe('BackorderReservationService.releaseReservation', () => {
       quantity: 2,
       actor: { id: null, displayName: 'Bot' },
     });
-    expect(writer.releaseBackorder).toHaveBeenCalledWith({
-      backorderId: 'bo',
-      actor: { id: null, displayName: 'Bot' },
-    });
+    expect(writer.releaseBackorder).toHaveBeenCalledWith(
+      { backorderId: 'bo', actor: { id: null, displayName: 'Bot' } },
+      undefined,
+    );
   });
 });
 

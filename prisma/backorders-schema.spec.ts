@@ -519,3 +519,149 @@ describe('restock-backorder journal enum migration drift guard (T2a)', () => {
     ]);
   });
 });
+
+/**
+ * restock-backorder / T2b — the backorder-level feed subject (contract v1 §10):
+ * `chatbot_feed_items.backorderId`, the widened subject CHECK, the exactly-once
+ * partial unique index and the sweep's partial indexes. DB-free (fs only); the
+ * PostgreSQL behaviour is proven by
+ * `src/chatbot-requests/chatbot-feed-backorder-items.integration.spec.ts`.
+ */
+describe('restock-backorder feed migration drift guard (T2b)', () => {
+  const schemaText = fs.readFileSync(
+    path.join(process.cwd(), 'prisma', 'schema.prisma'),
+    'utf8',
+  );
+  const migrationName = '20261121000000_backorder_feed';
+  const outcomeMigrationName = '20261121000100_backorder_feed';
+  const outcomeSql = fs.readFileSync(
+    path.join(
+      process.cwd(),
+      'prisma',
+      'migrations',
+      outcomeMigrationName,
+      'migration.sql',
+    ),
+    'utf8',
+  );
+  const outcomeDdl = outcomeSql
+    .replace(/^\s*--.*$/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const migrationFile = path.join(
+    process.cwd(),
+    'prisma',
+    'migrations',
+    migrationName,
+    'migration.sql',
+  );
+  const sql = fs.existsSync(migrationFile)
+    ? fs.readFileSync(migrationFile, 'utf8')
+    : '';
+  const ddl = sql.replace(/^\s*--.*$/gm, '');
+  const ddlFlat = ddl.replace(/\s+/g, ' ').trim();
+  const feedItem =
+    schemaText.match(/model ChatbotFeedItem\s*\{([\s\S]*?)\n\}/m)?.[1] ?? '';
+
+  it('ships two hand-written migrations after the stock-movement one (the second widens the outcome set)', () => {
+    expect(fs.existsSync(migrationFile)).toBe(true);
+    const names = fs
+      .readdirSync(path.join(process.cwd(), 'prisma', 'migrations'))
+      .filter((name) => name.endsWith('_backorder_feed'));
+    expect(names).toEqual([migrationName, outcomeMigrationName]);
+    expect(migrationName > '20261120010000_backorder_stock_movements').toBe(
+      true,
+    );
+  });
+
+  it('adds the nullable backorderId and outcomeReason columns, in the model and in the table', () => {
+    expect(feedItem).toMatch(/^\s*backorderId\s+String\?\s*$/m);
+    expect(feedItem).toMatch(
+      /^\s*outcomeReason\s+String\?\s+@db\.VarChar\(280\)\s*$/m,
+    );
+    expect(ddlFlat).toContain(
+      'ALTER TABLE "chatbot_feed_items" ADD COLUMN "backorderId" TEXT, ADD COLUMN "outcomeReason" VARCHAR(280)',
+    );
+  });
+
+  it('widens the subject CHECK to exactly one of requestId, saleId and backorderId', () => {
+    expect(ddlFlat).toContain(
+      'DROP CONSTRAINT "chatbot_feed_items_subject_chk"',
+    );
+    expect(ddlFlat).toContain(
+      'ADD CONSTRAINT "chatbot_feed_items_subject_chk" CHECK (num_nonnulls("requestId", "saleId", "backorderId") = 1)',
+    );
+    expect(ddlFlat).toContain(
+      'VALIDATE CONSTRAINT "chatbot_feed_items_subject_chk"',
+    );
+    // Documented in the DSL, where the CHECK cannot be declared.
+    expect(feedItem).toContain('chatbot_feed_items_subject_chk');
+  });
+
+  it('widens the closed outcome set by exactly PROVIDER_REJECTED, keeping every old value', () => {
+    expect(outcomeDdl).toContain(
+      "ADD CONSTRAINT \"chatbot_feed_items_outcome_chk\" CHECK ( \"outcome\" IS NULL OR \"outcome\" IN ('PROVIDER_ACCEPTED', 'DELIVERY_UNKNOWN', 'DEFERRED_WINDOW_CLOSED', 'DEFERRED_HUMAN_SESSION', 'STALE', 'PROVIDER_REJECTED') )",
+    );
+    expect(outcomeDdl).toContain(
+      'VALIDATE CONSTRAINT "chatbot_feed_items_outcome_chk"',
+    );
+    // The ack-state CHECK needs no change: PROVIDER_REJECTED is terminal.
+    expect(outcomeDdl).not.toContain('ack_state_chk');
+    expect(outcomeDdl).not.toMatch(/\b(INSERT\s+INTO|DELETE\s+FROM)\b/i);
+    expect(
+      new Set(
+        [...outcomeDdl.matchAll(/ALTER TABLE "([a-z_]+)"/g)].map((m) => m[1]),
+      ),
+    ).toEqual(new Set(['chatbot_feed_items']));
+  });
+
+  it('allows a reason only for PROVIDER_REJECTED', () => {
+    expect(ddlFlat).toContain(
+      'ADD CONSTRAINT "chatbot_feed_items_outcome_reason_chk" CHECK ("outcomeReason" IS NULL OR "outcome" = \'PROVIDER_REJECTED\')',
+    );
+  });
+
+  it('is a tenant-qualified FK onto backorders, cascading with the backorder', () => {
+    expect(feedItem).toMatch(
+      /backorder\s+Backorder\?\s+@relation\(fields:\s*\[tenantId,\s*backorderId\],\s*references:\s*\[tenantId,\s*id\],\s*onDelete:\s*Cascade/,
+    );
+    expect(ddlFlat).toContain(
+      'ADD CONSTRAINT "chatbot_feed_items_tenantId_backorderId_fkey" FOREIGN KEY ("tenantId", "backorderId") REFERENCES "backorders"("tenantId", "id") ON DELETE CASCADE ON UPDATE CASCADE',
+    );
+    expect(
+      new RegExp('feedItems\\s+ChatbotFeedItem\\[\\]').test(
+        schemaText.match(/model Backorder\s*\{([\s\S]*?)\n\}/m)?.[1] ?? '',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps one item per backorder, type and backorder version (exactly once)', () => {
+    expect(ddlFlat).toContain(
+      'CREATE UNIQUE INDEX "chatbot_feed_items_backorder_stage_uq" ON "chatbot_feed_items" ("tenantId", "backorderId", "type", (("payload" ->> \'version\'))) WHERE "backorderId" IS NOT NULL',
+    );
+    expect(schemaText).toContain('chatbot_feed_items_backorder_stage_uq');
+  });
+
+  it('adds the two partial indexes of the sweep', () => {
+    expect(ddlFlat).toContain(
+      'CREATE INDEX "backorders_reservation_due_idx" ON "backorders" ("reservedUntil", "id") WHERE "status" = \'RESERVED\' AND "reservationStage" < 2',
+    );
+    expect(ddlFlat).toContain(
+      'CREATE INDEX "backorders_waiting_idx" ON "backorders" ("tenantId", "productId", "variantId") WHERE "status" = \'WAITING\'',
+    );
+  });
+
+  it('is additive: no data change, no table or column dropped, nothing else altered', () => {
+    expect(ddl).not.toMatch(
+      /\b(INSERT\s+INTO|UPDATE\s+"|DELETE\s+FROM|TRUNCATE)\b/i,
+    );
+    expect(ddl).not.toMatch(/DROP\s+(TABLE|COLUMN|TYPE|INDEX)/i);
+    // The only DROP is the old subject CHECK, re-added in the same file.
+    expect(ddl.match(/DROP\s+CONSTRAINT/gi)).toHaveLength(1);
+    const altered = [...ddlFlat.matchAll(/ALTER TABLE "([a-z_]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(new Set(altered)).toEqual(new Set(['chatbot_feed_items']));
+    expect(ddlFlat).toContain("SET LOCAL lock_timeout = '5s'");
+  });
+});

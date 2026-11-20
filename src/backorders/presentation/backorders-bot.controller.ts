@@ -78,7 +78,13 @@ export class BackordersBotController {
     }
   }
 
-  /** `GET /chatbot-api/backorders?phoneCountryCode=&phone=&status=&updatedSince=` (§6.3). */
+  /**
+   * `GET /chatbot-api/backorders?phoneCountryCode=&phone=&status=&updatedSince=` (§6.3).
+   * With `updatedSince` (recovery, §10) the answer also carries
+   * `backorderUndeliveredResumeAfter`: the feed `after` that serves the oldest
+   * unacknowledged `backorder.*` item again, or `null`. Without it the answer
+   * is exactly `{ items }`.
+   */
   @Get()
   @BotRouteClass('read')
   @RequiredScopes(BACKORDER_SCOPES.read)
@@ -88,8 +94,13 @@ export class BackordersBotController {
   ): Promise<BackorderBotListEnvelope> {
     response.setHeader('Cache-Control', 'no-store');
     try {
+      const filter = parseListBackordersQuery(query);
+      const items = await this.backorders.list(filter);
+      if (!filter.updatedSince) return { items };
       return {
-        items: await this.backorders.list(parseListBackordersQuery(query)),
+        items,
+        backorderUndeliveredResumeAfter:
+          await this.backorders.feedResumeAfter(),
       };
     } catch (error) {
       throw toBackorderHttpError(error);
