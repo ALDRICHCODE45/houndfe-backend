@@ -269,6 +269,7 @@ function buildHarness(options: { withoutLedger?: boolean } = {}) {
     options.withoutLedger ? undefined : (ledger as unknown as ICashLedger),
     // O1 / T4 — the journal charge is observed through the stock mock.
     {
+      lockStock: jest.fn(() => Promise.resolve()),
       charge: jest.fn(({ items }: { items: unknown[] }) =>
         products.chargeStock(items),
       ),

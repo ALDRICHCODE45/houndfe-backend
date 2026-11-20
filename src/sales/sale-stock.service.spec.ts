@@ -74,6 +74,20 @@ describe('SaleStockService error mapping', () => {
   });
 });
 
+describe('SaleStockService.lockStock (T6)', () => {
+  it('delegates to the journal lock (products, lots, variants; id order) without writing', async () => {
+    const lockStock = jest.fn().mockResolvedValue(undefined);
+    const service = new SaleStockService(
+      { lockStock, charge: jest.fn() } as unknown as StockJournalWriter,
+      {} as TenantPrismaService,
+      { publish: jest.fn() } as unknown as OutboxWriterService,
+      {} as IStockAlertStateRepository,
+    );
+    await service.lockStock(['p-2', 'p-1']);
+    expect(lockStock).toHaveBeenCalledWith(['p-2', 'p-1']);
+  });
+});
+
 describe('insufficient stock over HTTP (contract change 500 -> 409)', () => {
   @Controller('pos-probe')
   class PosController {

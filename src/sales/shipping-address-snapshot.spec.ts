@@ -70,7 +70,11 @@ function fixture() {
     productsService: {
       getApplicablePrices: jest.fn().mockResolvedValue([{ priceCents: 1000 }]),
     },
-    saleStock: { charge: jest.fn(), reverse: jest.fn() },
+    saleStock: {
+      lockStock: jest.fn(),
+      charge: jest.fn(),
+      reverse: jest.fn(),
+    },
     promotionUsageRepo: { claimForSale: jest.fn() },
     outboxWriter: { publish: jest.fn() },
   });

@@ -3355,6 +3355,13 @@ export class SalesService {
         tenantId,
       );
 
+      // restock-backorder / T6 — stock first, then promotion capacity: the
+      // order of the bot confirmation and of the cancellation (reverse stock →
+      // restore capacity), so a POS charge cannot deadlock with either.
+      await this.requireSaleStock().lockStock(
+        sale.items.map((item) => item.productId),
+      );
+
       // pca-2c2 — claim before stock/persist/outbox; a race rolls back the tx.
       await this.promotionUsageRepo.claimForSale(
         sale.id,
@@ -4276,6 +4283,25 @@ export class SalesService {
         );
       }
 
+      // O1 / T4 — FEFO charge through the stock journal (actor "Bot"), in
+      // this same transaction; low-stock outbox rows as for the POS charge.
+      const chargeItems = input.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        quantity: item.quantity,
+      }));
+
+      // restock-backorder / T6 — lock the stock BEFORE the sale lines exist:
+      // `save` inserts sale_items whose FKs take FOR KEY SHARE on the product /
+      // variant rows, and the charge below asks FOR UPDATE on the same rows.
+      // Two confirmations of one product both held KEY SHARE and both waited
+      // for UPDATE (40P01 → 500 CHECKOUT_CREATE_FAILED). Order: customer →
+      // shipping quote (above) → stock → sale lines → promotion capacity →
+      // backorder rows (the stock lock is a no-op the second time).
+      await this.requireSaleStock().lockStock(
+        chargeItems.map((item) => item.productId),
+      );
+
       await this.saleRepo.save(sale);
 
       // pca-2c2 — claim after `save` (id durable), before stock/outbox.
@@ -4287,13 +4313,6 @@ export class SalesService {
       const paidCents = 0 as const;
       const debtCents = totalCents;
 
-      // O1 / T4 — FEFO charge through the stock journal (actor "Bot"), in
-      // this same transaction; low-stock outbox rows as for the POS charge.
-      const chargeItems = input.items.map((item) => ({
-        productId: item.productId,
-        variantId: item.variantId ?? null,
-        quantity: item.quantity,
-      }));
       if (backorderIds.length > 0) {
         // restock-backorder / T3 — stock locks first (every product of the
         // cart), then the backorder rows, after the promotion-capacity claim

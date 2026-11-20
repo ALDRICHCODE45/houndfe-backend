@@ -62,6 +62,19 @@ export class SaleStockService {
   }
 
   /**
+   * Takes the journal locks of these products (products, lots, variants; id
+   * order) without writing. A confirmation calls this BEFORE it writes the sale
+   * lines (their foreign keys take `FOR KEY SHARE` on the product / variant
+   * rows) and before it claims promotion capacity: two confirmations of one
+   * product would otherwise both hold KEY SHARE and both wait for the charge's
+   * `FOR UPDATE` (deadlock, 40P01). Global order: stock → sale lines →
+   * promotion capacity → backorder rows.
+   */
+  async lockStock(productIds: string[]): Promise<void> {
+    await this.journal.lockStock(productIds);
+  }
+
+  /**
    * Charges the sale lines through the journal. Insufficient (or missing)
    * stock keeps the sales contract: 409 `STOCK_INSUFFICIENT_AT_CONFIRM`.
    */

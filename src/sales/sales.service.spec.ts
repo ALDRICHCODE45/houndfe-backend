@@ -226,6 +226,7 @@ function createService(
     // O1 / T4 — the journal facade: `charge` is observed through the
     // stock mock (args/order/rejections), `reverse` reports a pre-journal sale.
     {
+      lockStock: jest.fn().mockResolvedValue(undefined),
       charge: jest.fn(({ items }: { items: unknown[] }) =>
         productsService.chargeStock(items),
       ),
@@ -3955,6 +3956,36 @@ describe('SalesService', () => {
       ]);
     });
 
+    it('locks the stock before it claims promotion capacity (T6: stock → promotion capacity, like the bot confirmation and the cancellation)', async () => {
+      const sale = buildDraftSaleWithMultipleItems('sale-t6-pos');
+      saleRepo.findByIdForUpdate.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockImplementation(
+        async (productId: string) => ({
+          unitPriceCents: productId === 'prod-2' ? 2500 : 1000,
+        }),
+      );
+      saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000052');
+      saleRepo.persistChargeConfirmation.mockResolvedValue([]);
+      const lockStock = jest.fn().mockResolvedValue(undefined);
+      const charge = jest.fn().mockResolvedValue([]);
+      Object.assign(service, { saleStock: { lockStock, charge } });
+
+      await service.chargeDraft(
+        sale.id,
+        'user-1',
+        { method: 'cash', amountCents: 4500 },
+        'idem-t6-pos',
+      );
+
+      expect(lockStock).toHaveBeenCalledWith(['prod-1', 'prod-2']);
+      expect(lockStock.mock.invocationCallOrder[0]).toBeLessThan(
+        promotionUsageRepo.claimForSale.mock.invocationCallOrder[0],
+      );
+      expect(
+        promotionUsageRepo.claimForSale.mock.invocationCallOrder[0],
+      ).toBeLessThan(charge.mock.invocationCallOrder[0]);
+    });
+
     it('charges the POS sale through the journal with the sale id and the authenticated user as actor (O1 / T4)', async () => {
       const sale = buildDraftSaleWithMultipleItems('sale-t4-pos');
       saleRepo.findByIdForUpdate.mockResolvedValue(sale);
@@ -3966,7 +3997,9 @@ describe('SalesService', () => {
       saleRepo.allocateNextFolio.mockResolvedValue('A-2605-000051');
       saleRepo.persistChargeConfirmation.mockResolvedValue([]);
       const charge = jest.fn().mockResolvedValue([]);
-      Object.assign(service, { saleStock: { charge } });
+      Object.assign(service, {
+        saleStock: { lockStock: jest.fn(), charge },
+      });
 
       await service.chargeDraft(
         sale.id,
@@ -5000,7 +5033,9 @@ describe('SalesService', () => {
     it('charges the bot sale through the journal as the Bot actor, once, before the folio', async () => {
       setupConfirmBotSaleHappyPath();
       const charge = jest.fn().mockResolvedValue([]);
-      Object.assign(service, { saleStock: { charge } });
+      Object.assign(service, {
+        saleStock: { lockStock: jest.fn(), charge },
+      });
 
       const result = await service.confirmBotSale(botSaleInput);
 
@@ -5016,6 +5051,39 @@ describe('SalesService', () => {
       expect(productsService.chargeStock).not.toHaveBeenCalled();
     });
 
+    it('locks the stock of the cart BEFORE the sale lines are written and before the promotion-capacity claim (T6)', async () => {
+      setupConfirmBotSaleHappyPath();
+      const lockStock = jest.fn().mockResolvedValue(undefined);
+      const charge = jest.fn().mockResolvedValue([]);
+      Object.assign(service, { saleStock: { lockStock, charge } });
+
+      await service.confirmBotSale(botSaleInput);
+
+      expect(lockStock).toHaveBeenCalledTimes(1);
+      expect(lockStock).toHaveBeenCalledWith(['prod-1']);
+      const lockedAt = lockStock.mock.invocationCallOrder[0];
+      expect(lockedAt).toBeLessThan(saleRepo.save.mock.invocationCallOrder[0]);
+      expect(lockedAt).toBeLessThan(
+        promotionUsageRepo.claimForSale.mock.invocationCallOrder[0],
+      );
+      expect(lockedAt).toBeLessThan(charge.mock.invocationCallOrder[0]);
+    });
+
+    it('takes no stock lock when the confirmation is refused before the sale lines (PROMO_RE_QUOTE)', async () => {
+      setupConfirmBotSaleHappyPath();
+      const lockStock = jest.fn().mockResolvedValue(undefined);
+      Object.assign(service, {
+        saleStock: { lockStock, charge: jest.fn() },
+      });
+
+      await expect(
+        service.confirmBotSale({ ...botSaleInput, expectedTotalCents: 1 }),
+      ).rejects.toMatchObject({ code: 'PROMO_RE_QUOTE' });
+
+      expect(lockStock).not.toHaveBeenCalled();
+      expect(saleRepo.save).not.toHaveBeenCalled();
+    });
+
     it('keeps insufficient stock at 409 STOCK_INSUFFICIENT_AT_CONFIRM and persists nothing', async () => {
       setupConfirmBotSaleHappyPath();
       const charge = jest
@@ -5026,7 +5094,9 @@ describe('SalesService', () => {
             'STOCK_INSUFFICIENT_AT_CONFIRM',
           ),
         );
-      Object.assign(service, { saleStock: { charge } });
+      Object.assign(service, {
+        saleStock: { lockStock: jest.fn(), charge },
+      });
 
       await expect(service.confirmBotSale(botSaleInput)).rejects.toMatchObject({
         code: 'STOCK_INSUFFICIENT_AT_CONFIRM',
@@ -6031,7 +6101,11 @@ describe('SalesService', () => {
         const charge = jest.fn().mockResolvedValue([]);
         const chargeConsumingBackorders = jest.fn().mockResolvedValue([]);
         Object.assign(service, {
-          saleStock: { charge, chargeConsumingBackorders },
+          saleStock: {
+            lockStock: jest.fn(),
+            charge,
+            chargeConsumingBackorders,
+          },
         });
         return { charge, chargeConsumingBackorders };
       };
