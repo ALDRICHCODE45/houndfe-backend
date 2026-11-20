@@ -123,6 +123,37 @@ describe('verifyShippingQuote (S8 binding)', () => {
     }
   });
 
+  it('sums repeated sale lines of the same product/variant before comparing (backorder line + ordinary line)', () => {
+    expect(
+      verifyShippingQuote(
+        stored,
+        {
+          ...request,
+          lines: [
+            { productId: 'p-2', quantity: 1 },
+            { productId: 'p-1', variantId: 'v-1', quantity: 1 },
+            { productId: 'p-1', variantId: 'v-1', quantity: 1 },
+          ],
+        },
+        NOW,
+      ).status,
+    ).toBe('OK');
+    expect(
+      verifyShippingQuote(
+        stored,
+        {
+          ...request,
+          lines: [
+            { productId: 'p-2', quantity: 1 },
+            { productId: 'p-1', variantId: 'v-1', quantity: 1 },
+            { productId: 'p-1', variantId: 'v-1', quantity: 2 },
+          ],
+        },
+        NOW,
+      ),
+    ).toEqual({ status: 'MISMATCH', mismatches: ['LINES'] });
+  });
+
   it('is MISMATCH when the destination changes', () => {
     expect(
       verifyShippingQuote(

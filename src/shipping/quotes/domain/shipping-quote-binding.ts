@@ -140,10 +140,31 @@ export function normalizeDestination(
   };
 }
 
-const linesKey = (lines: readonly QuoteLineInput[]): string =>
-  JSON.stringify(
-    normalizeLines(lines).map((l) => [l.productId, l.variantId, l.quantity]),
+/**
+ * Quantities summed per (productId, variantId) before comparing: a quote never
+ * holds repeated lines (DUPLICATE_CART_LINE), but a checkout may split one
+ * product into a backorder line and an ordinary line (restock-backorder §7).
+ */
+const linesKey = (lines: readonly QuoteLineInput[]): string => {
+  const summed = new Map<string, QuoteLineInput>();
+  for (const line of lines) {
+    const variantId = line.variantId ?? null;
+    const key = JSON.stringify([line.productId, variantId]);
+    const current = summed.get(key);
+    summed.set(key, {
+      productId: line.productId,
+      variantId,
+      quantity: (current?.quantity ?? 0) + line.quantity,
+    });
+  }
+  return JSON.stringify(
+    normalizeLines([...summed.values()]).map((l) => [
+      l.productId,
+      l.variantId,
+      l.quantity,
+    ]),
   );
+};
 
 const destinationKey = (destination: QuoteDestinationInput): string =>
   JSON.stringify([
