@@ -72,6 +72,9 @@ module.exports = {
     '<rootDir>/test/integration/setup/load-env.ts',
     '<rootDir>/test/integration/setup/disable-schedulers.ts',
   ],
+  // Closes the shared integration PrismaClient after every spec file so
+  // combined runs do not exhaust max_connections.
+  setupFilesAfterEnv: ['<rootDir>/test/integration/setup/disconnect-prisma.ts'],
   globalSetup: '<rootDir>/test/integration/setup/global-setup.ts',
   globalTeardown: '<rootDir>/test/integration/setup/global-teardown.ts',
   // WU5 — mirror the unit config's @react-pdf/renderer ESM shims.
