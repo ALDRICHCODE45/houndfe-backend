@@ -8,7 +8,7 @@ import {
   View,
 } from '@react-pdf/renderer';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
-import { A4_COLORS } from '../shared/a4-kit';
+import { A4_COLORS, A4_LOGO_PATH } from '../shared/a4-kit';
 import { ReceiptA4Document } from './receipt-a4.document';
 import type { ReceiptDocumentProps } from './receipt.types';
 
@@ -215,28 +215,26 @@ describe('ReceiptA4Document', () => {
       );
     });
 
-    it('prints the company name from the business and the logo only when set', () => {
+    it('prints the company name from the business', () => {
       const named = {
         ...receipt,
         business: { ...receipt.business, companyName: 'Mascotas Felices' },
       };
       expect(textOf(named)).toContain('Mascotas Felices');
-      expect(tree(receipt).some((element) => element.type === Image)).toBe(
-        false,
-      );
     });
 
-    it('draws the kit «Logo» placeholder without a logo and the image with one', () => {
+    it('draws the packaged wordmark, ignoring the ticket/email business.logoUrl (no network)', () => {
       const withLogo = {
         ...receipt,
         business: { ...receipt.business, logoUrl: 'https://cdn.test/logo.png' },
       };
-      const images = tree(withLogo).filter((element) => element.type === Image);
+      for (const props of [receipt, withLogo]) {
+        const images = tree(props).filter((element) => element.type === Image);
 
-      expect(textOf(receipt)).toContain('Logo');
-      expect(images).toHaveLength(1);
-      expect(images[0].props.src).toBe('https://cdn.test/logo.png');
-      expect(textOf(withLogo)).not.toMatch(/\bLogo\b/);
+        expect(images).toHaveLength(1);
+        expect(images[0].props.src).toBe(A4_LOGO_PATH);
+        expect(textOf(props)).not.toMatch(/\bLogo\b/);
+      }
       // The header is the kit's: no local copy of the header styles.
       expect(SOURCE).toContain('<A4PageHeader');
       expect(SOURCE).not.toContain('function ReceiptHeader');

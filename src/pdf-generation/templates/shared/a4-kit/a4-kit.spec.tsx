@@ -12,6 +12,7 @@ import {
   View,
   renderToBuffer,
 } from '@react-pdf/renderer';
+import { existsSync } from 'node:fs';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { SHARED_STYLES } from '../styles';
 import {
@@ -24,10 +25,13 @@ import {
   A4TotalsBlock,
   A4_COLORS,
   A4_FONTS,
+  A4_LOGO_PATH,
+  A4_LOGO_WIDTH,
   A4_STYLES,
   LedgerTable,
   formatA4Date,
   formatA4DateTime,
+  formatA4Money,
   formatA4Time,
   px,
   toneColor,
@@ -166,15 +170,61 @@ describe('A4Footer', () => {
 describe('A4PageHeader logo and business name', () => {
   const header = { subtitle: 'Doc', kicker: 'Recibo', folio: 'F-1' };
 
-  it('draws the «Logo» placeholder and «HoundFe» when nothing is given', () => {
-    const elements = walk(A4PageHeader(header));
+  it('draws the packaged wordmark (no network) and «HoundFe» when nothing is given', () => {
+    const images = walk(A4PageHeader(header)).filter(
+      (element) => element.type === Image,
+    );
 
-    expect(text(A4PageHeader(header))).toContain('Logo');
+    expect(images).toHaveLength(1);
+    expect(images[0].props.src).toBe(A4_LOGO_PATH);
+    expect(images[0].props.style).toEqual([
+      A4_STYLES.logoImage,
+      { width: A4_LOGO_WIDTH },
+    ]);
+    expect(text(A4PageHeader(header))).not.toContain('Logo');
     expect(text(A4PageHeader(header))).toContain('HoundFe');
-    expect(elements.some((element) => element.type === Image)).toBe(false);
   });
 
-  it('draws the image (url or packaged path) instead of the placeholder', () => {
+  it('resolves the wordmark to the packaged asset that exists on disk', () => {
+    expect(A4_LOGO_PATH).toMatch(
+      /pdf-generation[\\/]assets[\\/]houndfe-logo-report\.png$/,
+    );
+    expect(existsSync(A4_LOGO_PATH)).toBe(true);
+    // 36 px tall at the 512×191 aspect ratio.
+    expect(A4_LOGO_WIDTH).toBe(px(36 * (512 / 191)));
+  });
+
+  it('draws the «Logo» placeholder only for an explicit empty logoUrl', () => {
+    const element = A4PageHeader({ ...header, logoUrl: '' });
+
+    expect(text(element)).toContain('Logo');
+    expect(walk(element).some((el) => el.type === Image)).toBe(false);
+  });
+
+  it('uses the wordmark in the continuation header by default', () => {
+    const elements = walk(
+      A4Page({
+        footerLabel: 'x',
+        continuation: { kicker: 'Detalle', folio: 'F-1', brandSubtitle: 'Doc' },
+        children: null,
+      }),
+    );
+    const fixedRender = elements.find(
+      (element) =>
+        element.type === View &&
+        element.props.fixed === true &&
+        typeof element.props.render === 'function',
+    );
+    const continued = (
+      fixedRender?.props.render as (info: { pageNumber: number }) => ReactNode
+    )({ pageNumber: 2 });
+    const images = walk(continued).filter((el) => el.type === Image);
+
+    expect(images).toHaveLength(1);
+    expect(images[0].props.src).toBe(A4_LOGO_PATH);
+  });
+
+  it('draws a custom image (url or path) instead of the wordmark', () => {
     const element = A4PageHeader({
       ...header,
       brandName: 'Mascotas Felices',
@@ -448,5 +498,20 @@ describe('A4 kit smoke render', () => {
     );
 
     expect(buffer.subarray(0, 4).equals(Buffer.from('%PDF'))).toBe(true);
+  });
+});
+
+describe('formatA4Money (one money format for the four A4s)', () => {
+  it('groups thousands with commas and keeps two decimals', () => {
+    expect(formatA4Money(0)).toBe('$0.00');
+    expect(formatA4Money(12_500)).toBe('$125.00');
+    expect(formatA4Money(114_900)).toBe('$1,149.00');
+    expect(formatA4Money(3_840_450)).toBe('$38,404.50');
+    expect(formatA4Money(123_456_789)).toBe('$1,234,567.89');
+  });
+
+  it('puts the sign before the currency symbol', () => {
+    expect(formatA4Money(-3_840_450)).toBe('-$38,404.50');
+    expect(formatA4Money(-5)).toBe('-$0.05');
   });
 });

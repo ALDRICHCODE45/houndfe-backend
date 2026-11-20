@@ -19,7 +19,12 @@ import {
   renderToBuffer,
 } from '@react-pdf/renderer';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
-import { A4_COLORS, A4TotalsBlock, LedgerTable } from '../shared/a4-kit';
+import {
+  A4_COLORS,
+  A4_LOGO_PATH,
+  A4TotalsBlock,
+  LedgerTable,
+} from '../shared/a4-kit';
 import {
   QuotationA4Document,
   formatQuotationFolio,
@@ -398,24 +403,51 @@ describe('QuotationA4Document (WU4 / T046)', () => {
     }
   });
 
-  it('keeps printing the business logo and falls back to the kit header without one', () => {
-    const imageCount = (props: QuotationDocumentProps) =>
-      treeOf(props).filter((el) => typeof el.props.src === 'string').length;
+  it('draws the packaged wordmark from the kit header, with or without business.logoUrl (no network)', () => {
+    const noLogo: QuotationDocumentProps = {
+      ...baseProps,
+      business: { companyName: 'HoundFe' },
+    };
+    for (const props of [baseProps, noLogo]) {
+      const images = treeOf(props).filter((el) => el.type === Image);
 
-    expect(imageCount(baseProps)).toBe(1);
-    expect(
-      imageCount({
-        ...baseProps,
-        business: { companyName: 'HoundFe' },
-      }),
-    ).toBe(0);
-    expect(
-      texts({ ...baseProps, business: { companyName: 'HoundFe' } }),
-    ).toContain('Logo');
-    // The logo comes from the kit header (no local header copy).
-    const images = treeOf().filter((el) => el.type === Image);
-    expect(images).toHaveLength(1);
-    expect(images[0].props.src).toBe(baseProps.business.logoUrl);
+      expect(images).toHaveLength(1);
+      expect(images[0].props.src).toBe(A4_LOGO_PATH);
+      expect(texts(props)).not.toContain('Logo');
+    }
+  });
+
+  it('prints amounts with the shared thousands-grouped format ($38,404.50)', () => {
+    const big: QuotationDocumentProps = {
+      ...baseProps,
+      items: [
+        {
+          ...baseProps.items[0],
+          unitPriceCents: 1_920_225,
+          discountAmountCents: null,
+          discountTitle: null,
+          quantity: 2,
+          subtotalCents: 3_840_450,
+        },
+      ],
+      totals: {
+        subtotalCents: 3_840_450,
+        discountCents: 150_000,
+        totalCents: 3_690_450,
+        includedIvaCents: 509_024,
+      },
+    };
+    const printed = texts(big).join('|');
+    const rows = treeOf(big).find((el) => el.type === LedgerTable)?.props
+      .rows as { cells: Record<string, unknown> }[];
+
+    expect(rows[0].cells.qty).toBe('2 × $19,202.25');
+    expect(rows[0].cells.amount).toEqual({ text: '$38,404.50', bold: true });
+    expect(printed).toContain('$38,404.50');
+    expect(printed).toContain('-$1,500.00');
+    expect(printed).toContain('$36,904.50');
+    expect(printed).toContain('$5,090.24');
+    expect(printed).not.toMatch(/\$\d{4,}/);
   });
 
   it('prints the business name in the header, continuation header and footer', () => {

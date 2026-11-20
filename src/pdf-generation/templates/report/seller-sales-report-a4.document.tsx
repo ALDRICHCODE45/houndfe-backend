@@ -13,8 +13,9 @@
  * The seller is always printed by name.
  */
 import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
-import { resolve } from 'node:path';
 import {
+  A4_LOGO_PATH,
+  A4_LOGO_WIDTH,
   A4Page,
   A4PageHeader,
   A4Section,
@@ -24,6 +25,7 @@ import {
   LedgerTable,
   formatA4Date,
   formatA4DateTime,
+  formatA4Money,
   px,
   toneColor,
   type A4Tone,
@@ -36,19 +38,9 @@ import type {
   SellerSalesReportResponseDto,
 } from '../../../analytics/dto/seller-sales-report-response.dto';
 
-/**
- * Packaged local wordmark — `nest-cli.json` copies `pdf-generation/assets/**`
- * to the same `dist` path, so this resolves in `src` (tests) and in `dist`.
- */
-export const SELLER_REPORT_LOGO_PATH = resolve(
-  __dirname,
-  '..',
-  '..',
-  'assets',
-  'houndfe-logo-report.png',
-);
-/** The wordmark is 512×191 px: 36 px tall → ≈96.5 px wide (pt via `px`). */
-export const SELLER_REPORT_LOGO_WIDTH = px(36 * (512 / 191));
+/** Packaged wordmark now lives in the kit; re-exported for compatibility. */
+export const SELLER_REPORT_LOGO_PATH = A4_LOGO_PATH;
+export const SELLER_REPORT_LOGO_WIDTH = A4_LOGO_WIDTH;
 const BRAND_SUBTITLE = 'Reporte de ventas';
 const KICKER = 'Vendedor';
 const FOLIO_CHARS_PER_LINE = 20;
@@ -98,15 +90,8 @@ export function SellerSalesReportA4Document({
       creationDate={new Date(report.generatedAt)}
       modificationDate={new Date(report.generatedAt)}
     >
-      <A4Page
-        footerLabel={footerLabel}
-        continuation={continuation}
-        logoUrl={SELLER_REPORT_LOGO_PATH}
-        logoWidth={SELLER_REPORT_LOGO_WIDTH}
-      >
+      <A4Page footerLabel={footerLabel} continuation={continuation}>
         <A4PageHeader
-          logoUrl={SELLER_REPORT_LOGO_PATH}
-          logoWidth={SELLER_REPORT_LOGO_WIDTH}
           subtitle={BRAND_SUBTITLE}
           kicker={KICKER}
           folio={report.seller.name}
@@ -121,12 +106,7 @@ export function SellerSalesReportA4Document({
           />
         </A4Section>
       </A4Page>
-      <A4Page
-        footerLabel={footerLabel}
-        continuation={continuation}
-        logoUrl={SELLER_REPORT_LOGO_PATH}
-        logoWidth={SELLER_REPORT_LOGO_WIDTH}
-      >
+      <A4Page footerLabel={footerLabel} continuation={continuation}>
         <A4Section
           title="Ventas canceladas"
           aside="por fecha de cancelación (informativas)"
@@ -148,10 +128,10 @@ function confirmedRow(r: SellerSalesReportConfirmedRowDto): LedgerRowData {
     cells: {
       folio: formatFolio(r.folio),
       confirmedAt: formatA4DateTime(r.confirmedAt),
-      total: formatCurrency(r.totalCents),
-      paid: formatCurrency(r.paidCents),
+      total: formatA4Money(r.totalCents),
+      paid: formatA4Money(r.paidCents),
       debt: {
-        text: formatCurrency(r.debtCents),
+        text: formatA4Money(r.debtCents),
         tone: debtTone(r.debtCents),
         bold: r.debtCents > 0,
       },
@@ -170,7 +150,7 @@ function canceledRow(r: SellerSalesReportCanceledRowDto): LedgerRowData {
       folio: formatFolio(r.folio),
       confirmedAt: r.confirmedAt ? formatA4DateTime(r.confirmedAt) : '—',
       canceledAt: { text: formatA4DateTime(r.canceledAt), tone: 'danger' },
-      total: formatCurrency(r.totalCents),
+      total: formatA4Money(r.totalCents),
     },
   };
 }
@@ -207,17 +187,17 @@ function SummarySection({ report }: { report: SellerSalesReportResponseDto }) {
     { label: 'Ventas', value: String(summary.saleCount), tone: 'ink' },
     {
       label: 'Cobrado',
-      value: formatCurrency(summary.collectedCents),
+      value: formatA4Money(summary.collectedCents),
       tone: 'ink',
     },
     {
       label: 'Saldo pendiente',
-      value: formatCurrency(summary.outstandingDebtCents),
+      value: formatA4Money(summary.outstandingDebtCents),
       tone: debtTone(summary.outstandingDebtCents),
     },
     {
       label: 'Ticket promedio',
-      value: formatCurrency(summary.averageTicketCents),
+      value: formatA4Money(summary.averageTicketCents),
       tone: 'ink',
     },
   ];
@@ -240,7 +220,7 @@ function SummarySection({ report }: { report: SellerSalesReportResponseDto }) {
       <View style={styles.grand} wrap={false}>
         <Text style={A4_STYLES.totalsGrandLabel}>Ventas netas</Text>
         <Text style={A4_STYLES.totalsGrandValue}>
-          {formatCurrency(summary.netSalesCents)}
+          {formatA4Money(summary.netSalesCents)}
         </Text>
       </View>
       <Text style={styles.hint}>
@@ -317,11 +297,4 @@ function formatFolio(folio: string | null): string {
   if (folio === null) return '—';
   const chunks = folio.match(new RegExp(`.{1,${FOLIO_CHARS_PER_LINE}}`, 'g'));
   return (chunks ?? [folio]).join('\n');
-}
-
-function formatCurrency(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const [whole, decimals] = (Math.abs(cents) / 100).toFixed(2).split('.');
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${sign}$${grouped}.${decimals}`;
 }

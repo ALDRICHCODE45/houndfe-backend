@@ -5,8 +5,10 @@
 export { A4_COLORS, A4_FONTS, A4_PAGE_PADDING, px, toneColor } from './tokens';
 export type { A4Tone } from './tokens';
 export { A4_STYLES } from './a4-styles';
+export { A4_LOGO_ASPECT, A4_LOGO_PATH, A4_LOGO_WIDTH } from './a4-logo';
 export {
   A4_TIME_ZONE,
+  formatA4Money,
   formatA4Date,
   formatA4DateTime,
   formatA4Time,

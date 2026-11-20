@@ -8,7 +8,7 @@
  *
  * Visible contract (every field the legacy layout printed is kept):
  *   - Header: «Cotización» kicker + folio (the quotation id the caller
- *     passes) + the business logo when `business.logoUrl` is set.
+ *     passes) + the packaged wordmark (kit; `business.logoUrl` is not fetched).
  *   - Meta bar: «Fecha», «Vendedor» (only when a seller is known) and
  *     «Válido hasta» (only when an expiry was set).
  *   - Cliente: name («Público en General» when absent) and email.
@@ -37,6 +37,7 @@ import {
   A4TotalsBlock,
   LedgerTable,
   formatA4Date,
+  formatA4Money,
   px,
   type A4MetaBarItem,
   type A4TotalsLine,
@@ -125,7 +126,6 @@ export function QuotationA4Document({
       <A4Page
         footerLabel={`Cotización ${quotation.id}`}
         brandName={business.companyName}
-        logoUrl={business.logoUrl}
         continuation={{
           kicker: 'Cotización',
           folio,
@@ -134,7 +134,6 @@ export function QuotationA4Document({
       >
         <A4PageHeader
           brandName={business.companyName}
-          logoUrl={business.logoUrl}
           subtitle={SUBTITLE}
           kicker="Cotización"
           folio={folio}
@@ -217,8 +216,8 @@ function ItemsSection({ items }: { items: LineItem[] }) {
         bold: true,
         sub: item.variantName ?? undefined,
       },
-      qty: `${formatQuantity(item.quantity)} × ${formatCurrency(item.unitPriceCents)}`,
-      amount: { text: formatCurrency(item.subtotalCents), bold: true },
+      qty: `${formatQuantity(item.quantity)} × ${formatA4Money(item.unitPriceCents)}`,
+      amount: { text: formatA4Money(item.subtotalCents), bold: true },
     },
   }));
 
@@ -245,26 +244,23 @@ function Totals({
   includedIvaCents,
 }: QuotationDocumentProps['totals']) {
   const lines: A4TotalsLine[] = [
-    { label: 'Subtotal', value: formatCurrency(subtotalCents) },
+    { label: 'Subtotal', value: formatA4Money(subtotalCents) },
     {
       label: 'Descuentos',
       value:
         discountCents > 0
-          ? `-${formatCurrency(discountCents)}`
-          : formatCurrency(discountCents),
+          ? `-${formatA4Money(discountCents)}`
+          : formatA4Money(discountCents),
     },
   ];
   if (includedIvaCents !== null) {
     lines.push({
       label: 'IVA incluido',
-      value: formatCurrency(includedIvaCents),
+      value: formatA4Money(includedIvaCents),
     });
   }
   return (
-    <A4TotalsBlock
-      lines={lines}
-      total={{ value: formatCurrency(totalCents) }}
-    />
+    <A4TotalsBlock lines={lines} total={{ value: formatA4Money(totalCents) }} />
   );
 }
 
@@ -321,16 +317,6 @@ const styles = StyleSheet.create({
   },
   closingStrong: { fontFamily: A4_FONTS.bold, color: A4_COLORS.ink },
 });
-
-/**
- * Format cents as a fixed-decimal currency string. We avoid Intl.NumberFormat
- * for bit-stable output across Node ICU builds (receipts/quotes are docs).
- */
-function formatCurrency(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents) / 100;
-  return `${sign}$${abs.toFixed(2)}`;
-}
 
 /**
  * Render an integer quantity as a trimmed string; fractional quantities

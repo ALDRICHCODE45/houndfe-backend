@@ -13,10 +13,11 @@ import { Image, Page, Text, View } from '@react-pdf/renderer';
 import type { ReactNode } from 'react';
 import { PAPER_SIZES } from '../../../pdf-generation.constants';
 import { A4_STYLES as s } from './a4-styles';
+import { A4_LOGO_PATH, A4_LOGO_WIDTH } from './a4-logo';
 import { A4_FONTS, px, toneColor, type A4Tone } from './tokens';
 
 export interface A4Continuation {
-  /** Right-hand kicker of the repeated header (e.g. «Entregas y recepciones»). */
+  /** Right-hand kicker of the repeated header (e.g. «Corte de caja · continuación»). */
   readonly kicker: string;
   readonly folio: string;
   readonly brandSubtitle: string;
@@ -25,7 +26,7 @@ export interface A4Continuation {
 /** Brand name printed when the document does not provide one. */
 export const A4_DEFAULT_BRAND_NAME = 'HoundFe';
 
-/** Default logo frame width (pt); the height is always 36 artboard px. */
+/** Square logo frame width (pt) for a custom `logoUrl`; height is 36 px. */
 const LOGO_SIZE = px(36);
 
 /** Business identity shared by header, continuation header and footer. */
@@ -33,11 +34,15 @@ export interface A4Brand {
   /** Business name; defaults to «HoundFe» when absent or blank. */
   readonly brandName?: string;
   /**
-   * Optional logo: a URL, data URI or packaged absolute file path. When
-   * absent the kit draws the «Logo» placeholder box.
+   * Optional logo override (URL, data URI or absolute file path). When absent
+   * the kit draws the packaged wordmark (`A4_LOGO_PATH`, no network fetch).
+   * An empty string draws the «Logo» placeholder box.
    */
   readonly logoUrl?: string;
-  /** Logo width in pt (default square 36 px); wide wordmarks pass more. */
+  /**
+   * Logo width in pt. Defaults to the wordmark width when `logoUrl` is absent
+   * and to a 36 px square for a custom `logoUrl`.
+   */
   readonly logoWidth?: number;
 }
 
@@ -155,9 +160,12 @@ export function A4PageHeader({
   kicker,
   folio,
   brandName,
-  logoUrl,
-  logoWidth = LOGO_SIZE,
+  logoUrl: logoOverride,
+  logoWidth: widthOverride,
 }: A4PageHeaderProps) {
+  const logoUrl = logoOverride ?? A4_LOGO_PATH;
+  const logoWidth =
+    widthOverride ?? (logoOverride === undefined ? A4_LOGO_WIDTH : LOGO_SIZE);
   return (
     <View>
       <View style={s.header}>

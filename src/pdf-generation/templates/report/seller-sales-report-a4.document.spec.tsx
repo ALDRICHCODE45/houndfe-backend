@@ -20,7 +20,7 @@ import {
   SellerSalesReportA4Document,
   debtTone,
 } from './seller-sales-report-a4.document';
-import { A4_COLORS } from '../shared/a4-kit';
+import { A4_COLORS, A4_LOGO_PATH } from '../shared/a4-kit';
 import type {
   SellerSalesReportCanceledRowDto,
   SellerSalesReportConfirmedRowDto,
@@ -347,6 +347,7 @@ describe('SellerSalesReportA4Document', () => {
     // One image in the page-1 header (continuation images are dynamic).
     expect(images.length).toBeGreaterThanOrEqual(1);
     expect(images[0].props.src).toBe(SELLER_REPORT_LOGO_PATH);
+    expect(SELLER_REPORT_LOGO_PATH).toBe(A4_LOGO_PATH);
     expect(flatStyle(images[0].props.style).width).toBe(
       SELLER_REPORT_LOGO_WIDTH,
     );

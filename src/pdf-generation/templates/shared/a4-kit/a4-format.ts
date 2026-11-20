@@ -90,3 +90,15 @@ export function formatA4Time(
     return date.toISOString().slice(11, 16);
   }
 }
+
+/**
+ * `$1,149.00` — cents as currency: fixed two decimals, comma thousands
+ * grouping, leading `-` for negatives. The ONE money format of the four A4
+ * documents; bit-stable (no `Intl`).
+ */
+export function formatA4Money(cents: number): string {
+  const sign = cents < 0 ? '-' : '';
+  const [whole, decimals] = (Math.abs(cents) / 100).toFixed(2).split('.');
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${sign}$${grouped}.${decimals}`;
+}

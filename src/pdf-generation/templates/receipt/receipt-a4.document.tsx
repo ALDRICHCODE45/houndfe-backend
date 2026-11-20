@@ -8,8 +8,8 @@
  *   - ONE wrapping `<Page>` (`A4Page`): natural pagination, fixed footer
  *     «Página X de Y» from react-pdf's `render` prop, compact header
  *     repeated on pages 2+.
- *   - Header: brand (logo when `business.logoUrl` is set, otherwise the
- *     kit's placeholder box) + «Recibo» / «Folio #…». Meta bar: Fecha ·
+ *   - Header: brand (the packaged wordmark from the kit; `business.logoUrl`
+ *     is the ticket/email logo and is NOT fetched here) + «Recibo» / «Folio #…». Meta bar: Fecha ·
  *     Cajero · Vendedor.
  *   - Cliente («Público en General» fallback), Productos (ledger table with
  *     variant sub-line), totals block, Pagos, closing note.
@@ -34,6 +34,7 @@ import {
   A4TotalsBlock,
   LedgerTable,
   formatA4DateTime,
+  formatA4Money,
   formatA4Time,
   px,
   type A4TotalsLine,
@@ -59,7 +60,6 @@ export function ReceiptA4Document({
       <A4Page
         footerLabel={`Recibo ${sale.folio}`}
         brandName={business.companyName}
-        logoUrl={business.logoUrl}
         continuation={{
           kicker: 'Recibo',
           folio: `Folio #${sale.folio}`,
@@ -68,7 +68,6 @@ export function ReceiptA4Document({
       >
         <A4PageHeader
           brandName={business.companyName}
-          logoUrl={business.logoUrl}
           subtitle={BRAND_SUBTITLE}
           kicker="Recibo"
           folio={`Folio #${sale.folio}`}
@@ -84,7 +83,7 @@ export function ReceiptA4Document({
         <ItemsSection items={items} />
         <A4TotalsBlock
           lines={buildTotalsLines(totals)}
-          total={{ label: 'Total', value: formatCurrency(totals.totalCents) }}
+          total={{ label: 'Total', value: formatA4Money(totals.totalCents) }}
         />
         <PaymentsSection payments={payments} />
         <View style={styles.closing} wrap={false}>
@@ -133,8 +132,8 @@ function ItemsSection({ items }: { items: readonly LineItem[] }) {
       description: item.variantName
         ? { text: item.productName, sub: item.variantName }
         : item.productName,
-      qty: `${formatQuantity(item.quantity)} × ${formatCurrency(item.unitPriceCents)}`,
-      amount: { text: formatCurrency(item.subtotalCents), bold: true },
+      qty: `${formatQuantity(item.quantity)} × ${formatA4Money(item.unitPriceCents)}`,
+      amount: { text: formatA4Money(item.subtotalCents), bold: true },
     },
   }));
   return (
@@ -153,36 +152,36 @@ function ItemsSection({ items }: { items: readonly LineItem[] }) {
  */
 function buildTotalsLines(totals: TotalsBlockProps): A4TotalsLine[] {
   const lines: A4TotalsLine[] = [
-    { label: 'Subtotal', value: formatCurrency(totals.subtotalCents) },
+    { label: 'Subtotal', value: formatA4Money(totals.subtotalCents) },
     {
       label: 'Descuentos',
       value:
         totals.discountCents > 0
-          ? `-${formatCurrency(totals.discountCents)}`
-          : formatCurrency(totals.discountCents),
+          ? `-${formatA4Money(totals.discountCents)}`
+          : formatA4Money(totals.discountCents),
       tone: 'ink',
     },
   ];
   if (totals.shippingChargeCents && totals.shippingChargeCents > 0) {
     lines.push({
       label: 'Envío',
-      value: formatCurrency(totals.shippingChargeCents),
+      value: formatA4Money(totals.shippingChargeCents),
     });
   }
   if (totals.paidCents > 0) {
-    lines.push({ label: 'Pagado', value: formatCurrency(totals.paidCents) });
+    lines.push({ label: 'Pagado', value: formatA4Money(totals.paidCents) });
   }
   if (totals.debtCents > 0) {
     lines.push({
       label: 'Deuda',
-      value: formatCurrency(totals.debtCents),
+      value: formatA4Money(totals.debtCents),
       tone: 'warning',
     });
   }
   if (totals.changeDueCents > 0) {
     lines.push({
       label: 'Cambio',
-      value: formatCurrency(totals.changeDueCents),
+      value: formatA4Money(totals.changeDueCents),
     });
   }
   return lines;
@@ -224,7 +223,7 @@ function PaymentsSection({ payments }: { payments: readonly Payment[] }) {
               ) : null}
             </View>
             <Text style={styles.paymentAmount}>
-              {formatCurrency(payment.amountCents)}
+              {formatA4Money(payment.amountCents)}
             </Text>
           </View>
         ))
@@ -234,14 +233,6 @@ function PaymentsSection({ payments }: { payments: readonly Payment[] }) {
 }
 
 // ── Formatting ───────────────────────────────────────────────────────
-
-/** `$1,149.00` — fixed decimals + thousands grouping (bit-stable, no Intl). */
-function formatCurrency(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const [whole, decimals] = (Math.abs(cents) / 100).toFixed(2).split('.');
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${sign}$${grouped}.${decimals}`;
-}
 
 function formatQuantity(qty: number): string {
   if (Number.isInteger(qty)) {

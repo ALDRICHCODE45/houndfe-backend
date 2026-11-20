@@ -28,6 +28,7 @@ import {
   A4PageHeader,
   A4Section,
   formatA4DateTime,
+  formatA4Money,
   A4_COLORS,
   A4_FONTS,
   px,
@@ -134,7 +135,7 @@ export function CashClosingA4Document({
       <A4Page
         footerLabel={`Corte de caja ${folio}`}
         continuation={{
-          kicker: 'Entregas y recepciones',
+          kicker: 'Corte de caja · continuación',
           folio,
           brandSubtitle: 'Comprobante de corte de caja',
         }}
@@ -158,11 +159,6 @@ export function CashClosingA4Document({
         <CustodySection snapshot={snapshot} />
         <HandoverSection snapshot={snapshot} />
         <DiscrepancyNotes snapshot={snapshot} />
-        <Signatures snapshot={snapshot} />
-        <Text style={styles.provenance}>
-          Documento generado a partir del corte congelado. No se recalcula con
-          movimientos, pagos ni cancelaciones posteriores.
-        </Text>
       </A4Page>
     </Document>
   );
@@ -218,7 +214,7 @@ function MetaSection({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
           : formatA4DateTime(snapshot.verifiedAt),
     },
     { label: 'Cierre', value: formatA4DateTime(snapshot.closedAt) },
-    { label: 'Fondo inicial', value: formatCurrency(snapshot.openingCents) },
+    { label: 'Fondo inicial', value: formatA4Money(snapshot.openingCents) },
   ];
   return (
     <A4Section
@@ -253,8 +249,8 @@ function ChannelSection({
     key: channel.channelKey,
     cells: {
       channel: channel.channelLabel,
-      expected: formatCurrency(channel.expectedCents),
-      declared: formatCurrency(channel.declaredCents),
+      expected: formatA4Money(channel.expectedCents),
+      declared: formatA4Money(channel.declaredCents),
       verified: formatOptionalCurrency(channel.verifiedCents),
       declDiff: differenceCell(
         declarationVsExpectedCents(
@@ -274,8 +270,8 @@ function ChannelSection({
     key: 'total',
     cells: {
       channel: 'Totales del corte',
-      expected: { text: formatCurrency(snapshot.expectedCents), bold: true },
-      declared: { text: formatCurrency(snapshot.declaredCents), bold: true },
+      expected: { text: formatA4Money(snapshot.expectedCents), bold: true },
+      declared: { text: formatA4Money(snapshot.declaredCents), bold: true },
       verified: {
         text: formatOptionalCurrency(snapshot.verifiedCents),
         bold: true,
@@ -328,7 +324,7 @@ function CustodySection({
           [
             {
               label: 'Retiros declarados',
-              value: formatCurrency(totals.withdrawalDeclaredCents),
+              value: formatA4Money(totals.withdrawalDeclaredCents),
             },
             {
               label: 'Retiros recibidos',
@@ -341,7 +337,7 @@ function CustodySection({
           [
             {
               label: 'Fondo retenido declarado',
-              value: formatCurrency(totals.floatDeclaredCents),
+              value: formatA4Money(totals.floatDeclaredCents),
             },
             {
               label: 'Fondo retenido recibido',
@@ -375,7 +371,7 @@ function handoverRow(handover: CashClosingReceiptHandover): LedgerRowData {
       receiver: actorLabel(handover.receiverName, handover.receiverUserId),
       actor: actorLabel(handover.receiptActorName, handover.receiptActorUserId),
       declared: {
-        text: formatCurrency(handover.declaredCents),
+        text: formatA4Money(handover.declaredCents),
         bold: true,
         sub: formatA4DateTime(handover.declaredAt),
       },
@@ -383,7 +379,7 @@ function handoverRow(handover: CashClosingReceiptHandover): LedgerRowData {
         handover.receivedCents === null
           ? { text: 'Pendiente', tone: 'warning', bold: true }
           : {
-              text: formatCurrency(handover.receivedCents),
+              text: formatA4Money(handover.receivedCents),
               bold: true,
               sub:
                 handover.receivedAt === null
@@ -418,6 +414,13 @@ function HandoverSection({
   );
 }
 
+/**
+ * Notes + closing block. The closing note, the signatures and the provenance
+ * line live in ONE non-wrapping `<View>`: react-pdf moves the whole block to
+ * the next page when it does not fit, so the signature lines can never land
+ * alone on a page (they always carry the closing note above them).
+ * `minPresenceAhead` on the signatures alone does not achieve this.
+ */
 function DiscrepancyNotes({
   snapshot,
 }: {
@@ -435,11 +438,18 @@ function DiscrepancyNotes({
         value={snapshot.verificationNotes}
         empty="Sin notas de verificación."
       />
-      <Note
-        label="Cierre"
-        value={snapshot.closingNotes}
-        empty="Sin notas de cierre."
-      />
+      <View style={styles.closingBlock} wrap={false}>
+        <Note
+          label="Cierre"
+          value={snapshot.closingNotes}
+          empty="Sin notas de cierre."
+        />
+        <Signatures snapshot={snapshot} />
+        <Text style={styles.provenance}>
+          Documento generado a partir del corte congelado. No se recalcula con
+          movimientos, pagos ni cancelaciones posteriores.
+        </Text>
+      </View>
     </A4Section>
   );
 }
@@ -470,7 +480,7 @@ function Note({
 
 function Signatures({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
   return (
-    <View style={styles.signatures} wrap={false} minPresenceAhead={24}>
+    <View style={styles.signatures} wrap={false}>
       <Text style={styles.signature}>
         {`Cajero · ${actorLabel(snapshot.cashierName, snapshot.cashierUserId)}`}
       </Text>
@@ -486,6 +496,7 @@ function Signatures({ snapshot }: { snapshot: CashClosingReceiptSnapshot }) {
 const palette = A4_COLORS;
 
 const styles = StyleSheet.create({
+  closingBlock: { flexDirection: 'column' },
   noteLabel: {
     paddingTop: px(8),
     fontFamily: A4_FONTS.bold,
@@ -537,7 +548,7 @@ export function differenceCell(cents: number | null, sub?: string): LedgerCell {
     return { text: 'Sin diferencia', sub };
   }
   return {
-    text: `${formatCurrency(Math.abs(cents))} ${cents < 0 ? 'faltante' : 'sobrante'}`,
+    text: `${formatA4Money(Math.abs(cents))} ${cents < 0 ? 'faltante' : 'sobrante'}`,
     tone: 'warning',
     bold: true,
     sub,
@@ -548,19 +559,12 @@ function handoverKindLabel(kind: CashSnapshotHandover['kind']): string {
   return kind === 'FLOAT' ? 'Fondo (FLOAT)' : 'Retiro';
 }
 
-function formatCurrency(cents: number): string {
-  const sign = cents < 0 ? '-' : '';
-  const [whole, decimals] = (Math.abs(cents) / 100).toFixed(2).split('.');
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${sign}$${grouped}.${decimals}`;
-}
-
 function formatOptionalCurrency(cents: number | null): string {
-  return cents === null ? '—' : formatCurrency(cents);
+  return cents === null ? '—' : formatA4Money(cents);
 }
 
 function formatReceived(amountCents: number, pendingCount: number): string {
-  const base = formatCurrency(amountCents);
+  const base = formatA4Money(amountCents);
   if (pendingCount === 0) {
     return base;
   }

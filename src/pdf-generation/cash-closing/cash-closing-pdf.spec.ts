@@ -61,7 +61,7 @@ import {
   formatClosingFolio,
   summarizeCashHandovers,
 } from './cash-closing-a4.document';
-import { A4_COLORS } from '../templates/shared/a4-kit';
+import { A4_COLORS, A4_LOGO_PATH } from '../templates/shared/a4-kit';
 import {
   CASH_CLOSING_SNAPSHOT_INVALID,
   CashClosingSnapshotParseError,
@@ -671,7 +671,9 @@ describe('CashClosingA4Document', () => {
     }) => ReactNode;
     expect(render({ pageNumber: 1 })).toBeNull();
     const continued = render({ pageNumber: 2 });
-    expect(flattenText(continued)).toContain('Entregas y recepciones');
+    // Neutral label: the continuation page may hold notes or signatures.
+    expect(flattenText(continued)).toContain('Corte de caja · continuación');
+    expect(flattenText(continued)).not.toContain('Entregas y recepciones');
     expect(flattenText(continued)).toContain(FOLIO);
   });
 
@@ -744,7 +746,51 @@ describe('CashClosingA4Document', () => {
     expect(flattenText(footer?.props.children as ReactNode)).toContain(
       'HoundFe',
     );
-    expect(elements.some((element) => element.type === Image)).toBe(false);
+    const images = elements.filter((element) => element.type === Image);
+    expect(images.length).toBeGreaterThanOrEqual(1);
+    expect(images[0].props.src).toBe(A4_LOGO_PATH);
+    expect(flattenText(images[0])).not.toContain('Logo');
+    expect(renderText()).not.toMatch(/\bLogo\b/);
+  });
+
+  it('groups the closing note, signatures and provenance in ONE non-wrapping block (signatures never alone on a page)', () => {
+    const elements = collectElements(
+      CashClosingA4Document({ receipt: makeReceipt() }),
+    );
+    const groups = elements.filter(
+      (element) =>
+        element.type === View &&
+        element.props.wrap === false &&
+        flattenText(element.props.children as ReactNode).includes('Cajero ·'),
+    );
+    const outer = groups.find((element) => {
+      const text = flattenText(element.props.children as ReactNode);
+      return (
+        text.includes('Se retira el excedente.') &&
+        text.includes('Verificador ·') &&
+        text.includes('corte congelado')
+      );
+    });
+
+    expect(outer).toBeDefined();
+    // The signatures are inside that block, not siblings of it.
+    const signatureLines = collectElements(outer?.props.children as ReactNode)
+      .filter(
+        (element) =>
+          element.type === Text &&
+          flattenText(element.props.children as ReactNode).includes(' · '),
+      )
+      .map((element) => flattenText(element.props.children as ReactNode));
+    expect(signatureLines.some((line) => line.startsWith('Cajero ·'))).toBe(
+      true,
+    );
+    // No other element carries the signatures outside the group.
+    const outside = elements.filter(
+      (element) =>
+        element.type === Text &&
+        flattenText(element.props.children as ReactNode).startsWith('Cajero ·'),
+    );
+    expect(outside).toHaveLength(1);
   });
 
   it('renders Spanish audit labels, differences, custody and notes', () => {
