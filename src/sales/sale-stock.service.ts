@@ -18,6 +18,8 @@ import {
   type IStockAlertStateRepository,
 } from '../stock-alerts/domain/stock-alert-state.repository';
 import { LowStockCrossing } from '../stock-alerts/infrastructure/low-stock-crossing.service';
+import { loadReservedStock } from '../inventory/infrastructure/backorder-reserved-stock';
+import { StockReservedForBackorderError } from './stock-reserved-for-backorder.error';
 
 /** Journal actor name for bot-originated sale movements. */
 export const BOT_STOCK_ACTOR_NAME = 'Bot';
@@ -77,12 +79,19 @@ export class SaleStockService {
   /**
    * Charges the sale lines through the journal. Insufficient (or missing)
    * stock keeps the sales contract: 409 `STOCK_INSUFFICIENT_AT_CONFIRM`.
+   *
+   * `reservedAware` (the counter charge only, never a bot checkout): when the
+   * shortage of the failing line is covered by units held for RESERVED
+   * backorders (`sellable + reserved ≥ requested`) the answer is
+   * `STOCK_RESERVED_FOR_BACKORDER {available, reserved}` instead (restock-
+   * backorder / T5b, contract v1 §4).
    */
   async charge(input: {
     saleId: string;
     items: StockChargeItem[];
     actor: SaleStockActor;
     now?: Date;
+    reservedAware?: boolean;
   }): Promise<AppliedStockMovement[]> {
     const actor = await this.resolveActor(input.actor);
     let movements: AppliedStockMovement[];
@@ -93,6 +102,9 @@ export class SaleStockService {
         input.now,
       );
     } catch (error) {
+      if (input.reservedAware && error instanceof InsufficientStockError) {
+        await this.throwIfCoveredByReservations(input.items, input.now);
+      }
       if (
         error instanceof InsufficientStockError ||
         error instanceof StockBucketNotFoundError
@@ -188,6 +200,38 @@ export class SaleStockService {
     if (outcome.status === 'REVERSED')
       await this.crossing.record(outcome.movements);
     return outcome;
+  }
+
+  /**
+   * After an insufficient-stock charge: finds the FIRST cart line the sellable
+   * stock cannot cover and, when the units reserved for backorders would cover
+   * it, throws `STOCK_RESERVED_FOR_BACKORDER`; otherwise returns so the caller
+   * raises the plain `STOCK_INSUFFICIENT_AT_CONFIRM`. Runs inside the charge
+   * transaction (the journal already holds the stock locks), one batched read
+   * of the reserved units for the whole cart.
+   */
+  private async throwIfCoveredByReservations(
+    items: StockChargeItem[],
+    now?: Date,
+  ): Promise<void> {
+    const reserved = await loadReservedStock(
+      this.tenantPrisma,
+      items.map((item) => item.productId),
+    );
+    for (const item of items) {
+      const variantId = item.variantId ?? null;
+      const sellable = await this.journal.lockSellable(
+        item.productId,
+        variantId,
+        now,
+      );
+      if (sellable === null || sellable >= item.quantity) continue;
+      const held = reserved.forLine(item.productId, variantId);
+      if (held > 0 && sellable + held >= item.quantity) {
+        throw new StockReservedForBackorderError(sellable, held);
+      }
+      return;
+    }
   }
 
   private async resolveActor(actor: SaleStockActor): Promise<StockActor> {

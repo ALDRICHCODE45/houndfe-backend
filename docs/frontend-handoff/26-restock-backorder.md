@@ -1,6 +1,6 @@
 # POS — restock backorders («pedidos por reposición»): staff list, detail and cancel
 
-**Status:** T5a implemented on `feat/restock-backorder` (staff API, CASL subject `Backorder`, seed grants, notification item shape), **not merged, not pushed, not deployed**. The stock fields, the counter error and the variant block (T5b) are a separate section below that the parent fills in. Task: `odd/tasks/restock-backorder.md` (T5a, S1 §9.1–§9.3 §9.5, S2 D7, log L2 and L13). Contract: `docs/proposals/restock-backorder-contract.md` v1 §9; the bot side is `docs/chatbot-handoff/restock-backorder-bot-contract.md`.
+**Status:** T5a (staff API, CASL subject `Backorder`, seed grants, notification item shape) and T5b (stock fields, counter error, variant block, dev sample data) implemented on `feat/restock-backorder`; merged to `main` and deployed to dev `:3003` once their verify passes. Task: `odd/tasks/restock-backorder.md` (T5a, S1 §9.1–§9.3 §9.5, S2 D7, log L2 and L13). Contract: `docs/proposals/restock-backorder-contract.md` v1 §9; the bot side is `docs/chatbot-handoff/restock-backorder-bot-contract.md`.
 
 Shapes come from the code and its specs (real PostgreSQL): `src/backorders/presentation/backorders-staff.controller.ts`, `src/backorders/application/backorders-staff.service.ts`, `src/backorders/domain/backorder-staff-query.ts`, `src/backorders/presentation/dto/backorder-staff.response.ts`, `src/backorders/backorders-staff.integration.spec.ts`. Nothing was sent to the dev API.
 
@@ -235,4 +235,55 @@ Where each is raised: `src/backorders/domain/backorder-error.ts:11` (`INVALID_BA
 
 ## Stock fields, counter error and variant block (T5b)
 
-> **PLACEHOLDER — the parent fills this section from T5b's work.** It must answer the open questions of log L2 and L13: (1) exact endpoints and JSON level (product, variant or both) of `stockOnHand` / `reservedForBackorders` / `availableToSell` (`GET /products`, `GET /products/:id`, `GET /products/:id/variants`, the POS search route); (2) the exact body of `STOCK_RESERVED_FOR_BACKORDER {available, reserved}`, which confirm route raises it and the add-item warning shape; (3) the variant-conversion block (which request — create the first variant or convert a product to variants —, the error code and body); (5) the publish order on :3003; and the dev showcase script with sample backorders in every state (L13 (4)).
+### Stock fields (additive)
+
+All three are integers. `availableToSell` is what the counter can sell now (today's `quantity` for a product without variants); `reservedForBackorders` is the sum of the quantities of `RESERVED` backorders; `stockOnHand = availableToSell + reservedForBackorders`. Existing fields keep their meaning. They come from one batched read per response (no N+1).
+
+| Route (path:line) | Where the fields are |
+| --- | --- |
+| `GET /products` (`src/products/products.controller.ts:58`; service `src/products/products.service.ts:635`). Bare array. | At each product's root. For a product with variants the root aggregates its variants (same number as `variantStockTotal`); there is no variants array in this list. |
+| `GET /products/:id` (`products.controller.ts:64`; service `products.service.ts:2630`) | Product root (same rule) and at the root of each `variants[i]`. |
+| `GET /products/:id/variants` (`products.controller.ts:98`; service `products.service.ts:1328`) | At the root of every variant in the array. |
+| `GET /sales/pos-catalog` (`src/sales/sales-catalog.controller.ts:31`) and `GET /sales/pos-catalog/:productId` (`:40`); service `products.service.ts:2742`, `:2826`, `:2844` | Inside the existing `stock` object: `items[i].stock.{stockOnHand,reservedForBackorders,availableToSell}` for a product without variants and `items[i].variants[j].stock.{…}` per variant. `stock` stays `null` for a product with variants (use its variants) and for `useStock:false`. |
+
+### Add-item warning (non-blocking)
+
+- Routes: `POST /sales/drafts/:id/items` (`src/sales/sales.controller.ts:71`) and `PATCH /sales/drafts/:id/items/:itemId` (`:85`).
+- When the requested cumulative quantity exceeds `availableToSell` but not `stockOnHand`: 200, the line is saved, and that line carries `items[i].stockWarning = { "code": "STOCK_RESERVED_FOR_BACKORDER", "available": 2, "reserved": 3 }`. Only on the touched line and only in that response (not persisted, not on `GET /sales/drafts`). Lines without a warning have no `stockWarning` key.
+- Above `stockOnHand`, or with nothing reserved, the existing 422 is unchanged: `{ "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: N, Requested: M" }`.
+- Behaviour change to note: a quantity that today exceeds `availableToSell` while units are reserved used to be 422 and is now 200 with the warning.
+
+### Counter confirm: `STOCK_RESERVED_FOR_BACKORDER`
+
+Route: `POST /sales/drafts/:id/charge` only (`src/sales/sales.controller.ts:266`). 409, details at the root (like `PROMO_RE_QUOTE`):
+
+```json
+{ "statusCode": 409, "error": "STOCK_RESERVED_FOR_BACKORDER", "message": "STOCK_RESERVED_FOR_BACKORDER",
+  "timestamp": "2026-11-20T21:12:56.365Z", "available": 2, "reserved": 3 }
+```
+
+- `available`: what the counter can sell now (expired lots excluded); `reserved`: what backorders hold. Raised only when `available + reserved ≥ requested` for the first failing line; the error does not name the line (the add-item warning already flagged it).
+- Otherwise the plain `{ "statusCode": 409, "error": "STOCK_INSUFFICIENT_AT_CONFIRM", "message": "STOCK_INSUFFICIENT_AT_CONFIRM", "timestamp": "…" }`, unchanged.
+- The sale stays `DRAFT` and nothing is charged. Bot checkouts keep `STOCK_INSUFFICIENT_AT_CONFIRM` (the bot already excludes reserved units).
+
+### Variant block
+
+Both conversion requests are blocked while the product has a `WAITING` or `RESERVED` backorder with `variantId` null:
+
+- `POST /products/:id/variants` (`src/products/products.controller.ts:88`; service `products.service.ts:1237`);
+- `PATCH /products/:id` with `hasVariants: true` on a product that has none (`products.controller.ts:70`; service `products.service.ts:1052`).
+
+409, nothing changes (no variant, stock not zeroed):
+
+```json
+{ "statusCode": 409, "error": "PRODUCT_HAS_ACTIVE_BACKORDERS",
+  "message": "El producto tiene pedidos por reposición activos", "timestamp": "2026-11-20T21:12:56.365Z" }
+```
+
+Products without backorders, or with only `CONFIRMED`/`EXPIRED`/`CANCELLED` ones, still get variants. What the POS sends to edit variants does not change; only this error is new.
+
+### Dev sample data and publish order
+
+- `node scripts/dev-showcase/backorders.cjs --apply` (after `pnpm seed`; same local-DB guard as the showcase) creates in Centro, idempotently, 7 backorders on products with SKU `DEMO-BO-*`: `GATO` → WAITING head with `passedOverCount` 1, RESERVED, WAITING behind; `SHAMPOO` → CONFIRMED with its sale; `COLLAR` → EXPIRED, CANCELLED by the customer, CANCELLED by staff. It prints the `BO-` folios. See `docs/dev-showcase-guide.md` §7.
+- The RESERVED sample expires about 21 h after the run (reminder about 18 h); the dev sweep will then process it like a real one.
+- Publish order on `:3003`: everything of this handoff ships together (T5a + T5b). `manager@houndfe.com` (Centro) has `read`/`update:Backorder`; `cashier@houndfe.com` has `read`.

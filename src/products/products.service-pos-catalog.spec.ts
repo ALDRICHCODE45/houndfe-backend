@@ -30,6 +30,7 @@ function makeMockPrisma() {
       findFirst: jest.fn(),
       count: jest.fn(),
     },
+    backorder: { groupBy: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -126,6 +127,9 @@ describe('ProductsService — searchForPOS', () => {
       quantity: 120,
       minQuantity: 10,
       location: null,
+      stockOnHand: 120,
+      reservedForBackorders: 0,
+      availableToSell: 120,
     });
   });
 
@@ -469,6 +473,9 @@ describe('ProductsService — findOneForPOS', () => {
       quantity: 15,
       minQuantity: 5,
       location: 'Estante B',
+      stockOnHand: 15,
+      reservedForBackorders: 0,
+      availableToSell: 15,
     });
     expect(result.price).toEqual({
       priceCents: 40000,
@@ -540,6 +547,9 @@ describe('ProductsService — findOneForPOS', () => {
       quantity: 10,
       minQuantity: 2,
       location: 'Rack A',
+      stockOnHand: 10,
+      reservedForBackorders: 0,
+      availableToSell: 10,
     });
   });
 

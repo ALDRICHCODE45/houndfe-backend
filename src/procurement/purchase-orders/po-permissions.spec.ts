@@ -33,6 +33,8 @@ describe('purchase-order permission registry', () => {
           'CustomerPhone',
           'ChatbotSettings',
           'ChatbotSettingsAllBranches',
+          // restock-backorder / T5a: additive backorder permissions.
+          'Backorder',
         ].includes(p.subject),
     );
     expect(

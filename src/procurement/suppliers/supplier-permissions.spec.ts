@@ -31,7 +31,9 @@ describe('supplier permission registry', () => {
         String(p.subject) !== 'ChatbotEscalation' &&
         String(p.subject) !== 'CustomerPhone' &&
         String(p.subject) !== 'ChatbotSettings' &&
-        String(p.subject) !== 'ChatbotSettingsAllBranches',
+        String(p.subject) !== 'ChatbotSettingsAllBranches' &&
+        // restock-backorder / T5a: additive backorder permissions.
+        String(p.subject) !== 'Backorder',
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),

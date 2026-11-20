@@ -109,6 +109,11 @@ function createService(
   // create/update path. Inline `prisma` mocks above usually don't
   // include it, so we splice in no-op methods on the SAME object that
   // getClient() returns to keep all existing PRODUCT-path tests green.
+  // restock-backorder / T5b — no reserved units, no active backorders by default.
+  (prisma as any).backorder ??= {
+    count: jest.fn().mockResolvedValue(0),
+    groupBy: jest.fn().mockResolvedValue([]),
+  };
   (prisma as any).serviceDetail = {
     upsert: jest.fn().mockResolvedValue(undefined),
     deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -150,6 +155,10 @@ function createVariantService(
           .fn()
           .mockResolvedValue(0);
         tx.$queryRaw = jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]);
+        tx.backorder ??= {
+          count: jest.fn().mockResolvedValue(0),
+          groupBy: jest.fn().mockResolvedValue([]),
+        };
         tenant.getClient.mockReturnValue(tx);
         try {
           return await work();

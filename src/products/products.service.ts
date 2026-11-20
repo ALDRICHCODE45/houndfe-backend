@@ -34,6 +34,12 @@ import { lockCatalogLifecycle } from '../catalog-editorial/infrastructure/prisma
 import type { StockChange } from '../inventory/domain/stock-journal.types';
 import { ProductStockJournal } from './infrastructure/product-stock-journal';
 import {
+  backorderStockFields,
+  loadReservedStock,
+  type ReservedStockIndex,
+} from '../inventory/infrastructure/backorder-reserved-stock';
+import { ProductHasActiveBackordersError } from './domain/product-has-active-backorders.error';
+import {
   assertNoDirectQuantityEdit,
   LotHasStockError,
   StockTrackingHasStockError,
@@ -704,6 +710,12 @@ export class ProductsService {
       ...(take !== undefined ? { take } : {}),
     });
 
+    // restock-backorder / T5b — ONE grouped read for the whole page.
+    const reserved = await loadReservedStock(
+      this.tenantPrisma,
+      products.map((product) => product.id),
+    );
+
     return products.map((product) => {
       const baseResponse = Product.fromPersistence({
         id: product.id,
@@ -762,7 +774,13 @@ export class ProductsService {
       };
 
       if (!responseWithPublicPrice.hasVariants) {
-        return responseWithPublicPrice;
+        return {
+          ...responseWithPublicPrice,
+          ...backorderStockFields(
+            product.quantity,
+            reserved.forProduct(product.id),
+          ),
+        };
       }
 
       const variantStockTotal = product.variants.reduce(
@@ -774,6 +792,12 @@ export class ProductsService {
         ...responseWithPublicPrice,
         variantStockTotal,
         variantCount: product._count.variants,
+        // A variant product's own row holds no stock: the aggregate of its
+        // variants (the same figure as `variantStockTotal`).
+        ...backorderStockFields(
+          variantStockTotal,
+          reserved.forProduct(product.id),
+        ),
       };
     });
   }
@@ -1025,6 +1049,7 @@ export class ProductsService {
     if (dto.hasVariants !== undefined) {
       // Enabling variants zeroes the parent's own stock: journal it first (S8).
       if (dto.hasVariants && !product.hasVariants) {
+        await this.assertNoActiveProductBackorders(id);
         await this.stockJournal.removeProductStock(id, 'FIRST_VARIANT_ZEROING');
       }
       product.hasVariants = dto.hasVariants;
@@ -1209,6 +1234,8 @@ export class ProductsService {
       const product = await this.productRepo.findById(productId);
       if (!product) throw new EntityNotFoundError('Product', productId);
 
+      await this.assertNoActiveProductBackorders(productId);
+
       if (dto.sku) {
         const taken = await this.productRepo.isSkuTaken(dto.sku);
         if (taken) throw new EntityAlreadyExistsError('SKU', dto.sku);
@@ -1303,25 +1330,36 @@ export class ProductsService {
     if (!product) throw new EntityNotFoundError('Product', productId);
 
     // F1.WU4d2 — tenant-scoped read (design §6.1).
-    const variants = await this.tenantPrisma.getClient().variant.findMany({
-      where: { productId, tenantId: this.tenantPrisma.getTenantId() },
-      include: {
-        images: true,
-        variantPrices: {
-          orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
-          include: {
-            priceList: {
-              select: { globalPriceList: { select: { name: true } }, id: true },
+    const [variants, reserved] = await Promise.all([
+      this.tenantPrisma.getClient().variant.findMany({
+        where: { productId, tenantId: this.tenantPrisma.getTenantId() },
+        include: {
+          images: true,
+          variantPrices: {
+            orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
+            include: {
+              priceList: {
+                select: {
+                  globalPriceList: { select: { name: true } },
+                  id: true,
+                },
+              },
+              tierPrices: { orderBy: { minQuantity: 'asc' } },
             },
-            tierPrices: { orderBy: { minQuantity: 'asc' } },
           },
         },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
+        orderBy: { createdAt: 'asc' },
+      }),
+      // restock-backorder / T5b — one grouped read for every variant.
+      loadReservedStock(this.tenantPrisma, [productId]),
+    ]);
 
     return variants.map((variant) =>
-      this.enrichVariantResponse(variant, product),
+      this.enrichVariantResponse(
+        variant,
+        product,
+        reserved.forLine(productId, variant.id),
+      ),
     );
   }
 
@@ -2224,6 +2262,27 @@ export class ProductsService {
 
   // ==================== Helpers ====================
 
+  /**
+   * restock-backorder / L8 L13 — a product with a WAITING or RESERVED
+   * product-level backorder (`variantId` null) cannot get its first variant: the
+   * backorder would be stranded. Caller holds the product row lock inside the
+   * ambient transaction (the backorder insert's FK takes KEY SHARE on that row,
+   * so a concurrent schedule is ordered against this check).
+   */
+  private async assertNoActiveProductBackorders(
+    productId: string,
+  ): Promise<void> {
+    const active = await this.tenantPrisma.getClient().backorder.count({
+      where: {
+        tenantId: this.tenantPrisma.getTenantId(),
+        productId,
+        variantId: null,
+        status: { in: ['WAITING', 'RESERVED'] },
+      },
+    });
+    if (active > 0) throw new ProductHasActiveBackordersError();
+  }
+
   /** Product plus variant units; the product row is already locked by the caller. */
   private async assertNoStockToUntrack(
     productId: string,
@@ -2410,9 +2469,12 @@ export class ProductsService {
       onlineStockPresentationCustomQty?: number | null;
     },
     product: Product,
+    reservedForBackorders = 0,
   ) {
     return {
       ...this.enrichVariantCostResponse(variant),
+      // restock-backorder / T5b — `availableToSell` is the variant `quantity`.
+      ...backorderStockFields(variant.quantity, reservedForBackorders),
       minQuantity: variant.minQuantity ?? 0,
       // F1.WU4d2 — authenticated reads carry the persisted catalog
       // scalars; the defaults only normalize rows predating the columns.
@@ -2571,54 +2633,61 @@ export class ProductsService {
 
     const tenantClient = this.tenantPrisma.getClient();
 
-    const [relations, priceLists, variants, images, lots] = await Promise.all([
-      tenantClient.product.findUnique({
-        where: { id: productId },
-        select: {
-          category: { select: { id: true, name: true } },
-          brand: { select: { id: true, name: true } },
-        },
-      }),
-      tenantClient.priceList.findMany({
-        where: { productId },
-        include: {
-          tierPrices: { orderBy: { minQuantity: 'asc' } },
-          globalPriceList: { select: { name: true, isDefault: true } },
-        },
-        orderBy: { globalPriceList: { name: 'asc' } },
-      }),
-      product.hasVariants
-        ? tenantClient.variant.findMany({
-            where: { productId },
-            include: {
-              images: true,
-              variantPrices: {
-                orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
-                include: {
-                  priceList: {
-                    select: {
-                      id: true,
-                      globalPriceList: { select: { name: true } },
+    const [relations, priceLists, variants, images, lots, reserved] =
+      await Promise.all([
+        tenantClient.product.findUnique({
+          where: { id: productId },
+          select: {
+            category: { select: { id: true, name: true } },
+            brand: { select: { id: true, name: true } },
+          },
+        }),
+        tenantClient.priceList.findMany({
+          where: { productId },
+          include: {
+            tierPrices: { orderBy: { minQuantity: 'asc' } },
+            globalPriceList: { select: { name: true, isDefault: true } },
+          },
+          orderBy: { globalPriceList: { name: 'asc' } },
+        }),
+        product.hasVariants
+          ? tenantClient.variant.findMany({
+              where: { productId },
+              include: {
+                images: true,
+                variantPrices: {
+                  orderBy: { priceList: { globalPriceList: { name: 'asc' } } },
+                  include: {
+                    priceList: {
+                      select: {
+                        id: true,
+                        globalPriceList: { select: { name: true } },
+                      },
                     },
+                    tierPrices: { orderBy: { minQuantity: 'asc' } },
                   },
-                  tierPrices: { orderBy: { minQuantity: 'asc' } },
                 },
               },
-            },
-            orderBy: { createdAt: 'asc' },
-          })
-        : Promise.resolve([]),
-      tenantClient.productImage.findMany({
-        where: { productId, variantId: null },
-        orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
-      }),
-      product.useLotsAndExpirations
-        ? tenantClient.lot.findMany({
-            where: { productId },
-            orderBy: { expirationDate: 'asc' },
-          })
-        : Promise.resolve([]),
-    ]);
+              orderBy: { createdAt: 'asc' },
+            })
+          : Promise.resolve([]),
+        tenantClient.productImage.findMany({
+          where: { productId, variantId: null },
+          orderBy: [{ isMain: 'desc' }, { sortOrder: 'asc' }],
+        }),
+        product.useLotsAndExpirations
+          ? tenantClient.lot.findMany({
+              where: { productId },
+              orderBy: { expirationDate: 'asc' },
+            })
+          : Promise.resolve([]),
+        // restock-backorder / T5b — one grouped read: product and its variants.
+        loadReservedStock(this.tenantPrisma, [productId]),
+      ]);
+    const variantStockTotal = (variants as { quantity: number }[]).reduce(
+      (total, v) => total + v.quantity,
+      0,
+    );
 
     const publicoPriceCents =
       priceLists.find((pl) => pl.globalPriceList?.isDefault)?.priceCents ?? 0;
@@ -2633,19 +2702,26 @@ export class ProductsService {
         this.enrichPriceListResponse(pl, product),
       ),
       variants: variants.map((variant) =>
-        this.enrichVariantResponse(variant, product),
+        this.enrichVariantResponse(
+          variant,
+          product,
+          reserved.forLine(productId, (variant as { id: string }).id),
+        ),
       ),
       images,
       lots,
       ...(product.hasVariants
         ? {
-            variantStockTotal: (variants as { quantity: number }[]).reduce(
-              (total, v) => total + v.quantity,
-              0,
-            ),
+            variantStockTotal,
             variantCount: variants.length,
           }
         : {}),
+      // Product level: its own `quantity`, or (variant product, whose own row
+      // holds no stock) the aggregate of its variants like `variantStockTotal`.
+      ...backorderStockFields(
+        product.hasVariants ? variantStockTotal : product.quantity,
+        reserved.forProduct(productId),
+      ),
     };
   }
 
@@ -2724,8 +2800,16 @@ export class ProductsService {
       tenantClient.product.count({ where }),
     ]);
 
+    // restock-backorder / T5b — one grouped read for the whole page.
+    const reserved = await loadReservedStock(
+      this.tenantPrisma,
+      products.map((product) => product.id),
+    );
+
     // Map to POS catalog items
-    const items = products.map((product) => this.mapPosCatalogItem(product));
+    const items = products.map((product) =>
+      this.mapPosCatalogItem(product, reserved),
+    );
 
     return {
       items,
@@ -2747,14 +2831,20 @@ export class ProductsService {
 
     if (!product) return null;
 
-    return this.mapPosCatalogItem(product);
+    return this.mapPosCatalogItem(
+      product,
+      await loadReservedStock(this.tenantPrisma, [product.id]),
+    );
   }
 
   /**
    * Map a Prisma product to POS catalog item format.
    * Handles variants, images, prices, and stock.
    */
-  private mapPosCatalogItem(product: PosCatalogProduct) {
+  private mapPosCatalogItem(
+    product: PosCatalogProduct,
+    reserved: ReservedStockIndex,
+  ) {
     // Resolve main image and images array
     const mainImage =
       product.images.find((img) => img.isMain)?.url ??
@@ -2775,6 +2865,10 @@ export class ProductsService {
             quantity: product.quantity ?? 0,
             minQuantity: product.minQuantity ?? 0,
             location: product.location ?? null,
+            ...backorderStockFields(
+              product.quantity ?? 0,
+              reserved.forLine(product.id, null),
+            ),
           }
         : null;
 
@@ -2795,6 +2889,10 @@ export class ProductsService {
                 quantity: variant.quantity ?? 0,
                 minQuantity: variant.minQuantity ?? 0,
                 location: product.location ?? null,
+                ...backorderStockFields(
+                  variant.quantity ?? 0,
+                  reserved.forLine(product.id, variant.id),
+                ),
               }
             : null,
         }))
@@ -3300,6 +3398,12 @@ export class ProductsService {
   ): Promise<{
     available: boolean;
     currentStock: number | null;
+    /**
+     * restock-backorder / T5b — units held for RESERVED backorders on this
+     * line. Read ONLY when the quantity is not available (the add-item hot
+     * path stays one query lighter); absent otherwise.
+     */
+    reservedForBackorders?: number;
   }> {
     // Fetch product
     const tenantClient = this.tenantPrisma.getClient();
@@ -3327,10 +3431,14 @@ export class ProductsService {
       });
 
       const currentStock = variant?.quantity ?? 0;
-      return {
-        available: currentStock >= requestedQuantity,
-        currentStock,
-      };
+      return this.withReservedUnits(
+        {
+          available: currentStock >= requestedQuantity,
+          currentStock,
+        },
+        productId,
+        variantId,
+      );
     }
 
     // No variants - check product stock. Units in expired lots are never
@@ -3340,9 +3448,27 @@ export class ProductsService {
         (await this.stockJournal.expiredLotQuantity(productId)),
       0,
     );
+    return this.withReservedUnits(
+      {
+        available: currentStock >= requestedQuantity,
+        currentStock,
+      },
+      productId,
+      null,
+    );
+  }
+
+  /** Adds `reservedForBackorders` to an unavailable stock check (one read). */
+  private async withReservedUnits(
+    availability: { available: boolean; currentStock: number | null },
+    productId: string,
+    variantId: string | null,
+  ) {
+    if (availability.available) return availability;
+    const reserved = await loadReservedStock(this.tenantPrisma, [productId]);
     return {
-      available: currentStock >= requestedQuantity,
-      currentStock,
+      ...availability,
+      reservedForBackorders: reserved.forLine(productId, variantId),
     };
   }
 

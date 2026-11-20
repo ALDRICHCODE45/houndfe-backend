@@ -43,6 +43,7 @@ function makeMockRepo() {
 function makeMockPrisma(findManyMock: jest.Mock) {
   return {
     product: { findMany: findManyMock },
+    backorder: { groupBy: jest.fn().mockResolvedValue([]) },
   } as any;
 }
 

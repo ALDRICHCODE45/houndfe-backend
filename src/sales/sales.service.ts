@@ -88,6 +88,7 @@ import type {
   PersistedSalePaymentRecord,
 } from './domain/sale.repository';
 import { SaleStockService, type SaleStockActor } from './sale-stock.service';
+import { reservedStockWarning, withStockWarning } from './stock-warning';
 import { SYSTEM_ACTOR_ID } from '../shared/tenant/tenant-runner.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
@@ -1361,7 +1362,12 @@ export class SalesService {
       cumulativeQuantity,
     );
 
-    if (!stockCheck.available) {
+    // restock-backorder / T5b — units held for RESERVED backorders are not
+    // sellable, but add-item stays advisory (contract v1 §4): a quantity that
+    // exceeds `availableToSell` yet fits `stockOnHand` is added with a warning
+    // and the counter charge answers STOCK_RESERVED_FOR_BACKORDER.
+    const stockWarning = reservedStockWarning(stockCheck, cumulativeQuantity);
+    if (!stockCheck.available && !stockWarning) {
       throw new BusinessRuleViolationError(
         `Insufficient stock for product ${dto.productId}. ` +
           `Available: ${stockCheck.currentStock}, Requested: ${cumulativeQuantity}`,
@@ -1402,7 +1408,11 @@ export class SalesService {
       ),
     );
 
-    return sale.toResponse();
+    return withStockWarning(
+      sale.toResponse(),
+      existingItem?.id ?? itemId,
+      stockWarning,
+    );
   }
 
   /**
@@ -1444,7 +1454,9 @@ export class SalesService {
       dto.quantity,
     );
 
-    if (!stockCheck.available) {
+    // restock-backorder / T5b — same advisory rule as add-item.
+    const stockWarning = reservedStockWarning(stockCheck, dto.quantity);
+    if (!stockCheck.available && !stockWarning) {
       throw new BusinessRuleViolationError(
         `Insufficient stock for product ${item.productId}. ` +
           `Available: ${stockCheck.currentStock}, Requested: ${dto.quantity}`,
@@ -1469,7 +1481,7 @@ export class SalesService {
       ),
     );
 
-    return sale.toResponse();
+    return withStockWarning(sale.toResponse(), itemId, stockWarning);
   }
 
   /**
@@ -3380,6 +3392,9 @@ export class SalesService {
           quantity: item.quantity,
         })),
         actor: { kind: 'user', userId: actorId },
+        // restock-backorder / T5b — the counter charge explains a shortage
+        // covered by backorder reservations (STOCK_RESERVED_FOR_BACKORDER).
+        reservedAware: true,
       });
 
       const confirmedAt = new Date();

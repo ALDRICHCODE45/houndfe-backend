@@ -86,6 +86,15 @@ When the journal was switched on, the migration wrote one `OPENING` movement (ac
 | `SALE` | POS charge or bot sale confirmation. One row **per bucket consumed**. | − |
 | `SALE_CANCELLATION` | Cancelling a charged sale. It restores exactly the buckets the sale consumed. | + |
 | `REMOVAL` | Stock that disappears with its row. It carries `removalCause`. | − |
+| `BACKORDER_RESERVE` | Restock backorder («pedido por reposición»): stock arrived and the units were set aside for a waiting backorder (see [26-restock-backorder.md](26-restock-backorder.md)). One row **per bucket** (lot, variant or untracked). The units leave the sellable `quantity`. Group `BACKORDER`. | − |
+| `BACKORDER_RELEASE` | The reverse of `BACKORDER_RESERVE`: the units go back to the **same buckets** when the backorder is cancelled (customer or staff), expires after 24 h, or is confirmed (the sale charge follows in the same transaction, net zero). Group `BACKORDER`. | + |
+
+Backorder movements, in short:
+
+- `group` is `{ "type": "BACKORDER", "id": "<backorderId>" }`. All the reserve and release rows of one backorder share that id, so grouping consecutive rows by `group.id` (§4.3) shows the whole life of the reservation.
+- Actor: `Sistema` when the system reserves (arrival, sweep) or releases an expired backorder; `Bot` when the customer cancels from chat or the checkout consumes the reservation; the user's name when staff cancel from the POS.
+- A reserve right after a stock increase is expected: e.g. an `ADJUSTMENT +5` followed by `BACKORDER_RESERVE −2` (same lot or bucket order as a sale would take, never an expired lot). The product balance after the reserve is what the counter can sell.
+- Reserved units are **not** in `quantity`. To show them use `reservedForBackorders` and `stockOnHand` (§7); `GET /inventory/products/:productId/stock` keeps reporting the sellable figures.
 
 `removalCause` is one of:
 
@@ -211,6 +220,7 @@ Each field means:
   - `SALE` with the sale id, for sales and their cancellations;
   - `ADJUSTMENT` with the adjustment id;
   - `PRODUCT` with the product id, for `INITIAL` and `REMOVAL`.
+  - `BACKORDER` with the backorder id, for `BACKORDER_RESERVE` and `BACKORDER_RELEASE`.
 - `nextCursor: null` means this is the last page.
 - An unknown product, or a product of another tenant, returns an **empty page**, not a 404. A deleted product still returns its full history (including the `REMOVAL` rows), because history outlives deleted rows.
 
@@ -330,6 +340,8 @@ Show «Stock insuficiente» and reload the cart availability.
 
 The draft availability check (`POST /sales/drafts/:id/items` and `PATCH …/items/:itemId`) keeps the sales error body, not the 409 above. A quantity above the sellable stock answers `422 { "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: 62, Requested: 63" }`.
 
+Units set aside for a restock backorder are not sellable at the counter. When the POS charge (`POST /sales/drafts/:id/charge`) fails for lack of stock and the sellable units plus the reserved ones would cover the failing line, the answer is `409 STOCK_RESERVED_FOR_BACKORDER` with `available` and `reserved` at the root of the body instead of `STOCK_INSUFFICIENT_AT_CONFIRM`. The draft availability check above stays advisory for that case: a quantity above the sellable stock but within `stockOnHand` is added and the line carries a `stockWarning` (details in [26-restock-backorder.md](26-restock-backorder.md)). Bot checkouts are not affected: they already exclude the reserved units and keep `STOCK_INSUFFICIENT_AT_CONFIRM`.
+
 Cancelling a sale (`POST /sales/:id/cancel`) restores exactly the buckets the sale consumed, as `SALE_CANCELLATION` movements:
 
 - the same lots, even if they have expired since;
@@ -388,3 +400,4 @@ See §7 of [README.md](README.md): tenant, login, granted permissions and the sh
 - Lots on products **with variants** are not supported until O2 ([02-variant-lots-o2-proposal.md](02-variant-lots-o2-proposal.md)).
 - Transfers between sucursales (tenants) do not exist. Use an adjustment out in one sucursal and an adjustment in in the other, with a reason.
 - `GET /products` and `GET /products/:id` return `quantity` = product total (untracked + lots, expired lots included). Use it with `minQuantity` for list badges. Public catalog and POS catalog lists show the same `quantity`. Only the stock view (`sellable`), the charge and the draft availability check exclude expired lots. For a product with variants the stored `quantity` stays 0 (as on `main`): use `variantStockTotal` (sum of its variants) from `GET /products/:id`, and each variant's `quantity` against its own `minQuantity`.
+- Restock backorders add three fields to the POS-used reads (`GET /products`, `GET /products/:id` and its `variants`, `GET /products/:id/variants`, `GET /sales/pos-catalog[/:productId]`): `availableToSell` (= the sellable `quantity`, unchanged meaning), `reservedForBackorders` (units held by RESERVED backorders) and `stockOnHand` (= `availableToSell` + `reservedForBackorders`). Exact JSON levels are in [26-restock-backorder.md](26-restock-backorder.md).

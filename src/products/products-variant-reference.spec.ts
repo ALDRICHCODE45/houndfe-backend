@@ -35,6 +35,10 @@ function fixture() {
       locked = true;
       return Promise.resolve([{ id: productId }]);
     }),
+    backorder: {
+      count: jest.fn(() => Promise.resolve(0)),
+      groupBy: jest.fn(() => Promise.resolve([])),
+    },
     variant: {
       findFirstOrThrow: jest.fn(({ where }: { where: { id: string } }) => {
         events.push('reload');

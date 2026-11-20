@@ -751,9 +751,12 @@ describeIfDb('Product stock writers through the journal (PostgreSQL)', () => {
         available: true,
         currentStock: 9,
       });
+      // restock-backorder / T5b — an unavailable check also reports the units
+      // held for backorders (none here).
       await expect(check(10)).resolves.toEqual({
         available: false,
         currentStock: 9,
+        reservedForBackorders: 0,
       });
     });
 

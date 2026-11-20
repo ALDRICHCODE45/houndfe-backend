@@ -17,6 +17,7 @@ import {
   ParseUUIDPipe,
   HttpCode,
   HttpStatus,
+  UseFilters,
   UseGuards,
   Headers,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { SalesService } from './sales.service';
+import { StockReservedForBackorderFilter } from './stock-reserved-for-backorder.filter';
 import { AddItemDto } from './dto/add-item.dto';
 import { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
 import { OverrideItemPriceDto } from './dto/override-item-price.dto';
@@ -260,7 +262,9 @@ export class SalesController {
     return this.salesService.removeGlobalDiscount(id, user.userId);
   }
 
+  // restock-backorder / T5b — 409 STOCK_RESERVED_FOR_BACKORDER {available, reserved}.
   @Post(':id/charge')
+  @UseFilters(StockReservedForBackorderFilter)
   @RequirePermissions(['update', 'Sale'])
   chargeDraft(
     @Param('id', ParseUUIDPipe) id: string,

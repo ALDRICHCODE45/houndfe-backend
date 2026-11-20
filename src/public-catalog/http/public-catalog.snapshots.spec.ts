@@ -621,6 +621,8 @@ describe('F2.WU8 Slice 2 — documented guide contract evidence', () => {
       {} as never,
       {
         getClient: () => ({
+          // restock-backorder / T5b: product reads batch-load reserved units.
+          backorder: { groupBy: () => Promise.resolve([]) },
           variant: {
             findMany: () =>
               Promise.resolve([

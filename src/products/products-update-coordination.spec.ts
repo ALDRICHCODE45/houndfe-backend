@@ -171,6 +171,10 @@ function fixture(flags: Row = {}) {
         return Promise.resolve([] as Row[]);
       }),
     },
+    backorder: {
+      count: jest.fn(() => Promise.resolve(0)),
+      groupBy: jest.fn(() => Promise.resolve([])),
+    },
     lot: {
       findMany: jest.fn(() => {
         record('lots response');

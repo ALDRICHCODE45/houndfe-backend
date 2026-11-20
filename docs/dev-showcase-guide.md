@@ -63,6 +63,7 @@ Los endpoints son de la API; la pantalla del frontend que los consume es la de l
 | Cotizaciones Skydropx (sandbox) | credencial del bot | `POST /chatbot-api/shipping/quotes` con un CP CARRIER_ONLY (16000 o 14000) y, p. ej., las croquetas de 18 kg. Ver sección 5. | `zoneStatus: "CARRIER_ONLY"` con la opción más barata. Con 03100 sale FREE, con 06700 SURCHARGE, con 12000 DENIED y con un CP sin zona PENDING (sin llamar al transportista). Tarda ~15 s en sandbox. |
 | Comprobantes de transferencia | credencial del bot | **No hay datos de ejemplo.** Los sube el bot con `POST /chatbot-api/sales/:saleId/receipts` ([transfer-receipts.md](transfer-receipts.md)). | — |
 | Decisiones humanas (reposición / caducidad) | `manager` | `GET /human-decisions` (`ops`) | RESTOCK pendientes (hace 3 h y 30 h), aprobada (reposición en 5 días) y rechazada; EXPIRATION pendiente (hace 8 h), aprobada y rechazada. |
+| Pedidos por reposición | `manager` (leer y cancelar), `cashier` (leer) | `GET /backorders` (sección 7: se crean con un script aparte). 7 pedidos en Centro con folios `BO-…`. | Uno en cada estado: «En espera» con `passedOverCount: 1` (lo rebasó un pedido posterior que sí alcanzó) y otro en espera detrás; «Apartado» con unidades realmente apartadas (el producto muestra `reservedForBackorders: 2` y `availableToSell` ya sin ellas); «Confirmado» con su venta; «Vencido»; y dos «Cancelado» (uno del cliente y uno de personal). |
 | Compras, proveedores e inventario | `manager` | `GET /procurement/suppliers`, `GET /procurement/purchase-orders`, `GET /inventory/movements` | 5 proveedores (uno archivado: «Acuarios y Peceras del Norte»); 11 órdenes de compra con 0, 1, 2 y 4 avisos, confirmadas y canceladas; el kardex del producto de 15 kg con más de 30 movimientos. |
 | Notificaciones y correos | `manager` / `admin` | `GET /notification-config` | Activadas para `manager` y `admin`, con LOW_STOCK, TIME_OFF_REQUESTED, DELIVERY_NEXT_STOP y PROMOTION_EXPIRING encendidas; PROMOTION_NEAR_CAPACITY y DELIVERY_THANK_YOU apagadas. **No hay correos de ejemplo:** el seed configura esto al final para no enviar ninguno. |
 | Editorial de catálogo | `admin` | **No hay datos de ejemplo.** El seed no escribe documentos editoriales. Cuatro productos de Centro tienen documentos viejos (pre-V2) que se reparan con `editorial-repair.cjs` (ver README). | — |
@@ -127,3 +128,31 @@ SHOWCASE_BOT_TOKEN_FILE=.tmp/chatbot-service-token \
 - Misma protección de base local que el showcase. Imprime solo folios, ids y el estado del apartado.
 - Se puede correr de nuevo: no crea nada mientras el apartado vivo venza en más de 1 h y el vencido siga con abono parcial. Si el vivo ya está por vencer (o se cobró o canceló), crea otro; un apartado anterior que nadie cobró lo cancela el barrido al vencer (`cancelReason: "HOLD_EXPIRED"`, «Apartado vencido» en la lista).
 - El bot recibe avisos de estas ventas (`sale.pickup_extended`, `sale.pickup_expired`…) en su feed; si el bot de dev está conectado a WhatsApp, usá un teléfono de prueba en `SHOWCASE_HOLD_CUSTOMER_PHONE`.
+
+## 7. Pedidos por reposición (backorders)
+
+`pnpm seed:showcase` no crea pedidos por reposición. Para las pantallas del POS (`/pos/pedidos-reposicion`, avisos `BACKORDER_*`) hay un script aparte que, en **Sucursal Centro**, deja un pedido en cada estado:
+
+| Estado | Pedido (clave) | Qué verás |
+| --- | --- | --- |
+| `WAITING` con `passedOverCount: 1` | `waiting-head` (Rosa Mendoza, 10 uds de «Alimento Gato Senior 7 kg (demo reposición)») | El primero de la fila no alcanzó; uno posterior sí, y lo rebasó. |
+| `WAITING` | `waiting-behind` (Carmen Vidal, 4 uds, mismo producto) | En espera detrás del anterior. |
+| `RESERVED` | `reserved` (Luis Ortega, 2 uds, mismo producto) | Unidades **realmente apartadas**: hay un movimiento `BACKORDER_RESERVE` en el kardex y el producto muestra `quantity: 1`, `reservedForBackorders: 2`, `stockOnHand: 3`. Vence ~21 h después de la corrida (recordatorio ~18 h). |
+| `CONFIRMED` | `confirmed` (Jorge Salinas, 2 uds de «Shampoo Antipulgas 500 ml (demo reposición)») | Apuntando a una venta ONLINE confirmada (`A-AAAAMM-…`). Kardex: `BACKORDER_RESERVE`, `BACKORDER_RELEASE` y `SALE`. |
+| `EXPIRED` | `expired` (Marta Ibarra, 2 uds de «Collar Reflejante Mediano (demo reposición)») | Pasó el plazo de 24 h; kardex: `BACKORDER_RESERVE` y `BACKORDER_RELEASE`. |
+| `CANCELLED` | `cancelled-customer` (Pedro Aldama) y `cancelled-staff` (Elena Rojas) | Uno cancelado por el cliente («Ya lo compré en otra tienda») y otro por personal (`manager@houndfe.com`, «El proveedor descontinuó la talla»). |
+
+**Cómo corre.** Escribe directo en la base con Prisma, en una transacción por producto, las **mismas filas** que escriben el asignador, el barrido y el checkout del bot (pedido, `stock_movements` con grupo `BACKORDER`/`SALE`, `quantity` y `stockVersion` del producto). No llama a la API: el personal no puede crear pedidos (Q5), la ruta del bot necesita una credencial con `backorders:create` y una decisión RESTOCK respondida, y el estado `RESERVED` no se puede producir de forma fiable por HTTP sin esperar al barrido. La prueba `src/inventory/infrastructure/backorder-showcase.integration.spec.ts` comprueba contra PostgreSQL que las filas del kardex tienen la misma forma que las del asignador real, que el kardex cuadra con el stock y que `GET /products/:id` y `revalidateReservation` leen bien los datos.
+
+```bash
+# 1. Ver qué haría (solo lee la base; no escribe nada)
+node scripts/dev-showcase/backorders.cjs
+# 2. Crear lo que falte e imprimir los folios
+node scripts/dev-showcase/backorders.cjs --apply
+```
+
+- Requiere `pnpm seed` (sucursal `centro`, `cashier@houndfe.com`, lista PUBLICO). No necesita la API levantada, `dist/` ni la credencial del bot. Imprime folios, ids y estados; nunca contraseñas ni tokens.
+- Misma protección de base local que el showcase: se niega con `NODE_ENV=production` o contra un host que no sea local, salvo `SHOWCASE_ALLOW=1` para una base remota descartable.
+- **Idempotente.** Cada pedido tiene una clave fija (`showcase:backorder:<clave>`); uno que ya existe no se toca ni se recrea, y la historia de cada producto se escribe en una sola transacción. Una segunda corrida no crea nada. Si el `RESERVED` ya venció (el barrido de la API lo pasa a `EXPIRED` ~21 h después de la corrida, con su aviso), la corrida **no** lo reemplaza: así se ve el flujo real.
+- Crea 3 productos propios (sku `DEMO-BO-GATO`, `DEMO-BO-SHAMPOO`, `DEMO-BO-COLLAR`), 7 clientes de demostración (teléfonos ficticios `55000009xx`) y 3 decisiones RESTOCK respondidas (origen `showcase-backorders`). El kardex de los productos del catálogo de demostración no se toca.
+- No escribe avisos del bot ni notificaciones: el script no manda mensajes. Pero el barrido de la API que esté corriendo trata el `RESERVED` vivo como cualquier otro: ~18 h después encola el recordatorio al bot y ~21 h el vencimiento. Si el bot de dev está conectado a WhatsApp, esos teléfonos son ficticios (el bot reportará el aviso como no entregado y el personal recibirá la notificación correspondiente).

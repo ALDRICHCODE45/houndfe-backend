@@ -93,12 +93,14 @@ function harness(
     },
     priceList: { findMany: jest.fn(() => Promise.resolve([])) },
     productImage: { findMany: jest.fn(() => Promise.resolve([])) },
+    backorder: { groupBy: jest.fn(() => Promise.resolve([])) },
   };
   Object.assign(tx, {
     tenantCatalogPriceList: root.tenantCatalogPriceList,
     globalPriceList: root.globalPriceList,
     priceList: root.priceList,
     productImage: root.productImage,
+    backorder: root.backorder,
   });
   const tenantPrisma = {
     getTenantId: jest.fn(() => TENANT),

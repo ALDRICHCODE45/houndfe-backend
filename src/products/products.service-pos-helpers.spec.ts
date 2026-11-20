@@ -48,6 +48,10 @@ function makeMockPrisma(overrides: any = {}) {
     productImage: {
       findFirst: jest.fn(),
     },
+    backorder: {
+      count: jest.fn().mockResolvedValue(0),
+      groupBy: jest.fn().mockResolvedValue([]),
+    },
     ...overrides,
   };
 }
@@ -451,7 +455,11 @@ describe('ProductsService — POS Helpers', () => {
       ).resolves.toEqual({ available: true, currentStock: 18 });
       await expect(
         expiryAware.checkStockAvailability('prod-lots', null, 19),
-      ).resolves.toEqual({ available: false, currentStock: 18 });
+      ).resolves.toEqual({
+        available: false,
+        currentStock: 18,
+        reservedForBackorders: 0,
+      });
       expect(journal.expiredLotQuantity).toHaveBeenCalledWith('prod-lots');
     });
 
@@ -468,7 +476,11 @@ describe('ProductsService — POS Helpers', () => {
 
       await expect(
         expiryAware.checkStockAvailability('prod-lots', null, 1),
-      ).resolves.toEqual({ available: false, currentStock: 0 });
+      ).resolves.toEqual({
+        available: false,
+        currentStock: 0,
+        reservedForBackorders: 0,
+      });
     });
 
     it('does not look at lots for products that do not use stock or for variants', async () => {
@@ -537,6 +549,7 @@ describe('ProductsService — POS Helpers', () => {
       expect(result).toEqual({
         available: false,
         currentStock: 5,
+        reservedForBackorders: 0,
       });
     });
 
@@ -591,6 +604,7 @@ describe('ProductsService — POS Helpers', () => {
       expect(result).toEqual({
         available: false,
         currentStock: 5,
+        reservedForBackorders: 0,
       });
     });
 

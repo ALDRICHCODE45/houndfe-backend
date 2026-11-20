@@ -4016,6 +4016,8 @@ describe('SalesService', () => {
           { productId: 'prod-2', variantId: 'var-1', quantity: 1 },
         ],
         actor: { kind: 'user', userId: 'user-1' },
+        // restock-backorder / T5b — only the counter charge explains reserved units.
+        reservedAware: true,
       });
       expect(productsService.chargeStock).not.toHaveBeenCalled();
     });
@@ -6812,6 +6814,152 @@ describe('SalesService', () => {
       ).rejects.toThrow(/Insufficient stock/);
     });
 
+    describe('stock reserved for backorders (restock-backorder / T5b)', () => {
+      const setup = (
+        saleId: string,
+        availability: {
+          available: boolean;
+          currentStock: number | null;
+          reservedForBackorders?: number;
+        },
+        variantId: string | null = null,
+      ) => {
+        const sale = Sale.create({ id: saleId, userId: 'user-1' });
+        saleRepo.findById.mockResolvedValue(sale);
+        productsService.getProductInfoForSale.mockResolvedValue({
+          productId: 'prod-r',
+          productName: 'Croquetas',
+          variantId,
+          variantName: variantId ? 'Grande' : null,
+          unitPriceCents: 5000,
+        });
+        productsService.checkStockAvailability.mockResolvedValue(availability);
+        return sale;
+      };
+
+      it('adds the line with a non-blocking stockWarning when the quantity exceeds availableToSell but not stockOnHand', async () => {
+        setup('sale-w1', {
+          available: false,
+          currentStock: 2,
+          reservedForBackorders: 3,
+        });
+
+        const result = await service.addItem('sale-w1', 'user-1', {
+          productId: 'prod-r',
+          variantId: null,
+          quantity: 5,
+        });
+
+        expect(result.items).toHaveLength(1);
+        expect(result.items[0]).toMatchObject({
+          productId: 'prod-r',
+          quantity: 5,
+          stockWarning: {
+            code: 'STOCK_RESERVED_FOR_BACKORDER',
+            available: 2,
+            reserved: 3,
+          },
+        });
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(expect.any(Sale));
+      });
+
+      it('puts the warning on the stacked line only, not on the other lines', async () => {
+        const sale = setup('sale-w2', {
+          available: false,
+          currentStock: 2,
+          reservedForBackorders: 4,
+        });
+        sale.addItem({
+          id: 'item-other',
+          saleId: 'sale-w2',
+          productId: 'prod-other',
+          variantId: null,
+          productName: 'Otro',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 100,
+          unitPriceCurrency: 'MXN',
+        });
+
+        const result = await service.addItem('sale-w2', 'user-1', {
+          productId: 'prod-r',
+          variantId: null,
+          quantity: 5,
+        });
+
+        const other = result.items.find((i) => i.productId === 'prod-other');
+        const line = result.items.find((i) => i.productId === 'prod-r');
+        expect(other).not.toHaveProperty('stockWarning');
+        expect(line).toHaveProperty('stockWarning');
+      });
+
+      it('still rejects (422 Insufficient stock) when the quantity exceeds stockOnHand', async () => {
+        setup('sale-w3', {
+          available: false,
+          currentStock: 2,
+          reservedForBackorders: 3,
+        });
+
+        await expect(
+          service.addItem('sale-w3', 'user-1', {
+            productId: 'prod-r',
+            variantId: null,
+            quantity: 6,
+          }),
+        ).rejects.toThrow(/Insufficient stock/);
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        expect(saleRepo.saveDraftItems).not.toHaveBeenCalled();
+      });
+
+      it('still rejects when nothing is reserved (reservedForBackorders absent)', async () => {
+        setup('sale-w4', { available: false, currentStock: 2 });
+
+        await expect(
+          service.addItem('sale-w4', 'user-1', {
+            productId: 'prod-r',
+            variantId: null,
+            quantity: 3,
+          }),
+        ).rejects.toThrow(/Insufficient stock/);
+      });
+
+      it('adds no stockWarning when the stock covers the quantity', async () => {
+        setup('sale-w5', { available: true, currentStock: 10 });
+
+        const result = await service.addItem('sale-w5', 'user-1', {
+          productId: 'prod-r',
+          variantId: null,
+          quantity: 2,
+        });
+
+        expect(result.items[0]).not.toHaveProperty('stockWarning');
+      });
+
+      it('works the same for a variant line', async () => {
+        setup(
+          'sale-w6',
+          { available: false, currentStock: 1, reservedForBackorders: 2 },
+          'var-1',
+        );
+
+        const result = await service.addItem('sale-w6', 'user-1', {
+          productId: 'prod-r',
+          variantId: 'var-1',
+          quantity: 3,
+        });
+
+        expect(result.items[0]).toMatchObject({
+          variantId: 'var-1',
+          stockWarning: {
+            code: 'STOCK_RESERVED_FOR_BACKORDER',
+            available: 1,
+            reserved: 2,
+          },
+        });
+      });
+    });
+
     it('should validate cumulative stock when stacking same product+variant', async () => {
       // RED test: verify stock check uses cumulative quantity when item already exists
       const sale = Sale.create({ id: 'sale-cumulative', userId: 'user-1' });
@@ -7000,6 +7148,54 @@ describe('SalesService', () => {
   });
 
   describe('updateItemQuantity', () => {
+    it('adds the stockWarning (non-blocking) when the new quantity exceeds availableToSell but not stockOnHand (restock-backorder / T5b)', async () => {
+      const sale = Sale.create({ id: 'sale-uq-w', userId: 'user-1' });
+      sale.addItem({
+        id: 'item-uq-w',
+        saleId: 'sale-uq-w',
+        productId: 'prod-1',
+        variantId: null,
+        productName: 'Item',
+        variantName: null,
+        quantity: 1,
+        unitPriceCents: 1000,
+        unitPriceCurrency: 'MXN',
+      });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: false,
+        currentStock: 2,
+        reservedForBackorders: 3,
+      });
+
+      const result = await service.updateItemQuantity(
+        'sale-uq-w',
+        'user-1',
+        'item-uq-w',
+        { quantity: 5 },
+      );
+
+      expect(result.items[0]).toMatchObject({
+        quantity: 5,
+        stockWarning: {
+          code: 'STOCK_RESERVED_FOR_BACKORDER',
+          available: 2,
+          reserved: 3,
+        },
+      });
+
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: false,
+        currentStock: 2,
+        reservedForBackorders: 3,
+      });
+      await expect(
+        service.updateItemQuantity('sale-uq-w', 'user-1', 'item-uq-w', {
+          quantity: 6,
+        }),
+      ).rejects.toThrow(/Insufficient stock/);
+    });
+
     it('should update item quantity and emit event', async () => {
       const sale = Sale.create({ id: 'sale-4', userId: 'user-1' });
       sale.addItem({
