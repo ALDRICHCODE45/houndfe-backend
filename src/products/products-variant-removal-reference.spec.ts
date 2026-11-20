@@ -55,6 +55,8 @@ function fixture(sibling = false) {
         return Promise.resolve(pending.variants.length);
       }),
     },
+    // T8(b): the variant has no backorders (silent: the event order is asserted).
+    backorder: { count: jest.fn(() => Promise.resolve(0)) },
     product: {
       update: jest.fn(({ data }: { data: { hasVariants: boolean } }) => {
         events.push('flag');

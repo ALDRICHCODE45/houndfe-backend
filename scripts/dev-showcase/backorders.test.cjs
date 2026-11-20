@@ -13,6 +13,8 @@ const {
   idempotencyKey,
   journalPlan,
   parseArgs,
+  planStory,
+  run,
   simulateQuantity,
 } = require('./backorders.cjs');
 const { assertSafeTarget } = require('./seed.cjs');
@@ -157,6 +159,88 @@ test('parseArgs: dry run by default, --apply, nothing else', () => {
   assert.deepEqual(parseArgs([]), { apply: false });
   assert.deepEqual(parseArgs(['--apply']), { apply: true });
   assert.throws(() => parseArgs(['--force']), /unknown option/);
+});
+
+test('planStory: a new product creates the whole story; a complete one does nothing', () => {
+  const queue = PRODUCTS.find((product) => product.slug === 'queue');
+  const none = planStory(queue, new Set(), false);
+  assert.equal(none.action, 'create');
+  assert.equal(none.pending.length, queue.backorders.length);
+  const all = new Set(queue.backorders.map(idempotencyKey));
+  assert.equal(planStory(queue, all, true).action, 'none');
+});
+
+test('planStory: an existing product with missing keys is SKIPPED, never half-written (no reserve without the arrival)', () => {
+  const queue = PRODUCTS.find((product) => product.slug === 'queue');
+  const [head] = queue.backorders;
+  for (const keys of [new Set(), new Set([idempotencyKey(head)])]) {
+    const plan = planStory(queue, keys, true);
+    assert.equal(plan.action, 'skip');
+    assert.equal(plan.pending.length, queue.backorders.length - keys.size);
+    assert.match(plan.message, new RegExp(queue.sku));
+    assert.match(plan.message, /omitid|omit|skipp/i);
+    assert.match(plan.message, /reserved/);
+  }
+});
+
+/** A prisma double that records writes; `products` are the skus that already exist. */
+function fakePrisma({ products, keys }) {
+  const writes = [];
+  return {
+    writes,
+    tenant: { findUnique: async () => ({ id: 't1', slug: 'centro' }) },
+    user: { findUnique: async () => ({ id: 'u1' }) },
+    globalPriceList: { findFirst: async () => ({ id: 'g1' }) },
+    backorder: {
+      findMany: async () =>
+        keys.map((key, index) => ({
+          idempotencyKey: key,
+          folio: `BO-00000${index + 1}`,
+          status: 'WAITING',
+          id: `b${index}`,
+        })),
+    },
+    product: {
+      findFirst: async ({ where }) =>
+        products.includes(where.sku) ? { id: 'p1', name: 'x' } : null,
+    },
+    $transaction: async () => {
+      writes.push('transaction');
+      return [];
+    },
+  };
+}
+
+test('run: a partial re-run skips the broken story with a message and writes nothing for it', async () => {
+  const queue = PRODUCTS.find((product) => product.slug === 'queue');
+  const prisma = fakePrisma({
+    products: [queue.sku],
+    // Only the waiting head survived; the reserved one and the arrival are gone.
+    keys: [idempotencyKey(queue.backorders[0])],
+  });
+
+  for (const apply of [true, false]) {
+    prisma.writes.length = 0;
+    const report = await run({ prisma, now: NOW, apply });
+    assert.equal(report.skipped.length, 1);
+    assert.equal(report.skipped[0].sku, queue.sku);
+    assert.deepEqual(
+      report.skipped[0].missing,
+      queue.backorders.slice(1).map((spec) => spec.slug),
+    );
+    assert.match(report.skipped[0].message, /DEMO-BO-GATO/);
+    // The other two stories still get created (apply) or reported (dry run).
+    assert.equal(report.wouldCreate.length > 0, !apply);
+    assert.equal(
+      prisma.writes.length,
+      apply ? PRODUCTS.length - 1 : 0,
+      'only the untouched stories open a transaction',
+    );
+    assert.ok(
+      report.wouldCreate.every((row) => row.product !== queue.name),
+      'the skipped story is not announced as creatable',
+    );
+  }
 });
 
 test('refuses production and non-local databases (same guard as the showcase)', () => {

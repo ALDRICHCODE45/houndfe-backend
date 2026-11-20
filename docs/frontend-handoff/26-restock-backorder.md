@@ -129,7 +129,7 @@ Type: `src/backorders/presentation/dto/backorder-staff.response.ts:44`. All time
 | `chatbotRequestId` | The chatbot request that carried it, when the bot created it through the requests route; `null` otherwise. |
 | `productImageUrl` | The variant's image, else the product's main image, else `null`. |
 | `sourceDecisionId` | The RESTOCK decision that gave the estimate. |
-| `customer.phone` | The customer's full international number (`+525512345678`), `null` if they have none. **Not masked**: the Cashier needs it to phone the customer when the bot could not reach them (§6). `phoneCountryCode` + `phone` at the top level are the same number split (national part), kept because this object extends the bot's `BackorderBot`. |
+| `customer.phone` | The customer's full international number (`+525512345678`), `null` if they have none. **Not masked, on purpose** (owner decision 2026-11-20): the full number is shown to **anyone who holds `read:Backorder`** (Manager and Cashier by default) because the Cashier must phone the customer when the bot notice fails (`BACKORDER_NOTICE_UNDELIVERED`, §6); it is the same visibility as in Clientes. This is **different from the chatbot screens** (chat inbox, requests), where phone numbers are masked: do not copy that masking here, and do not hide the number from the Cashier. `phoneCountryCode` + `phone` at the top level are the same number split (national part), kept because this object extends the bot's `BackorderBot`. |
 | `customer.name` | First and last name joined (`Rosa Gómez`), last name omitted when empty. |
 | `branchName`, `customerFirstName` | Bot-projection fields, kept as they are. |
 
@@ -165,7 +165,7 @@ Check the result: `status === "CANCELLED"`, `version` is the old one + 1.
 
 Staff cancel, the 30-second sweep (reminder, 24 h expiry), the bot's checkout, the customer's own cancel and stock arrivals can all touch the same backorder. The backend serialises them (stock first, then the backorder row); exactly one wins and the others get a clean `409`. **On any `409`: reload that backorder (`GET /backorders/:id`), show its new state and let the user decide again.**
 
-The status is checked **before** the version: a backorder that already ended answers `BACKORDER_NOT_CANCELLABLE` (with its status) whatever `version` you sent, so you can tell the user *why* («ya fue confirmado»). `VERSION_CONFLICT` therefore always means «still cancellable, but it changed» (for example it was just reserved, or its ETA was updated).
+The status is checked **before** the version: a backorder that already ended answers `BACKORDER_NOT_CANCELLABLE` (with its status) whatever `version` you sent, so you can tell the user *why* («ya fue confirmado»). `VERSION_CONFLICT` therefore always means «still cancellable, but it changed» (for example it was just reserved, or its ETA was updated). Two people cancelling the same backorder at the same moment is not a version conflict either: the loser always gets `BACKORDER_NOT_CANCELLABLE {status: "CANCELLED"}` (it waits for the winner, then finds the backorder already cancelled), and the same holds against the sweep (`{status: "EXPIRED"}`) and the bot's checkout (`{status: "CONFIRMED"}`). Stock is released exactly once.
 
 ## 6. Staff notices (§9.5): types and where `backorderId` is
 
@@ -282,7 +282,16 @@ Both conversion requests are blocked while the product has a `WAITING` or `RESER
 
 Products without backorders, or with only `CONFIRMED`/`EXPIRED`/`CANCELLED` ones, still get variants. What the POS sends to edit variants does not change; only this error is new.
 
-Known limit: deleting a variant that has any backorder (even a finished one) is refused by the database with the generic relation error, because backorders keep their variant as history. Treat it like a variant that already has sales.
+### Variant delete: `VARIANT_HAS_BACKORDERS`
+
+`DELETE /products/:id/variants/:variantId` is refused while the variant has **any** backorder, in **any** status (`WAITING`, `RESERVED`, `CONFIRMED`, `EXPIRED`, `CANCELLED`): backorders keep their variant as history. 409, nothing changes (the variant, its stock and the inventory journal stay as they were); this replaces the generic relation error the database used to raise:
+
+```json
+{ "statusCode": 409, "error": "VARIANT_HAS_BACKORDERS",
+  "message": "La variante tiene pedidos por reposición", "timestamp": "2026-11-20T21:12:56.365Z" }
+```
+
+(`src/products/products.service.ts` `removeVariant`, error class `src/products/domain/variant-has-backorders.error.ts`.) Treat it like a variant that already has sales: the POS should offer to keep it (there is no way to delete the history). A variant **without** backorders is deleted exactly as before (`204`), even when another variant of the same product has them.
 
 ### Dev sample data and publish order
 

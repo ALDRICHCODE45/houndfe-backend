@@ -1171,30 +1171,39 @@ d('restock backorders — staff API (PostgreSQL)', () => {
       expect((await row(a.id)).status).toBe('WAITING');
     });
 
-    it('two concurrent cancels of a RESERVED backorder: one wins, one 409, one release, no deadlock', async () => {
-      const w = await world();
-      const [a] = await queue(w, [2]);
-      await adjust(w, 2);
-      const { version } = await row(a.id);
-      const results = await Promise.all([
-        cancel(w, a.id, { version }),
-        cancel(w, a.id, { version }),
-      ]);
-      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
-      const loser = results.find((r) => r.status === 409)!;
-      expect(['BACKORDER_NOT_CANCELLABLE', 'VERSION_CONFLICT']).toContain(
-        loser.body.error,
-      );
-      expect(await quantityOf(w.productId)).toBe(2);
-      const releases = await prisma.stockMovement.count({
-        where: {
-          tenantId: w.tenantId,
-          groupId: a.id,
-          type: 'BACKORDER_RELEASE',
-        },
-      });
-      expect(releases).toBe(1);
-      expect(await feedOf(a.id)).toHaveLength(2);
+    it('two concurrent cancels of a RESERVED backorder: one wins, the loser is BACKORDER_NOT_CANCELLABLE (status before version), one release, no deadlock', async () => {
+      // The loser re-reads the row under the row lock AFTER the winner committed:
+      // the status is already CANCELLED, so the status check (which precedes the
+      // version check) answers NOT_CANCELLABLE even though both sent the same
+      // (now stale) version. VERSION_CONFLICT is unreachable here.
+      for (let round = 0; round < 8; round++) {
+        const w = await world();
+        const [a] = await queue(w, [2]);
+        await adjust(w, 2);
+        const { version } = await row(a.id);
+        const results = await Promise.all([
+          cancel(w, a.id, { version }),
+          cancel(w, a.id, { version }),
+        ]);
+        expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+        const loser = results.find((r) => r.status === 409)!;
+        expect(loser.body).toEqual({
+          statusCode: 409,
+          error: 'BACKORDER_NOT_CANCELLABLE',
+          message: 'BACKORDER_NOT_CANCELLABLE',
+          status: 'CANCELLED',
+        });
+        expect(await quantityOf(w.productId)).toBe(2);
+        const releases = await prisma.stockMovement.count({
+          where: {
+            tenantId: w.tenantId,
+            groupId: a.id,
+            type: 'BACKORDER_RELEASE',
+          },
+        });
+        expect(releases).toBe(1);
+        expect(await feedOf(a.id)).toHaveLength(2);
+      }
     });
 
     it('a staff cancel racing a stock arrival keeps every unit accounted for', async () => {

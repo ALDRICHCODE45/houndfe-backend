@@ -22,9 +22,12 @@ import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { ClsService } from 'nestjs-cls';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { BackordersBotService } from '../backorders/application/backorders-bot.service';
 import { BackordersModule } from '../backorders/backorders.module';
+import { BackorderError } from '../backorders/domain/backorder-error';
 import {
   createZoneTestApp,
   disconnectWorldPrisma,
@@ -41,6 +44,7 @@ const DAY = 86_400_000;
 const GRANTS = [
   'Product:read',
   'Product:update',
+  'Product:delete',
   'Sale:read',
   'Sale:create',
   'Sale:update',
@@ -792,6 +796,285 @@ describeIfDb('restock backorder stock fields and guards (PostgreSQL)', () => {
       expect(
         await prisma.product.findUniqueOrThrow({ where: { id: p.id } }),
       ).toMatchObject({ quantity: 0 });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // T8(a): bot schedule vs product conversion (lock order)
+  // ---------------------------------------------------------------------------
+
+  describe('bot schedule vs conversion to variants (T8 a)', () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let phoneSeq = 0;
+
+    async function restockDecision(t: Tenant, productId: string) {
+      const decision = await prisma.humanDecision.create({
+        data: {
+          tenantId: t.tenantId,
+          source: 'houndfe-chatbot',
+          sourceRequestId: randomUUID(),
+          type: 'RESTOCK',
+          canonicalRequestHash: 'h'.repeat(64),
+          submittedCredentialId: 'cred',
+          branchId: t.tenantId,
+          branchName: 'Centro',
+          productId,
+          productName: 'Croquetas',
+          variantId: null,
+          status: 'RESOLVED',
+          version: 2,
+          resolutionAction: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 7,
+          resolutionRequestId: randomUUID(),
+          resolvedAt: new Date(Date.now() - DAY),
+          resolvedByActorId: 'actor',
+          resolvedByDisplayName: 'Gerente',
+        },
+      });
+      return decision.id;
+    }
+
+    /** The bot schedule of a product-level backorder (no variantId). */
+    function schedule(t: Tenant, productId: string, decisionId: string) {
+      phoneSeq += 1;
+      const cls = app.get(ClsService, { strict: false });
+      const bot = app.get(BackordersBotService, { strict: false });
+      return cls.runWith(
+        { tenantId: t.tenantId, userId: '', isSuperAdmin: false },
+        () =>
+          bot.create(
+            {
+              phoneCountryCode: '52',
+              phone: `55${String(8000000 + phoneSeq)}`,
+              customer: { mode: 'createIfAbsent', firstName: 'Rosa' },
+              productId,
+              quantity: 2,
+              sourceDecisionId: decisionId,
+            },
+            randomUUID(),
+          ),
+      );
+    }
+
+    const isDeadlock = (r: PromiseSettledResult<unknown>) =>
+      r.status === 'rejected' &&
+      /deadlock|40P01/i.test(
+        String((r.reason as Error)?.message ?? (r.reason as string)),
+      );
+
+    it('a conversion committed while the schedule waits for the product row: VARIANT_REQUIRED, no product-level backorder', async () => {
+      const t = await tenant('Centro');
+      const p = await product(t, { quantity: 0 });
+      const decisionId = await restockDecision(t, p.id);
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
+      // A conversion in flight: holds the product row FOR UPDATE, commits later.
+      const conversion = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "products" WHERE "id" = ${p.id} FOR UPDATE`;
+          locked();
+          await gate;
+          await tx.variant.create({
+            data: {
+              tenantId: t.tenantId,
+              productId: p.id,
+              name: 'Rojo',
+              quantity: 0,
+            },
+          });
+          await tx.product.update({
+            where: { id: p.id },
+            data: { hasVariants: true },
+          });
+        },
+        { timeout: 20_000 },
+      );
+      await lockedSignal;
+
+      const scheduled = schedule(t, p.id, decisionId).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await sleep(500); // the schedule is now past (or waiting at) its product read
+      release();
+      await conversion;
+      const outcome = await scheduled;
+
+      expect(outcome).toHaveProperty('error');
+      const { error } = outcome as { error: BackorderError };
+      expect(error).toBeInstanceOf(BackorderError);
+      expect(error.code).toBe('VARIANT_REQUIRED');
+      expect(await prisma.backorder.count({ where: { productId: p.id } })).toBe(
+        0,
+      );
+    });
+
+    it('schedule vs POST /products/:id/variants, many interleavings: never a product-level backorder on a product with variants, no deadlock', async () => {
+      const t = await tenant('Centro');
+      const delays = [0, 0, 1, 2, 3, 5, 8, 12, 18, 25, 35, 50];
+      const wins = { scheduled: 0, converted: 0 };
+      for (let round = 0; round < 24; round++) {
+        const p = await product(t, { quantity: 0 });
+        const decisionId = await restockDecision(t, p.id);
+        const delay = delays[round % delays.length];
+        const botFirst = round % 2 === 0;
+
+        const results = await Promise.allSettled([
+          sleep(botFirst ? 0 : delay).then(() => schedule(t, p.id, decisionId)),
+          sleep(botFirst ? delay : 0).then(() =>
+            send(t, 'post', `/products/${p.id}/variants`, { name: 'Rojo' }),
+          ),
+        ]);
+
+        expect(results.filter(isDeadlock)).toEqual([]);
+        const [bot, conversion] = results;
+        const converted =
+          conversion.status === 'fulfilled' && conversion.value.status === 201;
+        if (bot.status === 'rejected') {
+          expect((bot.reason as BackorderError).code).toBe('VARIANT_REQUIRED');
+          expect(converted).toBe(true);
+        } else {
+          expect(converted).toBe(false);
+          expect(
+            (conversion as PromiseFulfilledResult<request.Response>).value.body
+              .error,
+          ).toBe('PRODUCT_HAS_ACTIVE_BACKORDERS');
+        }
+        const stored = await prisma.product.findUniqueOrThrow({
+          where: { id: p.id },
+        });
+        const productLevel = await prisma.backorder.count({
+          where: { productId: p.id, variantId: null },
+        });
+        expect(stored.hasVariants && productLevel > 0).toBe(false);
+        wins[bot.status === 'fulfilled' ? 'scheduled' : 'converted'] += 1;
+      }
+      expect(wins.scheduled + wins.converted).toBe(24);
+      // Evidence of the interleavings that happened (read in the test output).
+      console.log(`schedule-vs-conversion outcomes: ${JSON.stringify(wins)}`);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // T8(b): variant delete with backorders
+  // ---------------------------------------------------------------------------
+
+  describe('DELETE /products/:id/variants/:variantId with backorders (VARIANT_HAS_BACKORDERS)', () => {
+    const remove = (t: Tenant, productId: string, variantId: string) =>
+      request(server())
+        .delete(`/products/${productId}/variants/${variantId}`)
+        .set('Authorization', `Bearer ${t.member.token}`);
+
+    it.each([
+      'WAITING',
+      'RESERVED',
+      'EXPIRED',
+      'CANCELLED',
+      'CONFIRMED',
+    ] as const)(
+      'a %s backorder of the variant → 409 VARIANT_HAS_BACKORDERS, nothing changes',
+      async (status) => {
+        const t = await tenant('Centro');
+        const p = await product(t, {
+          variants: [
+            { name: 'Rojo', quantity: 4 },
+            { name: 'Azul', quantity: 1 },
+          ],
+        });
+        const extra: Partial<Prisma.BackorderUncheckedCreateInput> = {};
+        if (status === 'CONFIRMED') {
+          const sale = await prisma.sale.create({
+            data: {
+              tenantId: t.tenantId,
+              userId: t.member.userId,
+              status: 'CONFIRMED',
+              channel: 'POS',
+              deliveryStatus: 'PENDING',
+              paymentStatus: 'CREDIT',
+              folio: `V-${randomUUID().slice(0, 8)}`,
+              confirmedAt: new Date(),
+              subtotalCents: 1000,
+              totalCents: 1000,
+              debtCents: 1000,
+            },
+          });
+          Object.assign(extra, {
+            saleId: sale.id,
+            confirmedAt: new Date(),
+            reservedAt: new Date(),
+            reservedUntil: new Date(Date.now() + DAY),
+            reminderAt: new Date(Date.now() + DAY - 3 * 3_600_000),
+            currentPriceCents: 1000,
+            finalPriceCents: 1000,
+          });
+        }
+        await backorder(t, p.id, {
+          customerIndex: 0,
+          status,
+          variantId: p.variantIds[0],
+          ...extra,
+        });
+
+        const response = await remove(t, p.id, p.variantIds[0]);
+
+        expect(response.status).toBe(409);
+        expect(response.body).toEqual({
+          statusCode: 409,
+          error: 'VARIANT_HAS_BACKORDERS',
+          message: 'La variante tiene pedidos por reposición',
+          timestamp: expect.any(String),
+        });
+        expect(await prisma.variant.count({ where: { productId: p.id } })).toBe(
+          2,
+        );
+        expect(
+          await prisma.variant.findUniqueOrThrow({
+            where: { id: p.variantIds[0] },
+          }),
+        ).toMatchObject({ quantity: 4 });
+        expect(
+          await prisma.stockMovement.count({ where: { productId: p.id } }),
+        ).toBe(0);
+        expect(
+          await prisma.product.findUniqueOrThrow({ where: { id: p.id } }),
+        ).toMatchObject({ hasVariants: true });
+      },
+    );
+
+    it('a variant without backorders deletes exactly as before (another variant has them); the last one clears hasVariants', async () => {
+      const t = await tenant('Centro');
+      const p = await product(t, {
+        variants: [
+          { name: 'Rojo', quantity: 0 },
+          { name: 'Azul', quantity: 0 },
+        ],
+      });
+      await backorder(t, p.id, {
+        customerIndex: 0,
+        status: 'WAITING',
+        variantId: p.variantIds[0],
+      });
+
+      const free = await remove(t, p.id, p.variantIds[1]);
+
+      expect(free.status).toBe(204);
+      expect(
+        await prisma.variant.findMany({ where: { productId: p.id } }),
+      ).toEqual([expect.objectContaining({ id: p.variantIds[0] })]);
+      expect(
+        await prisma.product.findUniqueOrThrow({ where: { id: p.id } }),
+      ).toMatchObject({ hasVariants: true });
+
+      const q = await product(t, {
+        variants: [{ name: 'Verde', quantity: 0 }],
+      });
+      expect((await remove(t, q.id, q.variantIds[0])).status).toBe(204);
+      expect(
+        await prisma.product.findUniqueOrThrow({ where: { id: q.id } }),
+      ).toMatchObject({ hasVariants: false });
     });
   });
 });

@@ -52,7 +52,9 @@ import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
+import { BackordersStaffService } from './application/backorders-staff.service';
 import { BackordersModule } from './backorders.module';
+import { BackorderError } from './domain/backorder-error';
 import { BACKORDER_SCOPES } from './domain/backorder-scopes';
 import { BackorderSweepScheduler } from './infrastructure/backorder-sweep.scheduler';
 
@@ -87,6 +89,7 @@ d('backorder checkout — sale.items[i].backorderId (PostgreSQL)', () => {
   let writer: StockJournalWriter;
   let sweep: BackorderSweepScheduler;
   let sales: SalesService;
+  let staffBackorders: BackordersStaffService;
 
   beforeAll(async () => {
     const existingDefault = await prisma.globalPriceList.findFirst({
@@ -147,6 +150,7 @@ d('backorder checkout — sale.items[i].backorderId (PostgreSQL)', () => {
     writer = get(StockJournalWriter);
     sweep = get(BackorderSweepScheduler);
     sales = get(SalesService);
+    staffBackorders = get(BackordersStaffService);
   });
 
   /**
@@ -1245,6 +1249,150 @@ d('backorder checkout — sale.items[i].backorderId (PostgreSQL)', () => {
         await expectOneWinner(w, a, checkout.status, 'CANCELLED');
         await dropTenants();
       }
+    });
+
+    /**
+     * POS cancel (`POST /backorders/:id/cancel`) through the real service with
+     * the version the POS saw. A domain refusal is a value (never a throw), any
+     * other failure (a deadlock, a 500) rejects.
+     */
+    const staffCancel = (w: World, b: { id: string; version: number }) =>
+      inTenant(w, () =>
+        staffBackorders.cancel(
+          b.id,
+          { reason: 'sin stock', version: b.version },
+          w.staffId,
+        ),
+      ).then(
+        () => ({ status: 200 as const, code: null, details: {} }),
+        (error: unknown) => {
+          if (error instanceof BackorderError) {
+            return {
+              status: error.status,
+              code: error.code,
+              details: error.details,
+            };
+          }
+          throw error;
+        },
+      );
+
+    const staffCancelCount = async (w: World, id: string) =>
+      (await feed(w, 'backorder.cancelled_by_staff', id)).length;
+
+    it('staff cancel vs the sweep expiring the same reservation: exactly one wins, one release, loser answers NOT_CANCELLABLE {EXPIRED} (several interleavings)', async () => {
+      const wins = { staff: 0, sweep: 0 };
+      for (const [round, delay] of [
+        0, 0, 2, 5, 9, 14, 20, 30, 45, 60, 0, 2, 5, 9, 14, 20,
+      ].entries()) {
+        const w = await world();
+        const a = await reserved(w, 2);
+        // Even rounds start the staff cancel first, odd rounds the sweep.
+        const staffFirst = round % 2 === 0;
+
+        const results = await Promise.allSettled([
+          sleep(staffFirst ? 0 : delay).then(() => staffCancel(w, a)),
+          sleep(staffFirst ? delay : 0).then(() => sweep.tick(FAR())),
+        ]);
+
+        expect(deadlocks(results)).toEqual([]);
+        expect(results.map((r) => r.status)).toEqual([
+          'fulfilled',
+          'fulfilled',
+        ]);
+        const staff = (
+          results[0] as PromiseFulfilledResult<{
+            status: number;
+            code: string | null;
+            details: object;
+          }>
+        ).value;
+        const final = await backorder(a.id);
+        const rows = await movements(w);
+        // Exactly one release, units back on the shelf once, no sale.
+        expect(count(rows, 'BACKORDER_RELEASE')).toBe(1);
+        expect(sum(rows, 'BACKORDER_RELEASE')).toBe(a.quantity);
+        expect(await quantityOf(w.productId)).toBe(a.quantity);
+        expect(count(rows, 'SALE')).toBe(0);
+        if (staff.status === 200) {
+          wins.staff += 1;
+          expect(final).toMatchObject({
+            status: 'CANCELLED',
+            cancelledByKind: 'STAFF',
+            cancelledByUserId: w.staffId,
+            version: a.version + 1,
+          });
+          expect(await staffCancelCount(w, a.id)).toBe(1);
+          expect(await feed(w, 'backorder.reservation_expired', a.id)).toEqual(
+            [],
+          );
+        } else {
+          wins.sweep += 1;
+          // Status before version: the sweep bumped the version, yet the answer
+          // is NOT_CANCELLABLE, never VERSION_CONFLICT.
+          expect(staff).toEqual({
+            status: 409,
+            code: 'BACKORDER_NOT_CANCELLABLE',
+            details: { status: 'EXPIRED' },
+          });
+          expect(final.status).toBe('EXPIRED');
+          expect(await staffCancelCount(w, a.id)).toBe(0);
+          expect(
+            await feed(w, 'backorder.reservation_expired', a.id),
+          ).toHaveLength(1);
+        }
+        await dropTenants();
+      }
+      expect(wins.staff + wins.sweep).toBe(16);
+      console.log(`staff cancel vs sweep outcomes: ${JSON.stringify(wins)}`);
+    });
+
+    it('staff cancel vs the bot checkout of the same reservation: exactly one wins, no double release or charge, no deadlock (several interleavings)', async () => {
+      const wins = { checkout: 0, staff: 0 };
+      for (const delay of [0, 0, 2, 5, 9, 14, 20, 30, 45, 60]) {
+        const w = await world();
+        const a = await reserved(w, 2);
+
+        const results = await Promise.allSettled([
+          confirm(w, a),
+          sleep(delay).then(() => staffCancel(w, a)),
+        ]);
+
+        expect(deadlocks(results)).toEqual([]);
+        expect(results.map((r) => r.status)).toEqual([
+          'fulfilled',
+          'fulfilled',
+        ]);
+        const checkout = (
+          results[0] as PromiseFulfilledResult<request.Response>
+        ).value;
+        const staff = (
+          results[1] as PromiseFulfilledResult<{
+            status: number;
+            code: string | null;
+            details: object;
+          }>
+        ).value;
+        if (checkout.status === 201) {
+          expect(staff).toEqual({
+            status: 409,
+            code: 'BACKORDER_NOT_CANCELLABLE',
+            details: { status: 'CONFIRMED' },
+          });
+          expect(await staffCancelCount(w, a.id)).toBe(0);
+        } else {
+          expectError(checkout, 409, 'BACKORDER_NOT_RESERVED', {
+            status: 'CANCELLED',
+          });
+          expect(staff.status).toBe(200);
+          expect(await staffCancelCount(w, a.id)).toBe(1);
+        }
+        await expectOneWinner(w, a, checkout.status, 'CANCELLED');
+        wins[checkout.status === 201 ? 'checkout' : 'staff'] += 1;
+        await dropTenants();
+      }
+      expect(wins.checkout + wins.staff).toBe(10);
+      console.log(`staff cancel vs checkout outcomes: ${JSON.stringify(wins)}`);
     });
 
     it('two checkouts of the same backorder (different keys): one sale, one CONFIRMED, one NOT_RESERVED', async () => {

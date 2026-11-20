@@ -33,7 +33,17 @@
 // Idempotent: every backorder has a fixed idempotency key
 // (`showcase:backorder:<slug>`); one that exists is never touched or recreated,
 // and a product story is written in one transaction, so a re-run creates
-// nothing once the stories exist. Env: DATABASE_URL (from .env). Same
+// nothing once the stories exist.
+//
+// Partial re-run (T8 d): a story is only ever created WHOLE, together with its
+// product and its arrival, because every reserve/release step assumes the
+// arrival's units are on the shelf. If a story's product (sku DEMO-BO-*) already
+// exists but some of its backorder keys are missing (someone deleted a
+// backorder, or the product was made by hand), the story is SKIPPED, in the dry
+// run too: nothing is written for it and the output says so with a `⚠` line and
+// in `report.skipped` (sku, missing slugs). The script never deletes anything,
+// so recreating it is the operator's call: remove the product's demo backorders
+// and the product (or the whole dev database) and re-run. Env: DATABASE_URL (from .env). Same
 // local-database guard as the showcase (`SHOWCASE_ALLOW=1` only for a
 // disposable remote database). Prints folios, ids and states only.
 'use strict';
@@ -509,6 +519,31 @@ async function createSale(tx, ctx, spec, refs, backorderColumnsForSale) {
   return sale;
 }
 
+/**
+ * What to do with one product story (pure). `create`: the product does not
+ * exist yet, write the whole story (product, arrival, every backorder).
+ * `none`: every key exists. `skip`: the product exists but some keys are
+ * missing, so the arrival cannot be recreated consistently (T8 d); the story is
+ * left alone and `message` tells the operator why.
+ */
+function planStory(product, existingKeys, productExists) {
+  const pending = product.backorders.filter(
+    (spec) => !existingKeys.has(idempotencyKey(spec)),
+  );
+  if (pending.length === 0) return { action: 'none', pending };
+  if (!productExists) return { action: 'create', pending };
+  const missing = pending.map((spec) => spec.slug).join(', ');
+  return {
+    action: 'skip',
+    pending,
+    message:
+      `Historia omitida: el producto ${product.sku} ya existe pero faltan ` +
+      `pedidos de ejemplo (${missing}). No se escribe nada para no dejar ` +
+      `reservas sin su llegada de stock. Borra el producto de ejemplo y sus ` +
+      `pedidos DEMO-BO (o la base de desarrollo) y vuelve a ejecutar.`,
+  };
+}
+
 /** One transaction per product story. Returns the report rows of that story. */
 async function writeStory(prisma, ctx, product, existingKeys) {
   const pending = product.backorders.filter(
@@ -523,6 +558,12 @@ async function writeStory(prisma, ctx, product, existingKeys) {
         product,
         ctx.defaultListId,
       );
+      if (!productRow.isNew) {
+        // Appeared after `planStory` read: never write reserves without the arrival.
+        throw new Error(
+          `product ${product.sku} appeared while the story was planned: re-run`,
+        );
+      }
       const decision = await ensureDecision(
         tx,
         ctx.tenantId,
@@ -666,12 +707,29 @@ async function run({
     })),
     created: [],
     wouldCreate: [],
+    skipped: [],
   };
   for (const product of PRODUCTS) {
-    const pending = product.backorders.filter(
-      (spec) => !existingKeys.has(idempotencyKey(spec)),
+    const productExists =
+      (await prisma.product.findFirst({
+        where: { tenantId: ctx.tenantId, sku: product.sku },
+        select: { id: true },
+      })) !== null;
+    const { action, pending, message } = planStory(
+      product,
+      existingKeys,
+      productExists,
     );
-    if (pending.length === 0) continue;
+    if (action === 'none') continue;
+    if (action === 'skip') {
+      report.skipped.push({
+        sku: product.sku,
+        product: product.name,
+        missing: pending.map((spec) => spec.slug),
+        message,
+      });
+      continue;
+    }
     if (!apply) {
       report.wouldCreate.push(
         ...pending.map((spec) => ({
@@ -704,13 +762,18 @@ async function main() {
       console.log('Dry run (nothing written). Re-run with --apply to create:');
     }
     console.log(JSON.stringify(report, null, 2));
+    for (const row of report.skipped) console.log(`⚠ ${row.message}`);
     for (const row of report.created) {
       console.log(
         `✓ ${row.folio}  ${row.status.padEnd(9)} ${row.product} ×${row.quantity}${row.sale ? `  venta ${row.sale}` : ''}`,
       );
     }
     if (args.apply && report.created.length === 0) {
-      console.log('Nothing to create: every sample backorder already exists.');
+      console.log(
+        report.skipped.length > 0
+          ? 'Nothing created: see the skipped stories above.'
+          : 'Nothing to create: every sample backorder already exists.',
+      );
     }
   } finally {
     await prisma.$disconnect();
@@ -733,6 +796,7 @@ module.exports = {
   idempotencyKey,
   journalPlan,
   parseArgs,
+  planStory,
   run,
   simulateQuantity,
 };

@@ -303,6 +303,21 @@ export class BackordersBotService {
     requestHash: string,
   ): Promise<BackorderBot> {
     const variantId = intent.variantId ?? null;
+    // T8(a): the product row is locked FOR SHARE BEFORE hasVariants / the variant
+    // are read and before the insert. Product conversion (`addVariant`,
+    // `update` with hasVariants) and `removeVariant` hold it FOR UPDATE, so the
+    // schedule either runs entirely before the conversion (which then sees the
+    // new backorder and answers PRODUCT_HAS_ACTIVE_BACKORDERS) or entirely after
+    // it (this read sees hasVariants=true and answers VARIANT_REQUIRED). SHARE,
+    // not UPDATE: schedules of the same product do not serialise each other and
+    // nothing later in this transaction asks for a stronger lock on the row (no
+    // upgrade deadlock). Lock order: advisory key lock (try) → product row →
+    // phone / active-backorder advisory locks → folio counter; the journal
+    // order (products → lots → variants) is never inverted because this
+    // transaction takes no lot/variant locks.
+    await tx.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId} AND "id" = ${intent.productId} FOR SHARE`,
+    );
     const product = await tx.product.findFirst({
       where: { id: intent.productId, tenantId },
       select: {

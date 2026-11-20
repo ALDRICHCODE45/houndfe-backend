@@ -3223,6 +3223,8 @@ describe('ProductsService — remaining variant tenant-scope hardening (F1.WU4d2
       $executeRaw: jest.fn().mockResolvedValue(0),
       $queryRaw: jest.fn().mockResolvedValue([{ id: PRODUCT_ID }]),
       product: { update: jest.fn().mockResolvedValue(undefined) },
+      // T8(b): no backorder references the variant.
+      backorder: { count: jest.fn().mockResolvedValue(0) },
       variant: {
         findFirst: jest.fn().mockResolvedValue(tenantVariantRow),
         delete: jest.fn().mockResolvedValue(tenantVariantRow),

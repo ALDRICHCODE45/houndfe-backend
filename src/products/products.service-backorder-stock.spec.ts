@@ -640,3 +640,56 @@ describe('ProductsService — variant block (PRODUCT_HAS_ACTIVE_BACKORDERS)', ()
     expect(tx.backorder.count).not.toHaveBeenCalled();
   });
 });
+
+describe('ProductsService.removeVariant — backorders (VARIANT_HAS_BACKORDERS, T8 b)', () => {
+  function removeFixture(backorders: number) {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: PLAIN }]),
+      backorder: { count: jest.fn().mockResolvedValue(backorders) },
+      variant: {
+        findFirst: jest.fn().mockResolvedValue({ id: V1 }),
+        delete: jest.fn().mockResolvedValue({ id: V1 }),
+        count: jest.fn().mockResolvedValue(1),
+      },
+      product: { update: jest.fn() },
+    };
+    const made = makeService(tx);
+    return { ...made, tx };
+  }
+
+  it.each([1, 5])(
+    '%i backorder(s) of the variant (any status) → 409, nothing journaled, deleted or flagged',
+    async (backorders) => {
+      const { service, tx, stockJournal } = removeFixture(backorders);
+
+      const result = service.removeVariant(PLAIN, V1);
+
+      await expect(result).rejects.toBeInstanceOf(EntityAlreadyExistsError);
+      await expect(result).rejects.toMatchObject({
+        code: 'VARIANT_HAS_BACKORDERS',
+        message: 'La variante tiene pedidos por reposición',
+      });
+      // Every status counts: the filter names the tenant and the variant only.
+      expect(tx.backorder.count).toHaveBeenCalledWith({
+        where: { tenantId: TENANT, variantId: V1 },
+      });
+      expect(stockJournal.removeVariantStock).not.toHaveBeenCalled();
+      expect(tx.variant.delete).not.toHaveBeenCalled();
+      expect(tx.product.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a variant without backorders is journaled and deleted exactly as before', async () => {
+    const { service, tx, stockJournal } = removeFixture(0);
+
+    await service.removeVariant(PLAIN, V1);
+
+    expect(stockJournal.removeVariantStock).toHaveBeenCalledWith(
+      PLAIN,
+      V1,
+      'VARIANT_DELETED',
+    );
+    expect(tx.variant.delete).toHaveBeenCalledTimes(1);
+  });
+});

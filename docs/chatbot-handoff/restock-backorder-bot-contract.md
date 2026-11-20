@@ -115,7 +115,7 @@ Errors have a code-only body `{ "statusCode", "error", "message" }` with `error 
 | 409 | `SOURCE_DECISION_NOT_ESTIMATED` | the decision is pending or was answered "estimate unavailable" |
 | 404 | `PRODUCT_NOT_FOUND` / `VARIANT_NOT_FOUND` / `SOURCE_DECISION_NOT_FOUND` / `CUSTOMER_NOT_FOUND` | `SOURCE_DECISION_NOT_FOUND` also covers a decision of another sucursal, another type (EXPIRATION) or another product/variant |
 | 404 | `CHATBOT_REQUEST_NOT_FOUND` | `chatbotRequestId` does not belong to the sucursal |
-| 422 | `VARIANT_REQUIRED` / `VARIANT_NOT_OF_PRODUCT` | the product has variants and none was sent / the variant belongs to another product (or the product has no variants) |
+| 422 | `VARIANT_REQUIRED` / `VARIANT_NOT_OF_PRODUCT` | the product has variants and none was sent / the variant belongs to another product (or the product has no variants). `VARIANT_REQUIRED` also answers when staff converted the product to variants between your catalog read and this `POST` (the product row is locked before the check): re-read the product in the catalog, pick a variant and retry with a new key. A product-level backorder is never created on a product that has variants |
 | 422 | `PRICE_UNAVAILABLE` | the product/variant has no catalog price for the customer; nothing to quote |
 | 409 | `CUSTOMER_PHONE_AMBIGUOUS`, `IDEMPOTENCY_KEY_IN_FLIGHT`, `IDEMPOTENCY_KEY_CONFLICT` | as checkout |
 

@@ -39,6 +39,7 @@ import {
   type ReservedStockIndex,
 } from '../inventory/infrastructure/backorder-reserved-stock';
 import { ProductHasActiveBackordersError } from './domain/product-has-active-backorders.error';
+import { VariantHasBackordersError } from './domain/variant-has-backorders.error';
 import {
   assertNoDirectQuantityEdit,
   LotHasStockError,
@@ -1523,6 +1524,12 @@ export class ProductsService {
       });
       if (!variant) throw new EntityNotFoundError('Variant', variantId);
 
+      // restock-backorder T8(b): a backorder in ANY status keeps its variant as
+      // history (FK RESTRICT). Refuse with a domain 409 before writing anything.
+      // The product row is locked above and the bot schedule locks it FOR SHARE
+      // before inserting, so no backorder can appear between this check and the delete.
+      await this.assertNoVariantBackorders(tenantId, variantId);
+
       await this.stockJournal.removeVariantStock(
         productId,
         variantId,
@@ -2266,8 +2273,10 @@ export class ProductsService {
    * restock-backorder / L8 L13 — a product with a WAITING or RESERVED
    * product-level backorder (`variantId` null) cannot get its first variant: the
    * backorder would be stranded. Caller holds the product row lock inside the
-   * ambient transaction (the backorder insert's FK takes KEY SHARE on that row,
-   * so a concurrent schedule is ordered against this check).
+   * ambient transaction. The bot schedule locks that row FOR SHARE before it
+   * validates and inserts (T8 a), so a concurrent schedule is ordered against
+   * this check: it either commits first (and is counted here) or runs after the
+   * conversion (and answers VARIANT_REQUIRED).
    */
   private async assertNoActiveProductBackorders(
     productId: string,
@@ -2281,6 +2290,17 @@ export class ProductsService {
       },
     });
     if (active > 0) throw new ProductHasActiveBackordersError();
+  }
+
+  /** T8(b): any backorder (every status) of the variant blocks its deletion. */
+  private async assertNoVariantBackorders(
+    tenantId: string,
+    variantId: string,
+  ): Promise<void> {
+    const count = await this.tenantPrisma.getClient().backorder.count({
+      where: { tenantId, variantId },
+    });
+    if (count > 0) throw new VariantHasBackordersError();
   }
 
   /** Product plus variant units; the product row is already locked by the caller. */
