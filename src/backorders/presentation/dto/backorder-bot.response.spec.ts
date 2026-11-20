@@ -27,12 +27,31 @@ const source = (
   cancelReason: null,
   product: { name: 'Croquetas Adulto Raza Grande 18 kg' },
   variant: null,
-  customer: { firstName: 'Rosa' },
+  customer: { firstName: 'Rosa', phoneCountryCode: '52', phone: '5512348801' },
   tenant: { name: 'Centro' },
   ...over,
 });
 
 describe('toBackorderBot (§6.5)', () => {
+  it('carries the customer phone (the checkout phone lock key), null when the customer has none', () => {
+    expect(toBackorderBot(source(), 1)).toMatchObject({
+      phoneCountryCode: '52',
+      phone: '5512348801',
+    });
+    expect(
+      toBackorderBot(
+        source({
+          customer: {
+            firstName: 'Rosa',
+            phoneCountryCode: null,
+            phone: null,
+          },
+        }),
+        1,
+      ),
+    ).toMatchObject({ phoneCountryCode: null, phone: null });
+  });
+
   it('projects exactly the BackorderBot members, with ISO timestamps', () => {
     expect(toBackorderBot(source(), 3)).toEqual({
       id: 'bo-1',
@@ -59,6 +78,8 @@ describe('toBackorderBot (§6.5)', () => {
       cancelReason: null,
       branchName: 'Centro',
       customerFirstName: 'Rosa',
+      phoneCountryCode: '52',
+      phone: '5512348801',
     });
   });
 

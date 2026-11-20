@@ -165,7 +165,8 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
   "queuePosition": 3, "saleId": null,
   "sourceDecisionId": "uuid",
   "cancelledByKind": null, "cancelReason": null, "branchName": "Centro",
-  "customerFirstName": "Rosa"
+  "customerFirstName": "Rosa",
+  "phoneCountryCode": "52", "phone": "5512349901"
 }
 ```
 
@@ -174,6 +175,7 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 - `sourceDecisionId` (T4, additive): the RESTOCK decision the backorder was scheduled from, in every status. To reschedule after `EXPIRED` / `CANCELLED` repeat `POST /chatbot-api/backorders` with this same id (§6.1). It is the decision you sent, never the server's re-estimate decision of §8.
 - `cancelledByKind`: `CUSTOMER` (T1) or `STAFF` (T5). `cancelReason` is what was sent (≤280).
 - `productName`, `variantName`, `branchName` and `customerFirstName` are read live (the current names).
+- `phoneCountryCode` and `phone` (T4b, additive): the customer's phone, exactly the pair the bot checkout locks on (`customers.phoneCountryCode` / `phone`), or `null` / `null` when the customer has none. They let you reach the customer when a feed item arrives with `conversationRef: null`, without asking again. They are the phone of **this backorder's own customer** and nothing else, and appear wherever a `BackorderBot` does (create, `GET :id`, list, cancel: each under the scope of its route) and in every `backorder.*` feed item (§10); never in any other payload.
 - **Timestamps are ISO 8601 in UTC with `Z`** (`toISOString()`), like every other bot payload today (`holdUntil`, `reminderAt` of the pay-in-store hold, feed items). The approved proposal asked for an offset (`-06:00`); the backend keeps UTC `Z` for every backorder payload, feed items included, for consistency. Convert to local time on your side with the sucursal's time zone (America/Mexico_City).
 
 ## 5. Price (D1) — reference price live in T1, the rest in T2 (live)
@@ -244,6 +246,8 @@ A refused checkout writes no sale, no receipt and charges nothing: the same `X-I
 
 **Races.** Against the 24 h sweep, a customer cancel and the arrival allocator, a reservation is taken by exactly one of them: if the checkout commits first the sweep and the cancel find a `CONFIRMED` backorder (the cancel answers `409 BACKORDER_NOT_CANCELLABLE {status: "CONFIRMED"}`); if the expiry or the cancel commits first the checkout answers `BACKORDER_NOT_RESERVED {status: "EXPIRED" | "CANCELLED"}`. Nothing is charged twice.
 
+**Home delivery with a backorder line and an ordinary line of the same product:** quote the product once with the summed quantity (`POST /chatbot-api/shipping-quotes` refuses repeated lines, `DUPLICATE_CART_LINE`); the checkout sends the two lines separately and the quote binding sums quantities per `(productId, variantId)` before comparing, so it validates (no `SHIPPING_QUOTE_MISMATCH [LINES]`).
+
 Mixed carts, shipping or pickup and the pay-in-store hold (`PATCH /chatbot-api/sales/:saleId/payment-intent`) work unchanged. If that sale is later cancelled or its hold expires, the units return to the general stock (`reverseSale`) and the next `WAITING` backorder is reserved (§4). The `CONFIRMED` backorder stays `CONFIRMED`.
 
 ## 8. Overdue ETA (D6) — **T4, live**
@@ -263,13 +267,13 @@ What you receive, and when. **Nothing, until staff answer.** When a `WAITING` ba
 - `eta_unavailable`: staff have **no confirmed date**. It does not mean «never»: the backorder stays `WAITING` in its place and is reserved as soon as stock arrives (you will get `backorder.reserved`). Offer to keep waiting or cancel (`POST …/cancel`).
 - Skipped without a message: a backorder that became `RESERVED`, `CONFIRMED`, `CANCELLED` or `EXPIRED` before staff answered (a reserved customer already has a real date: the reservation). If a reservation is lost (`backorder.reservation_lost`) and the backorder returns to `WAITING` still attached to an already answered question, the next sweep tick applies that answer to it and you get the eta item then (so the customer is never left with a stale past date without a message).
 - **Only once per backorder** (`etaStage` 0 → 1 → 2): after the answer there is no second automatic re-estimate. If its (new) `estimatedAt` passes too, nothing is sent; the staff list flags it as overdue (T5).
-- **No generic `request.answered`.** The staff-side request that carries the question is created by the server with no customer and no conversation and is staff-only: you never get a `request.answered` for it (only the two items above). Your own RESTOCK requests (`POST /chatbot-api/requests`) are unchanged: staff answers still arrive as `request.answered`.
+- **No generic `request.answered`, and the question never reaches you.** The staff-side request that carries the question is created by the server with no customer and no conversation and is staff-only (`context.origin = "BACKORDER_REESTIMATE"`): you never get a `request.answered` for it, **whichever screen staff answer it from** (the request inbox, `POST /chatbot-requests/:id/resolve`, or the human-decisions screen, `POST /human-decisions/:id/resolve`), and it is **never listed by the request recovery read** (`GET /chatbot-api/requests?status=open`, with or without `updatedSince`) nor served by the feed. Only the two items above reach you. Your own RESTOCK requests (`POST /chatbot-api/requests`) are unchanged: staff answers still arrive as `request.answered`.
 - **No expiry.** A RESTOCK decision has no expiry or cancel path: if staff never answer, the question stays pending, the backorders stay `WAITING` and you hear nothing. (If every attached backorder is cancelled meanwhile the question stays open for staff until they answer it; the answer then affects nobody.)
 - Both items follow §10 (ACK, `deliveryId` dedupe, `PROVIDER_REJECTED` is only recorded). `version` in the payload is the **bumped** version, so a retry or a second backend replica never repeats the item.
 
-Staff-facing note (POS): the server-created question is a normal RESTOCK request in the staff inbox. It is recognised by its summary **«Reposición vencida: <producto>»** and `context.origin = "BACKORDER_REESTIMATE"` on the request (no customer, no conversation, never claimed by the bot). It is answered with the usual actions (`PROVIDE_RESTOCK_ESTIMATE` with the days, or `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE`); the decision list (`GET /human-decisions`) shows it like any RESTOCK, without quantity or stock snapshot, and does not expose its origin. Answer it from the human-decisions screen (`POST /human-decisions/:id/resolve`); that route is the one that guarantees no generic `request.answered` for the bot. (If you ever receive a `request.answered` for a request id you never created, ACK it `STALE`: it is not one of your requests.)
+Staff-facing note (POS): the server-created question is a normal RESTOCK request in the staff inbox. It is recognised by its summary **«Reposición vencida: <producto>»** and `context.origin = "BACKORDER_REESTIMATE"` on the request (no customer, no conversation, never claimed by the bot). It is answered with the usual actions (`PROVIDE_RESTOCK_ESTIMATE` with the days, or `REPORT_RESTOCK_ESTIMATE_UNAVAILABLE`); the decision list (`GET /human-decisions`) shows it like any RESTOCK, without quantity or stock snapshot, and does not expose its origin. It can be answered from the request inbox (`POST /chatbot-requests/:id/resolve`) or from the human-decisions screen (`POST /human-decisions/:id/resolve`): both fan the answer out to the attached backorders and neither sends a `request.answered` to the bot. The answer is applied inside the staff resolution without waiting for a backorder row another transaction holds (a row the stock allocator is working on is skipped and receives the same answer on the next sweep tick, once).
 
-Source (T4): `src/backorders/infrastructure/backorder-reestimate.service.ts`, `src/backorders/infrastructure/backorder-sweep.store.ts` (phases 4–5), `src/backorders/domain/backorder-reestimate.ts`, `src/human-decisions/infrastructure/restock-resolution.registry.ts` + `prisma-human-decision-review-resolve.repository.ts` (the hook), `src/chatbot-requests/infrastructure/chatbot-request-wrapper.ts` (staff-only request), `src/backorders/backorder-reestimate.integration.spec.ts`.
+Source (T4): `src/backorders/infrastructure/backorder-reestimate.service.ts`, `src/backorders/infrastructure/backorder-sweep.store.ts` (phases 4–5), `src/backorders/domain/backorder-reestimate.ts`, `src/human-decisions/infrastructure/restock-resolution.registry.ts` + `prisma-human-decision-review-resolve.repository.ts` (the hook), `src/chatbot-requests/infrastructure/chatbot-request-wrapper.ts` (staff-only request), `src/chatbot-requests/domain/staff-only-request.ts` (the origin), `src/chatbot-requests/infrastructure/chatbot-feed-writes.ts` (`enqueueAnswered` skips it), `src/chatbot-requests/infrastructure/prisma-chatbot-recovery.store.ts` (recovery read), `src/backorders/backorder-reestimate.integration.spec.ts`.
 
 ## 10. Feed items — **T2 live (reserved, reminder, expired, lost); T4 live (eta_updated, eta_unavailable); T5 (cancelled_by_staff) not yet**
 
@@ -286,6 +290,7 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
     "backorderId": "uuid", "folio": "BO-000012",
     "productName": "Croquetas Adulto Raza Grande 18 kg", "variantName": null,
     "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa",
+    "phoneCountryCode": "52", "phone": "5512349901",
     "version": 3,
     "referencePriceCents": 114900, "currentPriceCents": 109900, "finalPriceCents": 109900,
     "reservedUntil": "2026-11-21T15:00:00.000Z", "reminderAt": "2026-11-21T12:00:00.000Z"
@@ -294,9 +299,9 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 }
 ```
 
-`conversationRef` is the customer's mirrored chat (the one `chatbot_conversations` row of the customer's phone key), `null` when the customer has none or more than one: then resolve the customer from `backorderId` (`GET /chatbot-api/backorders/:id`). Same cursor, long-poll, `deliveryId` dedupe and ACK route as every item (`docs/chatbot-handoff/chatbot-requests-bot-contract.md`).
+`conversationRef` is the customer's mirrored chat (the one `chatbot_conversations` row of the customer's phone key), `null` when the customer has none or more than one: then reach the customer with the `phoneCountryCode` + `phone` of the payload (T4b, `null` / `null` when the customer has no phone; the common fields of every `backorder.*` item), or resolve the backorder from `backorderId` (`GET /chatbot-api/backorders/:id`). Same cursor, long-poll, `deliveryId` dedupe and ACK route as every item (`docs/chatbot-handoff/chatbot-requests-bot-contract.md`).
 
-| Type | Task | When | Payload (besides the common fields `backorderId`, `folio`, `productName`, `variantName`, `quantity`, `branchName`, `customerFirstName`, `version`) |
+| Type | Task | When | Payload (besides the common fields `backorderId`, `folio`, `productName`, `variantName`, `quantity`, `branchName`, `customerFirstName`, `phoneCountryCode`, `phone`, `version`) |
 | --- | --- | --- | --- |
 | `backorder.reserved` | T2 | the backorder became `RESERVED` (same transaction) | `referencePriceCents`, `currentPriceCents`, `finalPriceCents`, `reservedUntil`, `reminderAt` |
 | `backorder.reservation_reminder` | T2 | sweep, `reminderAt` passed, once | `reservedUntil` |
@@ -311,11 +316,11 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 - Examples of the other payloads:
 
 ```json
-{ "type": "backorder.reservation_reminder", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "version": 3, "reservedUntil": "2026-11-21T15:00:00.000Z" } }
-{ "type": "backorder.reservation_expired", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "version": 4, "expiredAt": "2026-11-21T15:00:01.000Z", "sourceDecisionId": "uuid" } }
-{ "type": "backorder.eta_updated", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "version": 2, "estimatedAt": "2026-11-27T15:00:00.000Z", "restockDays": 7 } }
-{ "type": "backorder.eta_unavailable", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "version": 2 } }
-{ "type": "backorder.reservation_lost", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "version": 4, "reason": "LOT_EXPIRED", "queuePosition": 1, "estimatedAt": "2026-11-27T15:00:00.000Z" } }
+{ "type": "backorder.reservation_reminder", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 3, "reservedUntil": "2026-11-21T15:00:00.000Z" } }
+{ "type": "backorder.reservation_expired", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 4, "expiredAt": "2026-11-21T15:00:01.000Z", "sourceDecisionId": "uuid" } }
+{ "type": "backorder.eta_updated", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 2, "estimatedAt": "2026-11-27T15:00:00.000Z", "restockDays": 7 } }
+{ "type": "backorder.eta_unavailable", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 2 } }
+{ "type": "backorder.reservation_lost", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 4, "reason": "LOT_EXPIRED", "queuePosition": 1, "estimatedAt": "2026-11-27T15:00:00.000Z" } }
 ```
 
 ### ACK and the new outcome `PROVIDER_REJECTED`
@@ -342,7 +347,7 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 { "items": [ … ], "backorderUndeliveredResumeAfter": "000000004310" }
 ```
 
-`backorderUndeliveredResumeAfter` is the feed `after` that serves the sucursal's **oldest `backorder.*` item with no terminal outcome** again (its cursor minus one, never below the purge watermark; a 12-digit zero-padded cursor), or `null` when every backorder item was acknowledged. It is about the whole sucursal, whichever phone you filtered by. After a `410`: do the request recovery walk (`GET /chatbot-api/requests`), read this route once with `updatedSince`, and resume the feed from the **smallest** of `nextCursor`, any `undeliveredResumeAfter`, `saleUndeliveredResumeAfter` and `backorderUndeliveredResumeAfter` (compare the fixed-width strings, no arithmetic); dedupe by `deliveryId`. Without `updatedSince` the answer is exactly `{ "items": [...] }` as in T1. A backorder item is never in `pending-deliveries` (never deferred) and the request recovery walk does not list it.
+`backorderUndeliveredResumeAfter` is the feed `after` that serves the sucursal's **oldest `backorder.*` item with no terminal outcome** again (its cursor minus one, never below the purge watermark; a 12-digit zero-padded cursor), or `null` when every backorder item was acknowledged. It is about the whole sucursal, whichever phone you filtered by. After a `410`: do the request recovery walk (`GET /chatbot-api/requests`), read this route once with `updatedSince`, and resume the feed from the **smallest** of `nextCursor`, any `undeliveredResumeAfter`, `saleUndeliveredResumeAfter` and `backorderUndeliveredResumeAfter` (compare the fixed-width strings, no arithmetic); dedupe by `deliveryId`. Without `updatedSince` the answer is exactly `{ "items": [...] }` as in T1. A backorder item is never in `pending-deliveries` (never deferred) and the request recovery walk does not list it. The request recovery walk does not list the server-created re-estimate request either (staff-only, §8).
 
 ## Deploy checklist (T1)
 

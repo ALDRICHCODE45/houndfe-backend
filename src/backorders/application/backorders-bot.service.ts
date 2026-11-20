@@ -52,7 +52,9 @@ export const BACKORDER_LIST_LIMIT = 50;
 const BOT_INCLUDE = {
   product: { select: { name: true } },
   variant: { select: { name: true } },
-  customer: { select: { firstName: true } },
+  customer: {
+    select: { firstName: true, phoneCountryCode: true, phone: true },
+  },
   tenant: { select: { name: true } },
 } satisfies Prisma.BackorderInclude;
 

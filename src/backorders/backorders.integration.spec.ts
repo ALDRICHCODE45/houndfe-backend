@@ -372,6 +372,9 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
           cancelReason: null,
           branchName: w.tenantName,
           customerFirstName: 'Rosa',
+          // T4b (additive): the customer's phone, the checkout phone-lock key.
+          phoneCountryCode: w.phone.phoneCountryCode,
+          phone: w.phone.phone,
         },
       });
       const row = await prisma.backorder.findUniqueOrThrow({
@@ -1028,6 +1031,44 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
       expect((await get(w.token, '/not-a-uuid').expect(404)).body.error).toBe(
         'BACKORDER_NOT_FOUND',
       );
+    });
+
+    it("T4b: every BackorderBot (create, GET :id, list, cancel) carries the owning customer's phone, never another customer's; null when the customer has none", async () => {
+      const w = await world();
+      const second = await extraCustomer(w, 2);
+      const created = await post(w.token, body(w)).expect(201);
+      const own = {
+        phoneCountryCode: w.phone.phoneCountryCode,
+        phone: w.phone.phone,
+      };
+      expect(created.body.backorder).toMatchObject(own);
+      const id = created.body.backorder.id;
+      expect(
+        (await get(w.token, `/${id}`).expect(200)).body.backorder,
+      ).toMatchObject(own);
+      const listed = await get(
+        w.token,
+        `?phoneCountryCode=${w.phone.phoneCountryCode}&phone=${w.phone.phone}`,
+      ).expect(200);
+      expect(listed.body.items).toHaveLength(1);
+      expect(listed.body.items[0]).toMatchObject(own);
+      expect(listed.body.items[0].phone).not.toBe(second.phone.phone);
+
+      const cancelled = await cancel(w.token, id).expect(200);
+      expect(cancelled.body.backorder).toMatchObject(own);
+
+      // A customer without a phone (staff-created): null / null.
+      const noPhone = randomUUID();
+      await prisma.customer.create({
+        data: { id: noPhone, tenantId: w.tenantId, firstName: 'SinTel' },
+      });
+      const row = await insertBackorder(w, { customerId: noPhone });
+      const read = await get(w.token, `/${row.id}`).expect(200);
+      expect(read.body.backorder).toMatchObject({
+        customerFirstName: 'SinTel',
+        phoneCountryCode: null,
+        phone: null,
+      });
     });
 
     it('lists by phone, newest activity first, filtered by status and updatedSince', async () => {

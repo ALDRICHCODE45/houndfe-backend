@@ -407,6 +407,8 @@ describeIfDb('backorder-level feed items (PostgreSQL)', () => {
           quantity: 2,
           branchName: 'Sucursal Reposición',
           customerFirstName: 'Rosa',
+          phoneCountryCode: '52',
+          phone: '5512340001',
           version: bo.version,
           referencePriceCents: 1500,
           currentPriceCents: 1000,

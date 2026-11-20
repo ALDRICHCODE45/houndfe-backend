@@ -920,6 +920,14 @@ export interface BackorderPayloadBase {
   quantity: number;
   branchName: string;
   customerFirstName: string;
+  /**
+   * The customer's phone, the key of the bot checkout's phone lock (the
+   * canonical `customers.phoneCountryCode` / `phone`); `null` when the customer
+   * has none. It lets an item with `conversationRef: null` still reach the
+   * customer. Only the customer of this very backorder, never another one.
+   */
+  phoneCountryCode: string | null;
+  phone: string | null;
   version: number;
 }
 
@@ -931,6 +939,8 @@ const backorderBase = (input: BackorderPayloadBase) => ({
   quantity: input.quantity,
   branchName: input.branchName,
   customerFirstName: input.customerFirstName,
+  phoneCountryCode: input.phoneCountryCode,
+  phone: input.phone,
   version: input.version,
 });
 

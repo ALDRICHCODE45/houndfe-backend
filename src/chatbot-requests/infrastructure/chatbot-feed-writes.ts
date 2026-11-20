@@ -29,6 +29,7 @@ import {
   FEED_TYPE,
   type AnswerSource,
 } from '../domain/chatbot-feed';
+import { isStaffOnlyContext } from '../domain/staff-only-request';
 import type { TenantClient } from './chatbot-request-writes';
 
 /**
@@ -90,6 +91,11 @@ const unresolved = (): never => {
  * is read from the wrapped row, the one record of what staff decided, so the
  * staff `resolve` and the legacy routes produce the same item. An item that
  * cannot be built fails the transaction instead of losing the answer.
+ *
+ * A STAFF-ONLY request (`context.origin`, the server-created overdue-ETA
+ * RESTOCK of restock-backorder) is skipped whatever route closed it: nobody on
+ * the bot side asked for it and its answer reaches the customers as
+ * `backorder.eta_*` items.
  */
 export async function enqueueAnswered(
   tx: TenantClient,
@@ -106,11 +112,14 @@ export async function enqueueAnswered(
       humanDecisionId: true,
       deliveryZoneRequestId: true,
       receiptEvidenceId: true,
+      context: true,
     },
   });
   if (requests.length !== requestIds.length) return unresolved();
+  const answerable = requests.filter((r) => !isStaffOnlyContext(r.context));
+  if (answerable.length === 0) return;
   const ids = (pick: (r: (typeof requests)[number]) => string | null) =>
-    requests.map(pick).filter((id): id is string => id !== null);
+    answerable.map(pick).filter((id): id is string => id !== null);
   const [decisions, zones, receipts] = await Promise.all([
     tx.humanDecision.findMany({
       where: { tenantId, id: { in: ids((r) => r.humanDecisionId) } },
@@ -141,17 +150,19 @@ export async function enqueueAnswered(
   ]);
   const byId = new Map(requests.map((request) => [request.id, request]));
 
-  const drafts = requestIds.map((requestId): FeedDraft => {
-    const request = byId.get(requestId) ?? unresolved();
-    return {
-      requestId,
-      type: FEED_TYPE.answered,
-      conversationRef: request.conversationRef,
-      payload: buildAnswerPayload(
-        answerSource(request, { decisions, zones, receipts }),
-      ),
-    };
-  });
+  const drafts = requestIds
+    .filter((requestId) => !isStaffOnlyContext(byId.get(requestId)?.context))
+    .map((requestId): FeedDraft => {
+      const request = byId.get(requestId) ?? unresolved();
+      return {
+        requestId,
+        type: FEED_TYPE.answered,
+        conversationRef: request.conversationRef,
+        payload: buildAnswerPayload(
+          answerSource(request, { decisions, zones, receipts }),
+        ),
+      };
+    });
   await insertFeedItems(tx, tenantId, drafts);
 }
 

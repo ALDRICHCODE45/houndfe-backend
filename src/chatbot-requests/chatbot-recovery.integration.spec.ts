@@ -138,12 +138,17 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
   function open(
     b: Bot,
     updatedAt: Date,
-    over: { id?: string; conversationRef?: string | null } = {},
+    over: {
+      id?: string;
+      conversationRef?: string | null;
+      context?: Record<string, unknown>;
+    } = {},
   ) {
     const n = ++seq;
     return prisma.chatbotRequest.create({
       data: {
         id: over.id,
+        ...(over.context ? { context: over.context as object } : {}),
         tenantId: b.tenantId,
         folio: ++b.folio,
         kind: 'CLARIFICATION',
@@ -163,10 +168,16 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
   }
 
   /** A closed request: CANCELLED by the customer at `closedAt`. */
-  function closed(b: Bot, closedAt: Date, status: 'CANCELLED' | 'RESOLVED') {
+  function closed(
+    b: Bot,
+    closedAt: Date,
+    status: 'CANCELLED' | 'RESOLVED',
+    context?: Record<string, unknown>,
+  ) {
     const n = ++seq;
     return prisma.chatbotRequest.create({
       data: {
+        ...(context ? { context: context as object } : {}),
         tenantId: b.tenantId,
         folio: ++b.folio,
         kind: 'CLARIFICATION',
@@ -325,6 +336,43 @@ describeIfDb('chatbot recovery (PostgreSQL)', () => {
           undeliveredResumeAfter: null,
         },
       ]);
+    });
+
+    it('never lists a STAFF-ONLY request (the server-created overdue-ETA re-estimate): open or closed, and the pages stay full', async () => {
+      const b = await bot();
+      const staffOnly = { origin: 'BACKORDER_REESTIMATE' };
+      const first = await open(b, at(1));
+      await open(b, at(2), { context: staffOnly, conversationRef: null });
+      const second = await open(b, at(3), {
+        context: { origin: 'SOMETHING_ELSE' },
+      });
+      await open(b, at(4), { context: staffOnly, conversationRef: null });
+      const third = await open(b, at(5), { context: { productId: 'p-1' } });
+      await closed(b, at(6), 'RESOLVED', staffOnly);
+      const closedOrdinary = await closed(b, at(7), 'RESOLVED');
+
+      const open1 = await recover(b).expect(200);
+      expect(open1.body.items.map((i: any) => i.id)).toEqual([
+        first.id,
+        second.id,
+        third.id,
+      ]);
+      const withClosed = await recover(
+        b,
+        '?status=open&updatedSince=' + at(0).toISOString(),
+      ).expect(200);
+      expect(withClosed.body.items.map((i: any) => i.id)).toEqual([
+        first.id,
+        second.id,
+        third.id,
+        closedOrdinary.id,
+      ]);
+      // Filtered in SQL, so a page is never short because of them.
+      const pages = await walk(b, '?status=open', 2);
+      expect(pages.map((page) => page.items.length)).toEqual([2, 1]);
+      expect(pages.flatMap((page) => page.items.map((i: any) => i.id))).toEqual(
+        [first.id, second.id, third.id],
+      );
     });
 
     it("never returns another tenant's requests, deliveries or feed cursor", async () => {

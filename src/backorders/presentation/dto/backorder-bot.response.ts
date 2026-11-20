@@ -33,7 +33,11 @@ export interface BackorderBotSource {
   cancelReason: string | null;
   product: { name: string };
   variant: { name: string } | null;
-  customer: { firstName: string };
+  customer: {
+    firstName: string;
+    phoneCountryCode: string | null;
+    phone: string | null;
+  };
   tenant: { name: string };
 }
 
@@ -68,6 +72,13 @@ export interface BackorderBot {
   cancelReason: string | null;
   branchName: string;
   customerFirstName: string;
+  /**
+   * The customer's phone (the key of the checkout phone lock); `null` when the
+   * customer has none. Additive, only on routes the credential reaches with
+   * `backorders:*` and only for that customer's own backorder.
+   */
+  phoneCountryCode: string | null;
+  phone: string | null;
 }
 
 export interface BackorderBotEnvelope {
@@ -115,5 +126,7 @@ export function toBackorderBot(
     cancelReason: source.cancelReason,
     branchName: source.tenant.name,
     customerFirstName: source.customer.firstName,
+    phoneCountryCode: source.customer.phoneCountryCode,
+    phone: source.customer.phone,
   };
 }

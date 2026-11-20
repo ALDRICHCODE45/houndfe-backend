@@ -33,6 +33,8 @@ const COMMON = {
   quantity: 2,
   branchName: 'Centro',
   customerFirstName: 'Rosa',
+  phoneCountryCode: '52' as string | null,
+  phone: '5512348801' as string | null,
   version: 3,
 };
 
@@ -44,6 +46,8 @@ const COMMON_PAYLOAD = {
   quantity: 2,
   branchName: 'Centro',
   customerFirstName: 'Rosa',
+  phoneCountryCode: '52',
+  phone: '5512348801',
   version: 3,
 };
 
@@ -91,6 +95,25 @@ describe('backorder.* feed types (restock-backorder T2b)', () => {
 });
 
 describe('backorder.* payloads (contract §10)', () => {
+  it('every payload carries phoneCountryCode and phone, null when the customer has none', () => {
+    const noPhone = { ...COMMON, phoneCountryCode: null, phone: null };
+    const payloads = [
+      buildBackorderEtaUnavailablePayload(noPhone),
+      buildBackorderReservationExpiredPayload({
+        ...noPhone,
+        expiredAt: new Date(AT),
+      }),
+      buildBackorderCancelledByStaffPayload({ ...noPhone, reason: null }),
+    ];
+    for (const payload of payloads) {
+      expect(payload).toMatchObject({ phoneCountryCode: null, phone: null });
+    }
+    expect(buildBackorderEtaUnavailablePayload(COMMON)).toMatchObject({
+      phoneCountryCode: '52',
+      phone: '5512348801',
+    });
+  });
+
   it('reserved: prices, the 24 h deadline and the reminder, UTC Z', () => {
     expect(
       buildBackorderReservedPayload({

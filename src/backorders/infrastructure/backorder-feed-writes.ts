@@ -26,7 +26,10 @@
  * The item is delivered to the customer's conversation, resolved like the
  * sale items (`saleConversationRef`): the one mirrored chat of the customer's
  * phone key, else `null` (the bot then resolves the customer from the
- * backorder through `GET /chatbot-api/backorders/:id`).
+ * backorder through `GET /chatbot-api/backorders/:id`). Every payload also
+ * carries the customer's `phoneCountryCode` / `phone` (null when the customer
+ * has none), so an item with a null `conversationRef` can still reach them; the
+ * customer is always the one of THIS backorder.
  */
 import { Prisma } from '@prisma/client';
 import {
@@ -67,7 +70,9 @@ const FEED_SELECT = {
   cancelReason: true,
   product: { select: { name: true } },
   variant: { select: { name: true } },
-  customer: { select: { firstName: true } },
+  customer: {
+    select: { firstName: true, phoneCountryCode: true, phone: true },
+  },
   tenant: { select: { name: true } },
 } satisfies Prisma.BackorderSelect;
 
@@ -114,6 +119,8 @@ const base = (row: FeedBackorder): BackorderPayloadBase => ({
   quantity: row.quantity,
   branchName: row.tenant.name,
   customerFirstName: row.customer.firstName,
+  phoneCountryCode: row.customer.phoneCountryCode,
+  phone: row.customer.phone,
   version: row.version,
 });
 

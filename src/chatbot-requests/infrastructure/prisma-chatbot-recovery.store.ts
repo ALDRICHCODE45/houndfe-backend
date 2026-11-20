@@ -9,11 +9,13 @@
  * closed at or after an instant was last updated at or after it, so the range
  * on `updatedAt` is exact for the index and `closedAt` makes it exact for the
  * rule). Each branch stops after `limit` rows, so a page costs O(limit) however
- * many requests the tenant has closed.
+ * many requests the tenant has closed. Staff-only requests are left out of both
+ * branches (`NOT_STAFF_ONLY`).
  */
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
+import { STAFF_ONLY_REQUEST_ORIGIN } from '../domain/staff-only-request';
 import type { FeedItemRow } from '../application/chatbot-feed.service';
 import { tenantHeadCursor } from './prisma-chatbot-feed.store';
 import type {
@@ -26,6 +28,13 @@ const COLUMNS = Prisma.sql`"id", "folio", "kind", "subtype", "status",
   "conversationRef", "humanDecisionId", "deliveryZoneRequestId",
   "receiptEvidenceId", "whatsappWindowClosesAt", "cancelReason", "createdAt",
   "updatedAt", "closedAt"`;
+
+/**
+ * Staff-only requests (the server-created overdue-ETA RESTOCK, restock-backorder
+ * T4b) are never listed: the bot did not create them and has nothing to do with
+ * them. Filtered in SQL so a page is never short because of them.
+ */
+const NOT_STAFF_ONLY = Prisma.sql`AND ("context"->>'origin') IS DISTINCT FROM ${STAFF_ONLY_REQUEST_ORIGIN}`;
 
 /** `timestamp(3)` columns hold UTC; the ISO string keeps the instant exact. */
 const instant = (date: Date) => Prisma.sql`${date.toISOString()}::timestamp(3)`;
@@ -84,6 +93,7 @@ export class PrismaChatbotRecoveryStore implements ChatbotRecoveryStore {
     const open = Prisma.sql`(
       SELECT ${COLUMNS} FROM "chatbot_requests"
       WHERE "tenantId" = ${tenantId} AND "status" IN ('NEW', 'IN_PROGRESS')
+        ${NOT_STAFF_ONLY}
         ${keyset}
       ORDER BY "updatedAt", "id" LIMIT ${limit})`;
     const closed = since
@@ -91,6 +101,7 @@ export class PrismaChatbotRecoveryStore implements ChatbotRecoveryStore {
       SELECT ${COLUMNS} FROM "chatbot_requests"
       WHERE "tenantId" = ${tenantId} AND "status" IN ('RESOLVED', 'CANCELLED')
         AND "updatedAt" >= ${instant(since)} AND "closedAt" >= ${instant(since)}
+        ${NOT_STAFF_ONLY}
         ${keyset}
       ORDER BY "updatedAt", "id" LIMIT ${limit})`
       : Prisma.empty;

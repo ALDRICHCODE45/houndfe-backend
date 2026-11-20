@@ -29,14 +29,41 @@
  *   - an ordinary (bot-created) RESTOCK keeps its `request.answered` and
  *     touches no backorder; a failing listener never blocks the resolution
  *     and the sweep repair answers later; concurrency between the attach and
- *     the resolution loses no answer.
+ *     the resolution loses no answer;
+ *   - T4b: the fan-out never waits on a row another transaction holds (SKIP
+ *     LOCKED: the staff resolution stays fast, the sweep repair answers the
+ *     skipped row once); the staff-only request resolved from the request
+ *     inbox (`POST /chatbot-requests/:id/resolve`, the route staff use) fans
+ *     out and sends NO `request.answered`, while an ordinary request resolved
+ *     through the same route keeps it.
  */
-import type { INestApplication } from '@nestjs/common';
+import {
+  type CanActivate,
+  type ExecutionContext,
+  type INestApplication,
+  Injectable,
+} from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { Test } from '@nestjs/testing';
+import { AbilityBuilder, createMongoAbility } from '@casl/ability';
+import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
+import request from 'supertest';
+import type { AppAbility } from '../auth/authorization/domain/permission';
+import { PermissionsGuard } from '../auth/authorization/guards/permissions.guard';
+import { ActiveUserGuard } from '../auth/guards/active-user.guard';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import {
+  CHATBOT_REQUEST_COMMAND_STORE,
+  ChatbotRequestCommandsService,
+} from '../chatbot-requests/application/chatbot-request-commands.service';
+import { PrismaChatbotRequestCommandStore } from '../chatbot-requests/infrastructure/prisma-chatbot-request-command.store';
+import { ChatbotRequestCommandsController } from '../chatbot-requests/presentation/chatbot-request-commands.controller';
+import { ChatbotRequestHttpFilter } from '../chatbot-requests/presentation/chatbot-request-http.filter';
+import { WrappedRequestResolutionModule } from '../chatbot-requests/wrapped-request-resolution.module';
+import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import { SERVICE_CREDENTIAL_REPOSITORY } from '../chatbot-api/domain/service-credential.repository';
 import {
   BotCredentials,
@@ -68,6 +95,33 @@ import { BackorderSweepScheduler } from './infrastructure/backorder-sweep.schedu
 const SKIP =
   process.env.SKIP_DB_INTEGRATION === '1' || !process.env.DATABASE_URL;
 const d = SKIP ? describe.skip : describe;
+
+/** Staff caller of the request inbox: read + update ChatbotRequest, update HumanDecision. */
+@Injectable()
+class StaffStubGuard implements CanActivate {
+  constructor(private readonly cls: ClsService) {}
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest<{
+      headers: Record<string, string>;
+      user: unknown;
+      ability: AppAbility;
+    }>();
+    const tenantId = req.headers['x-test-tenant'];
+    const userId = req.headers['x-test-user'];
+    const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    can('read', 'ChatbotRequest');
+    can('update', 'ChatbotRequest');
+    can('update', 'HumanDecision');
+    // The wrapped resolver re-checks the actor against the tenant's roles; a
+    // super admin passes that check, the route's own grants are still asserted
+    // by the ability above.
+    req.user = { userId, tenantId, isSuperAdmin: true };
+    req.ability = build();
+    this.cls.set('tenantId', tenantId);
+    this.cls.set('userId', userId);
+    return true;
+  }
+}
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -129,10 +183,29 @@ d('backorder overdue-ETA re-estimate (PostgreSQL)', () => {
         ClsModule.forRoot({ global: true, middleware: { mount: true } }),
         DatabaseModule,
         BackordersModule,
+        // T4b: the staff request inbox with the REAL common `resolve` command.
+        WrappedRequestResolutionModule,
+      ],
+      controllers: [ChatbotRequestCommandsController],
+      providers: [
+        ChatbotRequestHttpFilter,
+        ChatbotRequestCommandsService,
+        {
+          provide: CHATBOT_REQUEST_COMMAND_STORE,
+          useClass: PrismaChatbotRequestCommandStore,
+        },
       ],
     })
       .overrideProvider(SERVICE_CREDENTIAL_REPOSITORY)
       .useValue(credentials.repository)
+      .overrideGuard(JwtAuthGuard)
+      .useClass(StaffStubGuard)
+      .overrideGuard(TenantContextGuard)
+      .useClass(StaffStubGuard)
+      .overrideGuard(ActiveUserGuard)
+      .useClass(StaffStubGuard)
+      .overrideGuard(PermissionsGuard)
+      .useClass(StaffStubGuard)
       .compile();
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(createAppValidationPipe());
@@ -808,6 +881,8 @@ d('backorder overdue-ETA re-estimate (PostgreSQL)', () => {
           quantity: 1,
           branchName: expect.stringMatching(/^Sucursal /) as string,
           customerFirstName: expect.stringMatching(/^Cliente\d$/) as string,
+          phoneCountryCode: '52',
+          phone: expect.stringMatching(/^55123488\d\d$/) as string,
           version: row.version + 1,
           estimatedAt: expected.toISOString(),
           restockDays: 6,
@@ -860,6 +935,8 @@ d('backorder overdue-ETA re-estimate (PostgreSQL)', () => {
           quantity: 1,
           branchName: expect.stringMatching(/^Sucursal /) as string,
           customerFirstName: expect.stringMatching(/^Cliente\d$/) as string,
+          phoneCountryCode: '52',
+          phone: expect.stringMatching(/^55123488\d\d$/) as string,
           version: row.version + 1,
         });
       }
@@ -1180,6 +1257,278 @@ d('backorder overdue-ETA re-estimate (PostgreSQL)', () => {
       });
       expect((await backorder(back.id)).etaStage).toBe(1);
       expect(await etaItems(w)).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // T4b (d): the fan-out never waits on a row another transaction holds
+  // ---------------------------------------------------------------------------
+
+  describe('a row held by another transaction (SKIP LOCKED)', () => {
+    /** Holds `FOR UPDATE` on one backorder until `release()` (own connection). */
+    async function holdRow(id: string) {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      const done = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw(
+            Prisma.sql`SELECT "id" FROM "backorders" WHERE "id" = ${id} FOR UPDATE`,
+          );
+          locked();
+          await gate;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      await taken;
+      return { release, done };
+    }
+    const sleep = (ms: number) =>
+      new Promise<'BLOCKED'>((resolve) => setTimeout(resolve, ms, 'BLOCKED'));
+
+    it('the staff resolution does not wait for the locked row: the others are answered at once, the locked one by the next sweep, exactly once', async () => {
+      const w = await world();
+      const rows = await waiting(w, 3);
+      await tick();
+      const [decision] = await reDecisions(w);
+      const [free1, held, free2] = rows;
+
+      const lock = await holdRow(held.id);
+      let outcome: unknown;
+      try {
+        const resolution = resolve(w, decision.id, {
+          action: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 6,
+        });
+        outcome = await Promise.race([
+          resolution.then((result) => result.status),
+          sleep(3000),
+        ]);
+        // Whatever happened, let the held row go so nothing hangs.
+        lock.release();
+        await lock.done;
+        await resolution;
+      } finally {
+        lock.release();
+      }
+      expect(outcome).toBe('resolved');
+
+      // The resolution answered the free rows and left the held one untouched.
+      for (const row of [free1, free2]) {
+        expect(await backorder(row.id)).toMatchObject({
+          etaStage: 2,
+          version: row.version + 1,
+        });
+        expect(await etaItems(w, undefined, row.id)).toHaveLength(1);
+      }
+      expect(await backorder(held.id)).toMatchObject({
+        status: 'WAITING',
+        etaStage: 1,
+        version: held.version,
+        reestimateDecisionId: decision.id,
+      });
+      expect(await etaItems(w, undefined, held.id)).toEqual([]);
+
+      // The next sweep (phase 5 repair) applies the same answer to it, once.
+      const total = await tick();
+      expect(total.etaApplied).toBe(1);
+      const stored = await prisma.humanDecision.findUniqueOrThrow({
+        where: { id: decision.id },
+      });
+      const after = await backorder(held.id);
+      expect(after).toMatchObject({
+        etaStage: 2,
+        estimatedArrivalDays: 6,
+        version: held.version + 1,
+      });
+      expect(after.estimatedAt).toEqual(
+        new Date(stored.resolvedAt!.getTime() + 6 * DAY),
+      );
+      expect(await etaItems(w, 'backorder.eta_updated', held.id)).toHaveLength(
+        1,
+      );
+      await tick();
+      await tick();
+      expect(await etaItems(w)).toHaveLength(3);
+      expect(await backorder(held.id)).toMatchObject({
+        version: held.version + 1,
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // T4b (a)(f): the request inbox route
+  // ---------------------------------------------------------------------------
+
+  describe('the staff resolve from the request inbox (POST /chatbot-requests/:id/resolve)', () => {
+    const inboxResolve = (
+      w: World,
+      requestId: string,
+      body: object,
+      key = randomUUID(),
+    ) =>
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument -- Nest's getHttpServer() is untyped
+      request(app.getHttpServer())
+        .post(`/chatbot-requests/${requestId}/resolve`)
+        .set({ 'x-test-tenant': w.tenantId, 'x-test-user': w.actorId })
+        .set('Idempotency-Key', key)
+        .send(body);
+
+    const answeredCount = (w: World) =>
+      prisma.chatbotFeedItem.count({
+        where: { tenantId: w.tenantId, type: 'request.answered' },
+      });
+
+    it('PROVIDE: the fan-out happens (one eta_updated per attached backorder) and NO request.answered is enqueued', async () => {
+      const w = await world();
+      const rows = await waiting(w, 3);
+      await tick();
+      const [decision] = await reDecisions(w);
+      const wrapper = await wrapperOf(decision.id);
+      expect(wrapper).toMatchObject({
+        status: 'NEW',
+        context: { origin: 'BACKORDER_REESTIMATE' },
+      });
+      const key = randomUUID();
+
+      const response = await inboxResolve(
+        w,
+        wrapper!.id,
+        {
+          expectedVersion: wrapper!.version,
+          action: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 6,
+        },
+        key,
+      );
+
+      expect(response.status).toBe(200);
+      expect(await wrapperOf(decision.id)).toMatchObject({
+        status: 'RESOLVED',
+      });
+      const stored = await prisma.humanDecision.findUniqueOrThrow({
+        where: { id: decision.id },
+      });
+      expect(stored.status).toBe('RESOLVED');
+      for (const row of rows) {
+        const after = await backorder(row.id);
+        expect(after).toMatchObject({
+          etaStage: 2,
+          estimatedArrivalDays: 6,
+          version: row.version + 1,
+        });
+        expect(after.estimatedAt).toEqual(
+          new Date(stored.resolvedAt!.getTime() + 6 * DAY),
+        );
+        expect(await etaItems(w, 'backorder.eta_updated', row.id)).toHaveLength(
+          1,
+        );
+      }
+      expect(await etaItems(w)).toHaveLength(3);
+      expect(await answeredCount(w)).toBe(0);
+      expect(
+        (await allFeed(w)).every((item) => item.backorderId !== null),
+      ).toBe(true);
+
+      // An idempotent replay of the same command changes nothing.
+      const replay = await inboxResolve(
+        w,
+        wrapper!.id,
+        {
+          expectedVersion: wrapper!.version,
+          action: 'PROVIDE_RESTOCK_ESTIMATE',
+          restockDays: 6,
+        },
+        key,
+      );
+      expect(replay.status).toBe(200);
+      expect(await etaItems(w)).toHaveLength(3);
+      expect(await answeredCount(w)).toBe(0);
+    });
+
+    it('REPORT_RESTOCK_ESTIMATE_UNAVAILABLE: eta_unavailable per backorder, still no request.answered', async () => {
+      const w = await world();
+      const rows = await waiting(w, 2);
+      await tick();
+      const [decision] = await reDecisions(w);
+      const wrapper = await wrapperOf(decision.id);
+
+      const response = await inboxResolve(w, wrapper!.id, {
+        expectedVersion: wrapper!.version,
+        action: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+      });
+
+      expect(response.status).toBe(200);
+      for (const row of rows) {
+        expect(
+          await etaItems(w, 'backorder.eta_unavailable', row.id),
+        ).toHaveLength(1);
+      }
+      expect(await etaItems(w)).toHaveLength(2);
+      expect(await answeredCount(w)).toBe(0);
+    });
+
+    it('the same resolution through /human-decisions/:id/resolve (the legacy adapter) stays green: fan-out, no request.answered', async () => {
+      const w = await world();
+      const rows = await waiting(w, 2);
+      await tick();
+      const [decision] = await reDecisions(w);
+
+      const resolved = await resolve(w, decision.id, {
+        action: 'PROVIDE_RESTOCK_ESTIMATE',
+        restockDays: 4,
+      });
+
+      expect(resolved.status).toBe('resolved');
+      for (const row of rows) {
+        expect(await etaItems(w, 'backorder.eta_updated', row.id)).toHaveLength(
+          1,
+        );
+      }
+      expect(await answeredCount(w)).toBe(0);
+      expect(await wrapperOf(decision.id)).toMatchObject({
+        status: 'RESOLVED',
+      });
+    });
+
+    it('an ORDINARY (bot-created) RESTOCK resolved through the same inbox route keeps its request.answered', async () => {
+      const w = await world();
+      await prisma.chatbotConversation.create({
+        data: {
+          tenantId: w.tenantId,
+          conversationRef: 'wa:5215512348801',
+          customerKey: '525512348801',
+        },
+      });
+      const created = await inTenant(w, () =>
+        intake.submit({
+          sourceRequestId: randomUUID(),
+          productId: w.productId,
+          productName: 'Croquetas Adulto 18 kg',
+          requestedQuantity: 2,
+          submittedCredentialId: 'bot-cred',
+        }),
+      );
+      const wrapper = await wrapperOf(created.request.id);
+      expect(wrapper?.context).not.toHaveProperty('origin');
+
+      const response = await inboxResolve(w, wrapper!.id, {
+        expectedVersion: wrapper!.version,
+        action: 'PROVIDE_RESTOCK_ESTIMATE',
+        restockDays: 5,
+      });
+
+      expect(response.status).toBe(200);
+      const answered = await prisma.chatbotFeedItem.findMany({
+        where: { tenantId: w.tenantId, type: 'request.answered' },
+      });
+      expect(answered).toHaveLength(1);
+      expect(answered[0].requestId).toBe(wrapper!.id);
+      expect(answered[0].payload).toMatchObject({
+        action: 'PROVIDE_RESTOCK_ESTIMATE',
+        restockDays: 5,
+      });
     });
   });
 });

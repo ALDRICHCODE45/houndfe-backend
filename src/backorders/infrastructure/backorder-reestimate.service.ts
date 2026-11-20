@@ -36,20 +36,26 @@
  * THE ATTACH TRANSACTION (lock order). The decision row `FOR SHARE` FIRST (it
  * must still be PENDING; a staff resolution waits for it, so an attached
  * backorder is always seen by the fan-out; a resolution that won first makes
- * this tick a no-op and the next tick opens the next round), then the overdue
+ * the attach answer `ANSWERED` and `requestForGroup` re-reads the state and
+ * opens the next round IN THE SAME CALL, bounded by `MAX_ROUNDS_PER_GROUP`), then the overdue
  * backorders of the group `FOR UPDATE SKIP LOCKED` in queue order
  * (`scheduledAt, id`, like the allocator). Nothing here takes stock; no feed.
  *
- * THE ANSWER (lock order). The listener runs inside the resolver's transaction
- * (chatbot request row → decision row → here). It locks ONLY the `WAITING`
- * attached backorders, in `scheduledAt, id` order and `FOR UPDATE` (it must not
- * skip: skipping would lose an answer), never a RESERVED one: a RESERVED row is
- * held by the allocator/cancel path that takes stock first, and waiting on it
- * from here could cross the allocator's whole-queue walk. The feed's advisory
- * lock comes last. A backorder that is RESERVED / CONFIRMED / CANCELLED /
- * EXPIRED at that moment is skipped (no message); one that returns to WAITING
- * later (a lost lot) while still attached is answered by the sweep's repair
- * phase from the already-resolved decision.
+ * THE ANSWER (lock order). The listener runs inside the staff resolver's
+ * transaction (chatbot request row → decision row → here), which has the
+ * default 5 s Prisma transaction timeout. It therefore never WAITS for a
+ * backorder row: it locks the `WAITING` attached backorders `FOR UPDATE SKIP
+ * LOCKED`, in `scheduledAt, id` order. A row the allocator, a cancel, a
+ * checkout or another tick holds is skipped; it stays WAITING with etaStage 1
+ * attached to the (now RESOLVED) decision and the sweep's repair phase (5)
+ * applies the same answer on its next pass, exactly once (the move etaStage 1
+ * → 2 is a guarded update under the row lock, the feed item is unique per
+ * version). Never a RESERVED row: it is held by the allocator/cancel path that
+ * takes stock first, and an answer for it is not wanted anyway. The feed's
+ * advisory lock comes last. A backorder that is RESERVED / CONFIRMED /
+ * CANCELLED / EXPIRED at that moment is skipped (no message); one that returns
+ * to WAITING later (a lost lot) while still attached is answered by the same
+ * repair phase from the already-resolved decision.
  *
  * ONCE ONLY. The answer moves etaStage 1 → 2 under the row lock with a guarded
  * UPDATE; the feed item is exactly-once on top (`chatbot_feed_items_backorder_
@@ -361,14 +367,15 @@ export class BackorderReestimateService implements RestockResolutionListener {
     decisionId: string,
     resolution: EtaResolution,
   ): Promise<number> {
-    // WAITING only (see the file doc: never wait on a RESERVED row), queue
-    // order, no SKIP LOCKED: an answer is never dropped.
+    // WAITING only, queue order, SKIP LOCKED (see the file doc): the staff
+    // resolution never waits on a row someone else holds; a skipped row is
+    // still WAITING + etaStage 1 + attached, so the sweep repair finds it.
     const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
       SELECT "id" FROM "backorders"
       WHERE "tenantId" = ${tenantId} AND "reestimateDecisionId" = ${decisionId}
         AND "status" = 'WAITING' AND "etaStage" = ${ETA_STAGE.REQUESTED}
       ORDER BY "scheduledAt", "id"
-      FOR UPDATE`);
+      FOR UPDATE SKIP LOCKED`);
     const answered: string[] = [];
     for (const row of rows) {
       const { count } = await tx.backorder.updateMany({

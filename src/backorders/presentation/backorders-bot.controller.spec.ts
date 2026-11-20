@@ -37,10 +37,13 @@ const BACKORDER: BackorderBot = {
   reminderAt: null,
   queuePosition: 1,
   saleId: null,
+  sourceDecisionId: UUID(3),
   cancelledByKind: null,
   cancelReason: null,
   branchName: 'Centro',
   customerFirstName: 'Rosa',
+  phoneCountryCode: '52',
+  phone: '5512349901',
 };
 
 const body = (over: Record<string, unknown> = {}) => ({

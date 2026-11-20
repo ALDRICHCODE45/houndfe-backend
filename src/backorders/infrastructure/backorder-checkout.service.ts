@@ -3,12 +3,16 @@
  * checkout. Binds `BackorderCheckoutPort` (see the sales port for why it is a
  * registration) and gives each checkout transaction a `BotBackorderCheckout`.
  *
- * LOCK ORDER (L7/L10): every product of the cart (`lockStock`: products → lots
- * → variants, id order) BEFORE any backorder row; backorder rows in id order;
- * nothing here takes a backorder row after the feed's advisory lock. The
- * checkout calls `lockAndVerify` right before the stock charge, after its other
- * locks (customer, address, shipping quote, promotion capacity), so the order
- * every other writer uses is kept: sale → products → lots → variants → rows.
+ * LOCK ORDER (the checkout's, after T6): customer → shipping quote → stock
+ * (products → lots → variants, id order) → sale lines → promotion claim →
+ * backorder rows. Every product of the cart is locked (`lockStock`) BEFORE any
+ * backorder row; backorder rows are taken in id order; nothing here takes a
+ * backorder row after the feed's advisory lock. The checkout calls
+ * `lockAndVerify` after the sale lines and the promotion-capacity claim, right
+ * before the stock charge; the stock locks it takes first are no-ops by then
+ * (already held since `lockStock`), so no backorder row is ever waited for
+ * while a stock lock is still to be taken (stock before any backorder row, the
+ * order every other writer uses).
  *
  * `backorder.reservation_lost` (owner Q6) must survive a refused checkout: the
  * expired-lot settlement therefore runs in its OWN short transactions before

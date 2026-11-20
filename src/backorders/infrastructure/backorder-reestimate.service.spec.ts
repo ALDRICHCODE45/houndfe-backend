@@ -330,6 +330,24 @@ describe('BackorderReestimateService.onRestockResolved (fan-out)', () => {
     expect(enqueueBackorderEtaUnavailable).not.toHaveBeenCalled();
   });
 
+  it('locks the attached WAITING rows FOR UPDATE SKIP LOCKED: the staff resolution never waits on a row the allocator holds', async () => {
+    const { service, db } = build();
+    db.$queryRaw.mockResolvedValueOnce([]);
+
+    await service.onRestockResolved({
+      tenantId: 't-1',
+      decisionId: 'd-1',
+      action: 'PROVIDE_RESTOCK_ESTIMATE',
+      restockDays: 5,
+      resolvedAt,
+    });
+
+    const sql = (db.$queryRaw.mock.calls[0] as [{ sql: string }])[0].sql;
+    expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/);
+    expect(sql).toMatch(/"status" = 'WAITING'/);
+    expect(sql).toMatch(/ORDER BY "scheduledAt", "id"/);
+  });
+
   it('UNAVAILABLE: etaStage 2 and version +1 but estimatedAt / estimatedArrivalDays untouched; eta_unavailable', async () => {
     const { service, db } = build();
     db.$queryRaw.mockResolvedValueOnce([{ id: 'b-1' }]);
