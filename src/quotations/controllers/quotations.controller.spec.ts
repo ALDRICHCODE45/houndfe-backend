@@ -201,11 +201,7 @@ describe('QuotationsController', () => {
       service.updateItemQuantity.mockResolvedValue({ id: 'q-1' });
       const dto = { quantity: 5 };
 
-      const result = await controller.updateItemQuantity(
-        'q-1',
-        'item-1',
-        dto,
-      );
+      const result = await controller.updateItemQuantity('q-1', 'item-1', dto);
 
       expect(service.updateItemQuantity).toHaveBeenCalledWith(
         'q-1',
@@ -228,11 +224,7 @@ describe('QuotationsController', () => {
       service.overrideItemPrice.mockResolvedValue({ id: 'q-1' });
       const dto = { unitPriceCents: 2000 };
 
-      const result = await controller.overrideItemPrice(
-        'q-1',
-        'item-1',
-        dto,
-      );
+      const result = await controller.overrideItemPrice('q-1', 'item-1', dto);
 
       expect(service.overrideItemPrice).toHaveBeenCalledWith(
         'q-1',
@@ -434,4 +426,71 @@ describe('QuotationsController', () => {
       await expect(controller.send('q-1', 'true')).rejects.toThrow('boom');
     });
   });
+});
+
+describe('QuotationsController GET /quotations/:id/pdf format', () => {
+  const quotation = { id: 'c55bed88-2aad-4b74-a4bd-2a8c4611e6ef' };
+
+  function setup() {
+    const service = makeMockService();
+    service.findOne.mockResolvedValue(quotation);
+    const pdfService = {
+      renderQuotationPdf: jest.fn().mockResolvedValue({
+        stream: { pipe: jest.fn() },
+        folio: 'COT-c55bed88',
+      }),
+      resolveFormat: jest.fn((format: string) => format),
+    };
+    const controller = new QuotationsController(
+      service as unknown as QuotationsService,
+      pdfService as unknown as PdfGenerationService,
+    );
+    const res = { set: jest.fn() };
+    return { controller, pdfService, res };
+  }
+
+  it.each([undefined, ''])(
+    'renders the quotation template when format is %p',
+    async (format) => {
+      const { controller, pdfService, res } = setup();
+
+      await controller.generatePdf(quotation.id, format, res as never);
+
+      expect(pdfService.renderQuotationPdf).toHaveBeenCalledWith(
+        quotation,
+        'quotation-a4',
+      );
+      expect(res.set).toHaveBeenCalledWith({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': 'inline; filename="cotizacion-COT-c55bed88.pdf"',
+      });
+    },
+  );
+
+  it('keeps rendering format=quotation-a4', async () => {
+    const { controller, pdfService, res } = setup();
+
+    await controller.generatePdf(quotation.id, 'quotation-a4', res as never);
+
+    expect(pdfService.renderQuotationPdf).toHaveBeenCalledWith(
+      quotation,
+      'quotation-a4',
+    );
+  });
+
+  it.each(['receipt-a4', 'receipt-ticket'])(
+    'rejects the non-quotation format %s with 400 INVALID_FORMAT',
+    async (format) => {
+      const { controller, pdfService, res } = setup();
+
+      await expect(
+        controller.generatePdf(quotation.id, format, res as never),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: 'INVALID_FORMAT',
+      });
+      expect(pdfService.renderQuotationPdf).not.toHaveBeenCalled();
+      expect(res.set).not.toHaveBeenCalled();
+    },
+  );
 });

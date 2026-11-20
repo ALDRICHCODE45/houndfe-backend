@@ -36,6 +36,7 @@ import {
   Query,
   Res,
   UseGuards,
+  BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 
@@ -61,6 +62,8 @@ import { SetQuotationExpiryDto } from '../dto/set-quotation-expiry.dto';
 import { SetQuotationNotesDto } from '../dto/set-notes.dto';
 import { SetQuotationTaxRateDto } from '../dto/set-tax-rate.dto';
 import { CancelQuotationDto } from '../dto/cancel-quotation.dto';
+
+const QUOTATION_PDF_FORMAT = 'quotation-a4' as const;
 
 @Controller('quotations')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -416,6 +419,10 @@ export class QuotationsController {
    * Moved here from `PdfGenerationController` to avoid a circular DI
    * dependency: `QuotationsModule` already imports `PdfGenerationModule`
    * (for the send flow), so the `PdfGenerationService` is available.
+   *
+   * Without `format` it renders `quotation-a4` (the service-wide default
+   * is the sale receipt, which cannot render a quotation); any other
+   * format is rejected with 400 `INVALID_FORMAT`.
    */
   @Get(':id/pdf')
   @RequirePermissions(['read', 'Quotation'])
@@ -424,7 +431,13 @@ export class QuotationsController {
     @Query('format') format: string | undefined,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
-    const resolvedFormat = this.pdfService.resolveFormat(format);
+    const resolvedFormat =
+      format && format.length > 0
+        ? this.pdfService.resolveFormat(format)
+        : QUOTATION_PDF_FORMAT;
+    if (resolvedFormat !== QUOTATION_PDF_FORMAT) {
+      throw new BadRequestException('INVALID_FORMAT');
+    }
 
     let quotation;
     try {

@@ -169,14 +169,14 @@ Renderiza el PDF de la cotización. Funciona en **cualquier estado** (DRAFT, SEN
 **Query params**:
 | Parámetro | Tipo   | Default          | Descripción                                |
 | --------- | ------ | ---------------- | ------------------------------------------ |
-| `format`  | string | `quotation-a4`   | Por ahora solo `quotation-a4` es válido    |
+| `format`  | string | `quotation-a4`   | Por ahora solo `quotation-a4` es válido; sin `format` (o vacío) se usa `quotation-a4` |
 
-**Response**: `200` con `Content-Type: application/pdf` y `Content-Disposition: inline; filename="cotizacion-{id}.pdf"`.
+**Response**: `200` con `Content-Type: application/pdf` y `Content-Disposition: inline; filename="cotizacion-COT-{8 hex}.pdf"` (folio corto, p. ej. `cotizacion-COT-c55bed88.pdf`; el PDF imprime el mismo folio).
 
 **Errores**:
 | Código | Mensaje | Causa |
 |--------|---------|-------|
-| `400` | `INVALID_FORMAT` | Formato no soportado |
+| `400` | `INVALID_FORMAT` | Formato no soportado o que no es de cotización (`receipt-a4`, `receipt-ticket`) |
 | `404` | `Quotation not found` | ID no existe |
 | `401` | — | No autenticado |
 | `403` | — | Sin permiso `read:Quotation` |
