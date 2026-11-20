@@ -65,6 +65,7 @@ import type {
   ReceiptBusiness,
   ReceiptSale,
   ReceiptCustomer,
+  ReceiptLineItem,
 } from './templates/receipt/receipt.types';
 import {
   formatQuotationFolio,
@@ -293,11 +294,16 @@ export class PdfGenerationService implements OnModuleInit {
       name: sale.customer?.name ?? null,
     };
 
-    const items: LineItem[] = sale.items.map((item) => ({
+    const items: ReceiptLineItem[] = sale.items.map((item) => ({
       productName: item.productName,
       variantName: item.variantName,
       quantity: item.quantity,
       unitPriceCents: item.unitPriceCents,
+      // Price BEFORE any per-line discount — the same base the sale subtotal
+      // is built from (sale.entity.ts previewTotals). Per-unit discounts bake
+      // the reduction into `unitPriceCents`; BUY_X_GET_Y keeps it full.
+      baseUnitPriceCents:
+        item.prePriceCentsBeforeDiscount ?? item.unitPriceCents,
       discountTitle: item.discountTitle,
       discountAmountCents: item.discountAmountCents,
       subtotalCents: item.subtotalCents,

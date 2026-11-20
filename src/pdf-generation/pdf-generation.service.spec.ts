@@ -508,6 +508,86 @@ describe('PdfGenerationService', () => {
     },
   );
 
+  describe('receipt line base price (ticket promo reconciliation)', () => {
+    const baseItem = makeConfirmedSale().items[0];
+
+    async function receiptItems(
+      items: SaleDetailResponseDto['items'],
+    ): Promise<Array<Record<string, unknown>>> {
+      const sale = makeConfirmedSale({ items });
+      salesService.getSaleDetail.mockResolvedValue(sale);
+      const renderMock = jest.mocked(renderToStream);
+      renderMock.mockReturnValue(
+        Readable.from(['pdf']) as unknown as ReturnType<typeof renderToStream>,
+      );
+
+      await service.generateSalePdf(sale.id, 'tenant-1', 'receipt-ticket');
+
+      const element = renderMock.mock.calls[0][0] as {
+        props: { items: Array<Record<string, unknown>> };
+      };
+      return element.props.items;
+    }
+
+    it('maps the pre-discount price of a per-unit discounted line (unitPrice is already net)', async () => {
+      const [line] = await receiptItems([
+        {
+          ...baseItem,
+          quantity: 3,
+          unitPriceCents: 29_610,
+          subtotalCents: 88_830,
+          discountType: 'percentage',
+          discountValue: 10,
+          discountAmountCents: 3_290,
+          discountTitle: 'Cliente frecuente 10%',
+          prePriceCentsBeforeDiscount: 32_900,
+        },
+      ]);
+
+      expect(line).toMatchObject({
+        unitPriceCents: 29_610,
+        baseUnitPriceCents: 32_900,
+        subtotalCents: 88_830,
+        discountAmountCents: 3_290,
+        discountTitle: 'Cliente frecuente 10%',
+      });
+    });
+
+    it('maps the full price of a BUY_X_GET_Y line (unitPrice stays full, pre-price equals it)', async () => {
+      const [line] = await receiptItems([
+        {
+          ...baseItem,
+          quantity: 2,
+          unitPriceCents: 11_950,
+          subtotalCents: 11_950,
+          discountAmountCents: 11_950,
+          discountTitle: 'Promo 2×1',
+          prePriceCentsBeforeDiscount: 11_950,
+          rewardKind: 'buy_x_get_y',
+        },
+      ]);
+
+      expect(line).toMatchObject({
+        unitPriceCents: 11_950,
+        baseUnitPriceCents: 11_950,
+        subtotalCents: 11_950,
+        discountAmountCents: 11_950,
+      });
+    });
+
+    it('falls back to the unit price for a line without a per-line discount (never divides)', async () => {
+      const [line] = await receiptItems([
+        { ...baseItem, prePriceCentsBeforeDiscount: null },
+      ]);
+
+      expect(line).toMatchObject({
+        unitPriceCents: 5_000,
+        baseUnitPriceCents: 5_000,
+        subtotalCents: 10_000,
+      });
+    });
+  });
+
   // ── WU4 — Quotation rendering ──────────────────────────────────────
 
   describe('renderQuotationPdf (WU4 / T047)', () => {

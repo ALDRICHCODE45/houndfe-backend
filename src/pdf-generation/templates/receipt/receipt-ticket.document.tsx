@@ -1,35 +1,45 @@
 /**
- * ReceiptTicketDocument — 80mm thermal ticket PDF template for the
- * `receipt-ticket` format key.
+ * ReceiptTicketDocument — 80 mm thermal ticket PDF template for the
+ * `receipt-ticket` format key (pdf-ticket-redesign T2, S1-S3).
  *
- * Compact twin of the modern A4 receipt. Same palette (ink #111827,
- * grays, blue #2563EB on the total), same Inter family, same visual
- * language — but a reduced spacing scale (4/6/8/12) so everything fits
- * the 227pt page width.
+ * Spec artboard: design/pdf-ticket-redesign/01-libro-compacto.html («libro
+ * compacto», the thermal twin of the A4 ledger) plus the framed Deuda box of
+ * 02-clasico-centrado.html (owner choice). 1-bit friendly: only #000 on #fff,
+ * Helvetica / Helvetica-Bold, text wordmark instead of the image logo.
  *
- * RULE OF GOLD: the ticket does NOT copy the A4 cards (padding 16) —
- * they do not fit 227pt. The header meta block uses a compact card with
- * padding 4-6 and a subtle hairline border; every other section is
- * vertical rhythm with no card fills.
+ * Section order (every field the previous ticket printed is kept):
+ * brand + RECIBO + folio · Fecha · Cajero · Vendedor · Cliente · Productos
+ * (names wrap; variant · qty × price; per-line promo) · Subtotal ·
+ * Descuentos · Envío · Pagado · Deuda (boxed) · Cambio · TOTAL · Pagos ·
+ * closing note.
  *
- * The page uses `wrap={false}` with a height computed by
- * `getTicketHeight()` — the height MUST cover every section or content
- * is clipped. The formula below mirrors the compact vertical rhythm:
- * shell (header + operator + customer + totals + footer + gaps) plus a
- * per-item and per-payment allowance.
+ * HEIGHT: the page is declared with a WIDTH ONLY (227 pt). react-pdf 4.5
+ * resolves the page height from the laid-out content (single page, exact fit),
+ * so wrapped names, promo lines, payments and the debt box can never be clipped
+ * or spill onto a second page — there is no height estimate to keep in sync.
+ * (Proved with a real render in the T2 probe: 3 / 12 / 40 items → 1 page.)
  */
-import { Document, Page, Text, View } from '@react-pdf/renderer';
+import { Document, Page, View } from '@react-pdf/renderer';
 import { PAPER_SIZES } from '../../pdf-generation.constants';
+import { formatA4DateTime, formatA4Money } from '../shared/a4-kit';
 import {
-  CustomerSection,
-  getModernFontFamily,
-  LineItemsTable,
-  PaymentsList,
-  ReceiptHeader,
-  SHARED_STYLES,
-  TotalsBlock,
-} from '../shared';
+  resolveTicketBrandName,
+  TICKET_STYLES,
+  TicketDebtBox,
+  TicketEmptyRow,
+  TicketFooter,
+  TicketGrandTotal,
+  TicketHeader,
+  TicketItem,
+  TicketKeyValue,
+  TicketPayment,
+  TicketSectionHead,
+  TicketSummaryRow,
+} from './ticket-kit';
 import type { ReceiptDocumentProps } from './receipt.types';
+
+/** Customer placeholder for sales without an assigned customer. */
+const PUBLIC_CUSTOMER = 'Público en General';
 
 export function ReceiptTicketDocument({
   business,
@@ -39,110 +49,81 @@ export function ReceiptTicketDocument({
   totals,
   payments,
 }: ReceiptDocumentProps) {
-  const height = getTicketHeight(items.length, payments.length);
+  const customerName = customer.name?.trim() ? customer.name : PUBLIC_CUSTOMER;
+  const shipping = totals.shippingChargeCents ?? 0;
 
   return (
     <Document title={`Ticket ${sale.folio}`}>
       <Page
-        size={{ width: PAPER_SIZES.TICKET.width, height }}
-        style={[
-          SHARED_STYLES.modern.ticket.page,
-          // Runtime font family — cascades to every Text on the page.
-          { fontFamily: getModernFontFamily() },
-        ]}
+        // Width only: the height is derived from the content (see header).
+        size={{ width: PAPER_SIZES.TICKET.width }}
+        style={TICKET_STYLES.page}
         wrap={false}
       >
         <View>
-          <ReceiptHeader
-            companyName={business.companyName}
+          <TicketHeader
+            brandName={resolveTicketBrandName(business.companyName)}
             folio={sale.folio}
-            date={sale.date}
-            title="RECIBO"
-            variant="ticket"
           />
+          <TicketKeyValue label="FECHA" value={formatA4DateTime(sale.date)} />
+          <TicketKeyValue label="CAJERO" value={sale.cashier} />
+          <TicketKeyValue label="VENDEDOR" value={sale.seller} />
+          <TicketKeyValue label="CLIENTE" value={customerName} />
 
-          <OperatorMeta cashier={sale.cashier} seller={sale.seller} />
+          <TicketSectionHead left="PRODUCTO" right="IMPORTE" />
+          {items.length === 0 ? (
+            <TicketEmptyRow>---</TicketEmptyRow>
+          ) : (
+            items.map((item, index) => (
+              <TicketItem key={`${item.productName}-${index}`} {...item} />
+            ))
+          )}
 
-          <CustomerSection customerName={customer.name} variant="ticket" />
+          <TicketSummaryRow
+            label="Subtotal"
+            value={formatA4Money(totals.subtotalCents)}
+          />
+          <TicketSummaryRow
+            label="Descuentos"
+            value={formatA4Money(
+              totals.discountCents > 0
+                ? -totals.discountCents
+                : totals.discountCents,
+            )}
+          />
+          {shipping > 0 ? (
+            <TicketSummaryRow label="Envío" value={formatA4Money(shipping)} />
+          ) : null}
+          {totals.paidCents > 0 ? (
+            <TicketSummaryRow
+              label="Pagado"
+              value={formatA4Money(totals.paidCents)}
+            />
+          ) : null}
+          {totals.debtCents > 0 ? (
+            <TicketDebtBox debtCents={totals.debtCents} />
+          ) : null}
+          {totals.changeDueCents > 0 ? (
+            <TicketSummaryRow
+              label="Cambio"
+              value={formatA4Money(totals.changeDueCents)}
+              bold
+            />
+          ) : null}
+          <TicketGrandTotal totalCents={totals.totalCents} />
 
-          <LineItemsTable items={items} variant="ticket" />
+          <TicketSectionHead left="PAGOS" right="MONTO" />
+          {payments.length === 0 ? (
+            <TicketEmptyRow>Sin pagos registrados.</TicketEmptyRow>
+          ) : (
+            payments.map((payment, index) => (
+              <TicketPayment key={`${payment.method}-${index}`} {...payment} />
+            ))
+          )}
 
-          <TotalsBlock {...totals} variant="ticket" />
-
-          <PaymentsList payments={payments} variant="ticket" />
-
-          <ReceiptFooter />
+          <TicketFooter />
         </View>
       </Page>
     </Document>
   );
-}
-
-/**
- * Operator meta — CAJERO / VENDEDOR in one compact row (tiny gray
- * labels + ink values), reusing the ticket operator tokens.
- */
-function OperatorMeta({
-  cashier,
-  seller,
-}: {
-  cashier: string;
-  seller: string;
-}) {
-  return (
-    <View style={SHARED_STYLES.modern.ticket.operator.row}>
-      <View style={SHARED_STYLES.modern.ticket.operator.field}>
-        <Text style={SHARED_STYLES.modern.ticket.operator.label}>CAJERO</Text>
-        <Text style={SHARED_STYLES.modern.ticket.operator.value}>
-          {cashier}
-        </Text>
-      </View>
-      <View style={SHARED_STYLES.modern.ticket.operator.field}>
-        <Text style={SHARED_STYLES.modern.ticket.operator.label}>VENDEDOR</Text>
-        <Text style={SHARED_STYLES.modern.ticket.operator.value}>{seller}</Text>
-      </View>
-    </View>
-  );
-}
-
-/**
- * Ticket footer — compact thank-you line + fiscal disclaimer in small
- * gray type.
- */
-function ReceiptFooter() {
-  return (
-    <View>
-      <Text style={SHARED_STYLES.modern.ticket.footer.thanks}>
-        Gracias por su compra.
-      </Text>
-      <Text style={SHARED_STYLES.modern.ticket.footer.disclaimer}>
-        Este comprobante no constituye una factura fiscal.
-      </Text>
-    </View>
-  );
-}
-
-/**
- * Compute the ticket page height from content length.
- *
- * The ticket renders with `wrap={false}` (thermal rolls cannot paginate)
- * so this number MUST be large enough to fit every section. The formula
- * is a deliberate over-estimate of the compact vertical rhythm:
- *
- *   shellHeight = fixed sections (header + operator + customer + items
- *     eyebrow + totals + payments eyebrow + footer) + section gaps +
- *     page padding. Generous so multi-line items (name wraps) stay inside.
- *   lineItemsHeight = per-item allowance (name line + optional variant
- *     line + row margin).
- *   paymentsHeight = per-payment allowance (method line + optional
- *     reference/timestamp lines + row margin).
- *
- * A floor keeps minimal receipts from looking absurdly short.
- */
-function getTicketHeight(itemCount: number, paymentCount: number): number {
-  const shellHeight = 280;
-  const lineItemsHeight = itemCount * 24;
-  const paymentsHeight = paymentCount * 26;
-
-  return Math.max(480, shellHeight + lineItemsHeight + paymentsHeight);
 }
