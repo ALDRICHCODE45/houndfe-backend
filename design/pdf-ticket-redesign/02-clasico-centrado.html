@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B · Clásico centrado — Ticket térmico 80 mm HoundFe</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#dce2e8;font-family:Helvetica,Arial,"Liberation Sans",sans-serif;color:#24313d;padding:28px 32px 44px;width:780px;-webkit-font-smoothing:antialiased}
+.note{background:#fff;border:1px solid #8593a3;padding:16px 20px;margin-bottom:22px;font-size:12px;line-height:1.5}
+.note h1{font-size:15px;margin-bottom:6px}.note p{margin-bottom:5px}.note b{font-weight:700}
+.note ul{margin:3px 0 6px 18px}.note li{margin-bottom:1px}
+.tools{display:flex;align-items:center;font-size:12px;margin-bottom:14px}
+.tools input{margin-right:7px;width:16px;height:16px}.tools label{cursor:pointer}
+input:focus-visible{outline:3px solid #173968;outline-offset:2px}
+.stage{display:flex;gap:60px;align-items:flex-start}
+.col{width:303px}
+.cap{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#576574;margin-bottom:2px}
+.csub{font-size:11px;color:#576574;line-height:1.35;margin-bottom:8px;min-height:30px}
+.dim{display:flex;align-items:center;font-size:11px;color:#576574;margin-bottom:8px;white-space:nowrap}
+.dim i{flex:1;border-top:1px solid #576574;height:0;margin:0 6px}
+.wrap{position:relative;filter:drop-shadow(0 2px 5px rgba(36,49,61,.4))}
+.paper{width:303px;background:#fff;padding:16px 15.5px 24px}
+.guides{display:none;position:absolute;top:0;bottom:0;width:0;border-left:1px dotted #b42318;z-index:2;pointer-events:none}
+.guides.l{left:15.5px}.guides.r{left:287.5px}
+body.g .guides{display:block}
+.chk{font-size:11px;line-height:1.45;margin-top:12px;color:#24313d;background:#fff;border:1px solid #8593a3;padding:6px 8px}
+.chk b{font-weight:700}
+
+/* ── Tokens de la dirección (SÍ van al PDF): solo #000 sobre #fff, Helvetica / Helvetica-Bold, mín. 11 px ≈ 8.25 pt ── */
+.t{font-size:11px;line-height:1.3;color:#000;font-variant-numeric:tabular-nums;font-weight:400}
+.t b{font-weight:700}
+
+.c{text-align:center}
+.logo{width:136px;height:51px;border:2px solid #000;margin:0 auto;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;letter-spacing:.04em}
+.ttl{font-size:12px;font-weight:700;letter-spacing:.22em;margin-top:9px}
+.fol{font-size:17px;font-weight:700;margin-top:1px}
+.dat{font-size:12px;margin-top:1px}
+.dr{border-top:1px dashed #000;margin:9px 0 0}
+.ops{display:flex;padding-top:7px}.ops>div{flex:1}
+.ops span{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase}.ops b{font-size:12px}
+.cus{padding-top:7px}.cus span{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase}.cus b{font-size:13px}
+.st{display:flex;align-items:center;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;margin-top:9px}
+.st:before,.st:after{content:"";flex:1;border-top:1px dashed #000;margin:0 8px}
+.item{padding:5px 0;border-bottom:1px dashed #000}
+.item .nm{display:block;font-weight:700;font-size:12px}
+.item .vr{display:block}
+.item .ln{display:flex;justify-content:space-between;align-items:baseline;margin-top:1px}
+.item .ln b{font-size:13px}
+.item .dc{display:flex;justify-content:space-between}
+.sl{display:flex;justify-content:space-between;padding:2px 0;font-size:12px}
+.sl.b{font-weight:700}
+.gt{border-top:2px solid #000;border-bottom:2px solid #000;padding:6px 0 7px;margin:8px 0 6px;text-align:center}
+.gt span{display:block;font-size:12px;font-weight:700;letter-spacing:.3em}
+.gt b{display:block;font-size:36px;letter-spacing:-.02em;line-height:1.05;margin-top:1px}
+.deb{border:2px solid #000;padding:5px 8px;margin-top:5px}
+.deb .sl{padding:0;font-size:14px;font-weight:700}
+.deb p{text-align:center;margin-top:2px}
+.pay{display:flex;justify-content:space-between;align-items:flex-start;padding:4px 0;border-bottom:1px dashed #000}
+.pay .m{font-weight:700;font-size:12px}.pay .m em{font-style:normal;font-weight:400;font-size:11px;margin-left:6px}
+.pay .s{display:block}.pay>b{font-size:12px;flex-shrink:0;padding-left:8px}
+.end{margin-top:14px}.end b{display:block;font-size:12px}
+
+</style>
+</head>
+<body>
+<aside class="note" aria-label="Notas de la dirección">
+  <h1>B · Clásico centrado — TOTAL grande</h1>
+  <p><b>Estrategia:</b> recibo de caja tradicional: encabezado centrado (logo, RECIBO, folio, fecha), separadores punteados «—— PRODUCTOS ——», cada producto en bloque de 3 líneas (nombre / variante / cantidad × precio e importe), y un TOTAL a 36 px centrado entre reglas de 2 px que es lo más grande del ticket. Pagado y Cambio van después del TOTAL; la Deuda se enmarca en un recuadro de 2 px (borde, no relleno) con la leyenda «Saldo pendiente de pago» (copy nuevo, opcional).</p>
+  <p><b>Tradeoff:</b> la mejor legibilidad y el TOTAL/Deuda imposibles de pasar por alto (el cliente lo lee a un brazo de distancia); es el que más papel gasta (venta larga ≈ 358 mm, +33% frente a A; bloques de 3 líneas por producto y encabezado centrado de 5 renglones) y su estructura se aleja del A4 (todo centrado).</p>
+  <p><b>Logotipo:</b> caja de 136×51 px (proporción 512:191) como marcador del logotipo en variante de 1 bit (contorno negro, relleno blanco, umbralizado ≥ 128 px de ancho). Es la única dirección que lo usa; si no se genera esa variante, cae al wordmark de texto de las otras dos. El PNG a color tal cual NO sirve en térmica.</p>
+  <p><b>Campos que imprime hoy (todos conservados):</b> Marca (Logotipo / nombre de empresa) · Título (RECIBO) · Folio (FOLIO #…) · Fecha (FECHA dd mmm aaaa, HH:mm) · Operadores (CAJERO · VENDEDOR) · Cliente (nombre o «Público en General») · Productos (nombre · variante · cantidad × precio · importe (+ descuento de línea)) · Totales (Subtotal · Descuentos · Envío (si hay) · Pagado · Deuda (si &gt; 0) · Cambio (si &gt; 0) · TOTAL) · Pagos (método o nombre personalizado · subtítulo o Ref · hora · monto) · Cierre (Gracias por su compra · aviso de comprobante no fiscal). Dirección y teléfono del negocio llegan en las props pero hoy no se imprimen; tampoco aquí.</p>
+  <p><b>Escala:</b> 1 px = 0.75 pt. Papel 303 px (227 pt, 80 mm); margen lateral 15.5 px (≈ 4 mm) → área imprimible 272 px (≈ 72 mm). El borde dentado y la sombra son solo del canvas. Todo lo que está sobre el papel es #000 sobre #fff.</p>
+</aside>
+<div class="tools"><input type="checkbox" id="g"><label for="g">Mostrar márgenes imprimibles (4 mm)</label></div>
+<main class="stage">
+  <div class="col">
+    <div class="cap">a · Venta corta</div>
+    <div class="csub">3 productos · efectivo con cambio · sin cliente asignado</div>
+    <div class="dim"><span>◄</span><i></i><span>80 mm · 303 px · 227 pt</span><i></i><span>►</span></div>
+    <div class="wrap">
+      <span class="guides l"></span><span class="guides r"></span>
+      <article class="paper" data-t="a" aria-label="Ticket a A-202611-000073"><div class="t">
+<header class="c"><div class="logo" role="img" aria-label="Logotipo HoundFe (1 bit)">LOGO 1 BIT</div><div class="ttl">RECIBO</div><div class="fol">FOLIO #A-202611-000073</div><div class="dat">FECHA 15 ene 2026, 11:42</div></header>
+<div class="dr"></div>
+<div class="ops c"><div><span>Cajero</span><b>Mariana Ortega Ruiz</b></div><div><span>Vendedor</span><b>Jorge Salazar Ibarra</b></div></div>
+<div class="cus c"><span>Cliente</span><b>Público en General</b></div>
+<div class="st">Productos</div>
+<div class="item"><b class="nm">Croquetas Adulto Raza Grande 18 kg</b><span class="vr">Pollo y arroz</span><div class="ln"><span>1 × $1,149.00</span><b>$1,149.00</b></div></div><div class="item"><b class="nm">Arnés Acolchado para Paseo</b><span class="vr">Talla M · Rojo</span><div class="ln"><span>1 × $289.00</span><b>$289.00</b></div></div><div class="item"><b class="nm">Snacks Dentales para Perro</b><span class="vr">Paquete de 12 piezas</span><div class="ln"><span>2 × $119.50</span><b>$239.00</b></div></div>
+<div style="height:7px"></div>
+<div class="sl"><span>Subtotal</span><span>$1,677.00</span></div>
+<div class="sl"><span>Descuentos</span><span>$0.00</span></div>
+
+<div class="gt"><span>TOTAL</span><b>$1,677.00</b></div>
+<div class="sl"><span>Pagado</span><span>$2,000.00</span></div>
+<div class="sl b"><span>Cambio</span><span>$323.00</span></div>
+
+<div class="st">Pagos</div>
+<div class="pay"><div><span class="m">Efectivo<em>11:42</em></span></div><b>$2,000.00</b></div>
+<div class="end c"><b>Gracias por su compra.</b>Este comprobante no constituye una factura fiscal.</div></div></article>
+    </div>
+    <div class="chk" id="chk-a" role="status">Midiendo…</div>
+  </div>
+  <div class="col">
+    <div class="cap">b · Venta larga</div>
+    <div class="csub">12 productos con variantes · 2 descuentos · envío · 2 pagos · deuda pendiente · cliente con nombre</div>
+    <div class="dim"><span>◄</span><i></i><span>80 mm · 303 px · 227 pt</span><i></i><span>►</span></div>
+    <div class="wrap">
+      <span class="guides l"></span><span class="guides r"></span>
+      <article class="paper" data-t="b" aria-label="Ticket b A-202611-000074"><div class="t">
+<header class="c"><div class="logo" role="img" aria-label="Logotipo HoundFe (1 bit)">LOGO 1 BIT</div><div class="ttl">RECIBO</div><div class="fol">FOLIO #A-202611-000074</div><div class="dat">FECHA 15 ene 2026, 12:05</div></header>
+<div class="dr"></div>
+<div class="ops c"><div><span>Cajero</span><b>Mariana Ortega Ruiz</b></div><div><span>Vendedor</span><b>Jorge Salazar Ibarra</b></div></div>
+<div class="cus c"><span>Cliente</span><b>Rosa Elena Cárdenas Juárez</b></div>
+<div class="st">Productos</div>
+<div class="item"><b class="nm">Croquetas Adulto Raza Grande 18 kg</b><span class="vr">Pollo y arroz</span><div class="ln"><span>2 × $1,149.00</span><b>$2,298.00</b></div></div><div class="item"><b class="nm">Arnés Acolchado para Paseo</b><span class="vr">Talla M · Rojo</span><div class="ln"><span>1 × $289.00</span><b>$289.00</b></div></div><div class="item"><b class="nm">Arena Aglomerante para Gato 10 kg</b><span class="vr">Aroma lavanda</span><div class="ln"><span>3 × $189.00</span><b>$567.00</b></div></div><div class="item"><b class="nm">Snacks Dentales para Perro</b><span class="vr">Paquete de 12 piezas</span><div class="ln"><span>2 × $119.50</span><b>$119.50</b></div><div class="dc"><span>Promo 2×1</span><span>-$119.50</span></div></div><div class="item"><b class="nm">Collar Reflejante Ajustable</b><span class="vr">Talla S · Azul</span><div class="ln"><span>1 × $135.00</span><b>$135.00</b></div></div><div class="item"><b class="nm">Croquetas Cachorro a granel</b><span class="vr">Por kilo</span><div class="ln"><span>2.5 × $62.00</span><b>$155.00</b></div></div><div class="item"><b class="nm">Correa Retráctil 5 m</b><span class="vr">Negro</span><div class="ln"><span>1 × $215.00</span><b>$215.00</b></div></div><div class="item"><b class="nm">Shampoo Hipoalergénico 500 ml</b><span class="vr">Avena y aloe</span><div class="ln"><span>2 × $98.50</span><b>$197.00</b></div></div><div class="item"><b class="nm">Cama Ortopédica Mediana</b><span class="vr">Gris · 70 × 50 cm</span><div class="ln"><span>1 × $459.00</span><b>$459.00</b></div></div><div class="item"><b class="nm">Plato Antiderrame de Acero Inoxidable</b><span class="vr">1 litro</span><div class="ln"><span>1 × $89.00</span><b>$89.00</b></div></div><div class="item"><b class="nm">Juguete Mordedera de Cuerda</b><span class="vr">Verde</span><div class="ln"><span>3 × $45.00</span><b>$135.00</b></div></div><div class="item"><b class="nm">Pipeta Antipulgas Perro 10–25 kg</b><span class="vr">Caja de 3 pipetas</span><div class="ln"><span>1 × $329.00</span><b>$296.10</b></div><div class="dc"><span>Cliente frecuente 10%</span><span>-$32.90</span></div></div>
+<div style="height:7px"></div>
+<div class="sl"><span>Subtotal</span><span>$5,107.00</span></div>
+<div class="sl"><span>Descuentos</span><span>-$152.40</span></div>
+<div class="sl"><span>Envío</span><span>$60.00</span></div>
+<div class="gt"><span>TOTAL</span><b>$5,014.60</b></div>
+<div class="sl"><span>Pagado</span><span>$4,000.00</span></div>
+
+<div class="deb"><div class="sl"><span>Deuda</span><span>$1,014.60</span></div><p>Saldo pendiente de pago</p></div>
+<div class="st">Pagos</div>
+<div class="pay"><div><span class="m">Efectivo<em>12:05</em></span></div><b>$2,000.00</b></div><div class="pay"><div><span class="m">Terminal BBVA<em>12:06</em></span><span class="s">Débito ···· 4821 · Ref: 084731</span></div><b>$2,000.00</b></div>
+<div class="end c"><b>Gracias por su compra.</b>Este comprobante no constituye una factura fiscal.</div></div></article>
+    </div>
+    <div class="chk" id="chk-b" role="status">Midiendo…</div>
+  </div>
+</main>
+<script>
+(function(){
+  var OK={'rgb(0, 0, 0)':1,'rgb(255, 255, 255)':1,'rgba(0, 0, 0, 0)':1};
+  function tear(el){
+    var w=el.offsetWidth,h=el.offsetHeight,s=8,a=5,xs=[],x;
+    for(x=0;x<w;x+=s)xs.push(x); xs.push(w);
+    var top=xs.map(function(x,i){return x+'px '+(i%2?0:a)+'px'});
+    var bot=xs.slice().reverse().map(function(x,i){return x+'px '+(h-((xs.length-1-i)%2?0:a))+'px'});
+    el.style.clipPath='polygon('+top.concat(bot).join(',')+')';
+  }
+  function check(paper,out){
+    var pr=paper.getBoundingClientRect(),cs=getComputedStyle(paper);
+    var padL=parseFloat(cs.paddingLeft),padR=parseFloat(cs.paddingRight);
+    var inner=pr.width-padL-padR,bad=0,small=0,col=0,minF=99;
+    paper.querySelectorAll('.t, .t *').forEach(function(e){
+      var r=e.getBoundingClientRect(); if(!r.width&&!r.height)return;
+      if(r.right>pr.right-padR+0.6||r.left<pr.left+padL-0.6||e.scrollWidth>e.clientWidth+1)bad++;
+      var c=getComputedStyle(e);
+      if(!OK[c.color]||!OK[c.backgroundColor])col++;
+      ['Top','Right','Bottom','Left'].forEach(function(b){
+        if(c['border'+b+'Style']!=='none'&&parseFloat(c['border'+b+'Width'])>0&&!OK[c['border'+b+'Color']])col++;
+      });
+      var hasText=Array.prototype.some.call(e.childNodes,function(n){return n.nodeType===3&&n.textContent.trim()});
+      if(hasText){var f=parseFloat(c.fontSize);if(f<minF)minF=f;if(f<11)small++;}
+    });
+    var h=paper.offsetHeight,ok=!bad&&!small&&!col&&paper.offsetWidth<=303;
+    out.dataset.ok=ok?'1':'0';
+    out.innerHTML='<b>Medido:</b> ancho '+paper.offsetWidth+' px = '+Math.round(paper.offsetWidth*0.75)+' pt · imprimible '+Math.round(inner)+' px · alto <b>'+h+' px = '+Math.round(h*0.75)+' pt ≈ '+Math.round(h*25.4/96)+' mm</b><br>'
+      +(ok?'✓ sin desbordes · ✓ solo #000 sobre #fff · ✓ texto mínimo '+minF+' px':'✗ desbordes: '+bad+' · colores: '+col+' · texto &lt; 11 px: '+small);
+  }
+  document.querySelectorAll('.paper').forEach(function(p,i){tear(p);check(p,document.getElementById('chk-'+p.dataset.t));});
+  var cb=document.getElementById('g');cb.addEventListener('change',function(){document.body.classList.toggle('g',cb.checked)});
+})();
+</script>
+</body>
+</html>

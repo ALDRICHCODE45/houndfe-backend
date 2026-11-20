@@ -1,0 +1,28 @@
+{
+  "title": "Ticket térmico 80 mm — Recibo de venta",
+  "brief": "Tres direcciones para el ticket de venta de 80 mm (227 pt de ancho, alto variable) del backend HoundFe, punto de venta de una tienda de mascotas en México; copy en español, importes MXN, fechas «15 ene 2026, 12:05». Cada artboard dibuja dos tickets a escala real (303 px de papel, 272 px imprimibles con ~4 mm de margen, borde dentado): (a) venta corta de 3 productos, efectivo con cambio y sin cliente; (b) venta larga de 12 productos con variantes, 2 descuentos, envío, 2 pagos, deuda pendiente y cliente con nombre. Conserva todos los campos del ticket actual (marca, RECIBO, folio, fecha, cajero, vendedor, cliente, productos, subtotal, descuentos, envío, pagado, deuda, cambio, total, pagos, cierre). Restricciones para @react-pdf/renderer 4.5: solo #000 sobre #fff (sin grises ni rellenos que se tramen), Helvetica/Helvetica-Bold, mínimo ~11 px (8 pt), solo flexbox, sin degradados ni sombras. Cada artboard mide por script sus anchos, desbordes, colores y tamaño mínimo de texto.",
+  "feature": "odd/tasks/pdf-ticket-redesign.md",
+  "artboards": [
+    {
+      "file": "01-libro-compacto.html",
+      "title": "A · Libro compacto (ledger de una columna)",
+      "tradeoff": "Mismo idioma que el libro mayor A4 (hairlines punteadas, regla gruesa, TOTAL entre dos reglas de 2 px, mismo orden de totales): el más corto en venta larga (≈ 270 mm; ≈ 25% menos papel que B) y el más fiel a la familia A4; a cambio el TOTAL queda debajo de seis filas y la deuda solo se distingue por negrita (escaneo más lento). Wordmark de texto.",
+      "width": 780,
+      "height": 1760
+    },
+    {
+      "file": "02-clasico-centrado.html",
+      "title": "B · Clásico centrado (TOTAL grande)",
+      "tradeoff": "Encabezado centrado, bloques de 3 líneas y TOTAL de 36 px entre reglas, Deuda en recuadro con «Saldo pendiente de pago»: la mejor legibilidad y lo que no se puede pasar por alto; el que más papel gasta (venta larga ≈ 358 mm, +33% frente a A) y el más alejado del A4. Único que necesita logotipo en variante de 1 bit.",
+      "width": 780,
+      "height": 2090
+    },
+    {
+      "file": "03-dos-columnas-densa.html",
+      "title": "C · Dos columnas densa (cantidad primero + barra de TOTAL)",
+      "tradeoff": "Folio/fecha en franja, celdas de dos columnas, cantidad en negrita a la izquierda y barra negra inversa de TOTAL (única zona rellena) inmediatamente tras los productos: el escaneo más rápido para verificar cantidades y total; papel similar a A (venta larga ≈ 277 mm), pero nombres largos se parten en 2 líneas en la columna central (~156 px) y la barra consume tinta/calor.",
+      "width": 780,
+      "height": 1780
+    }
+  ]
+}

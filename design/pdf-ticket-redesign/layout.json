@@ -1,0 +1,17 @@
+{
+  "arrangement": "free",
+  "positions": {
+    "01-libro-compacto.html": {
+      "x": 0,
+      "y": 0
+    },
+    "02-clasico-centrado.html": {
+      "x": 860,
+      "y": 0
+    },
+    "03-dos-columnas-densa.html": {
+      "x": 1790,
+      "y": 3
+    }
+  }
+}
