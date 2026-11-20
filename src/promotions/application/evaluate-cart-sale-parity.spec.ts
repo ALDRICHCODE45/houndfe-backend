@@ -181,6 +181,8 @@ function harness(
     undefined,
     {
       charge: stockCharge,
+      // restock-backorder / T6: confirmBotSale locks stock before saving.
+      lockStock: jest.fn().mockResolvedValue(undefined),
     } as unknown as Dependencies[10],
   );
   return {
