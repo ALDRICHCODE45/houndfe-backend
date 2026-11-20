@@ -4560,8 +4560,10 @@ model ScheduledSlotCounter {
 // customer, variant and human-decision targets have no `(tenantId, id)` unique
 // today (existing tables are not altered), so those three FKs are plain `id`
 // FKs like `chatbot_requests`/`sale_items`; the service always resolves them
-// with the tenant filter first. All FKs are `Restrict`: a backorder is
-// business history, never deleted by removing its customer/product/variant.
+// with the tenant filter first. All FKs are `Restrict`: deleting a parent never
+// silently removes a backorder. Customer delete is the one explicit exception
+// (T1b): it answers 409 while a WAITING/RESERVED backorder exists and otherwise
+// deletes the customer's terminal backorders in the same transaction.
 //
 // Migration-authoritative objects Prisma's DSL cannot express (see
 // `20261120000000_backorders/migration.sql`, pinned by

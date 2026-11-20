@@ -343,9 +343,10 @@ Base: `/customers/:id/addresses`
 | 401 | Unauthorized | JWT ausente o inválido |
 | 403 | Forbidden | Token válido pero sin permiso CASL requerido (ver §6) |
 | 404 | `Customer not found` / `CustomerAddress not found` | No existe, o pertenece a otro tenant |
+| 409 | `CUSTOMER_HAS_ACTIVE_BACKORDERS` | `DELETE /customers/:id` con un pedido por reposición en espera o apartado (§3.5) |
 | 422 | `firstName is required` | Trim de firstName quedó vacío en update |
 
-No hay condiciones de carrera relevantes en este módulo — no hay locks ni idempotencia (cada operación es CRUD directo).
+Las operaciones son CRUD directo sin idempotencia. Única excepción: `DELETE /customers/:id` bloquea la fila del cliente (`FOR UPDATE`) mientras revisa sus pedidos por reposición, para que no se cree uno nuevo en medio del borrado.
 
 ---
 
