@@ -849,6 +849,30 @@ export class Sale {
   }
 
   /**
+   * restock-backorder / T3 — adds a line at a price fixed outside the price
+   * lists: the backorder's `finalPriceCents` (contract v1 §7, owner Q3). Never
+   * stacks onto a line of the same product/variant (that one is priced by the
+   * lists and promotions, this one is not), and is stored as a `custom` price so
+   * the repricing pass treats it as sticky. Callers add it AFTER the promotion
+   * engine ran: the engine never sees it.
+   */
+  addFixedPriceItem(
+    itemProps: Omit<
+      SaleItemProps,
+      'priceSource' | 'customPriceCents' | 'originalPriceCents'
+    >,
+  ): void {
+    this.ensureDraft();
+    this._items.push(
+      SaleItem.create({
+        ...itemProps,
+        priceSource: 'custom',
+        customPriceCents: itemProps.unitPriceCents,
+      }),
+    );
+  }
+
+  /**
    * Update quantity of an existing item by ID
    */
   updateItemQuantity(itemId: string, newQuantity: number): void {

@@ -16,6 +16,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
 import type { SaleItemProps } from './domain/sale-item.entity';
+import type { BotBackorderCheckout } from './domain/backorder-checkout.port';
 import type { ShippingAddressSnapshot } from './domain/shipping-address-snapshot';
 import type { ISaleRepository } from './domain/sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
@@ -170,7 +171,15 @@ type ConfirmBotSaleInput = {
     variantName?: string | null;
     quantity: number;
     unitPriceCents: number;
+    // restock-backorder / T3 (contract v1 §7) — the line confirms this RESERVED
+    // backorder: priced at its `finalPriceCents`, outside the list-price guard
+    // and the promotion engine. Needs `backorders`; only the atomic checkout
+    // supplies both.
+    backorderId?: string | null;
   }>;
+  // restock-backorder / T3 — the checkout's handle on the backorders its lines
+  // confirm (validation, locks, CONFIRMED). Required iff a line has `backorderId`.
+  backorders?: BotBackorderCheckout;
   // Q2 / WU3 — optional re-quote guard. When set, the server compares
   // this expected total against the engine-recomputed `totalCents`
   // (D7). Mismatch → `PROMO_RE_QUOTE` 409 with `{ recomputedTotalCents,
@@ -3822,7 +3831,11 @@ export class SalesService {
       customerId: string | null;
       cashierUserId: string;
       shippingAddressId?: string | null;
-      items: ConfirmBotSaleInput['items'];
+      // `fixedPriceCents` (restock-backorder / T3): a backorder line at its
+      // frozen price, added after the promotion engine ran.
+      items: Array<
+        ConfirmBotSaleInput['items'][number] & { fixedPriceCents?: number }
+      >;
       excludeRegisteredOnlyPromotions?: boolean;
     },
     customerList: string | null,
@@ -3834,7 +3847,11 @@ export class SalesService {
       sale.assignCustomer(input.customerId, input.shippingAddressId ?? null);
     }
     sale.assignSeller(input.cashierUserId);
+    const fixedPriceItems = input.items.filter(
+      (item) => item.fixedPriceCents !== undefined,
+    );
     for (const item of input.items) {
+      if (item.fixedPriceCents !== undefined) continue;
       sale.addItem({
         id: randomUUID(),
         saleId,
@@ -3858,11 +3875,33 @@ export class SalesService {
     // Re-evaluate with the full POS engine, but only bot-eligible promotions.
     // Preview, bot confirmation and atomic checkout share this path; POS
     // drafts, charge and quotations keep the default candidate set.
-    const metadata = await this.recomputePricingAndPromotions(
-      sale,
-      true,
-      input.excludeRegisteredOnlyPromotions,
-    );
+    // restock-backorder / T3: a cart made only of backorder lines has nothing
+    // for the engine (owner Q3: no promotion again on those lines).
+    const metadata =
+      sale.items.length === 0 && fixedPriceItems.length > 0
+        ? {
+            promotionCapacityDemands: [] as PromotionCapacityClaim[],
+            capacityExcludedPromotionIds: [] as string[],
+          }
+        : await this.recomputePricingAndPromotions(
+            sale,
+            true,
+            input.excludeRegisteredOnlyPromotions,
+          );
+    // Backorder lines join AFTER the engine: never promoted, never stacked.
+    for (const item of fixedPriceItems) {
+      sale.addFixedPriceItem({
+        id: randomUUID(),
+        saleId,
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        productName: item.productName,
+        variantName: item.variantName ?? null,
+        quantity: item.quantity,
+        unitPriceCents: item.fixedPriceCents!,
+        unitPriceCurrency: 'MXN',
+      });
+    }
     return { sale, ...metadata };
   }
 
@@ -3992,7 +4031,28 @@ export class SalesService {
       }
     }
     return this.saleRepo.runInTransaction(async () => {
+      // restock-backorder / T3 — lines that confirm a backorder are validated
+      // first (no locks yet; the locked re-check runs right before the stock
+      // charge) and carry the backorder's frozen price. Without a backorder
+      // line none of this runs and the confirmation is exactly as before.
+      const backorderIds = input.items.flatMap((item) =>
+        item.backorderId ? [item.backorderId] : [],
+      );
+      let frozenPrices: ReadonlyMap<string, number> = new Map();
+      if (backorderIds.length > 0) {
+        if (!input.backorders) {
+          throw new BusinessRuleViolationError(
+            'Backorder lines are only accepted by the atomic checkout',
+            'BACKORDER_CHECKOUT_UNAVAILABLE',
+          );
+        }
+        frozenPrices = await input.backorders.inspect(new Date());
+      }
+
       for (const item of input.items) {
+        // A backorder line has no list price to compare with: `inspect` already
+        // proved `unitPriceCents === finalPriceCents` of a valid reservation.
+        if (item.backorderId) continue;
         const applicablePrices = await this.productsService.getApplicablePrices(
           item.productId,
           item.variantId ?? null,
@@ -4152,7 +4212,21 @@ export class SalesService {
       }
 
       const { sale, promotionCapacityDemands } = await this.buildBotPricingSale(
-        { ...input, shippingAddressId },
+        {
+          ...input,
+          shippingAddressId,
+          items: input.items.map((item) => {
+            if (!item.backorderId) return item;
+            const fixedPriceCents = frozenPrices.get(item.backorderId);
+            if (fixedPriceCents === undefined) {
+              throw new BusinessRuleViolationError(
+                'Backorder price missing',
+                'BACKORDER_NOT_FOUND',
+              );
+            }
+            return { ...item, fixedPriceCents };
+          }),
+        },
         customer.globalPriceListId ?? null,
       );
       sale.captureShippingAddress(shippingAddress);
@@ -4215,15 +4289,32 @@ export class SalesService {
 
       // O1 / T4 — FEFO charge through the stock journal (actor "Bot"), in
       // this same transaction; low-stock outbox rows as for the POS charge.
-      await this.requireSaleStock().charge({
-        saleId: sale.id,
-        items: input.items.map((item) => ({
-          productId: item.productId,
-          variantId: item.variantId ?? null,
-          quantity: item.quantity,
-        })),
-        actor: { kind: 'bot', userId: input.cashierUserId },
-      });
+      const chargeItems = input.items.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId ?? null,
+        quantity: item.quantity,
+      }));
+      if (backorderIds.length > 0) {
+        // restock-backorder / T3 — stock locks first (every product of the
+        // cart), then the backorder rows, after the promotion-capacity claim
+        // above: the global lock order. The reservation is consumed by a
+        // release WITHOUT allocation plus the normal charge of the whole cart.
+        const lockedAt = new Date();
+        await input.backorders!.lockAndVerify(lockedAt);
+        await this.requireSaleStock().chargeConsumingBackorders({
+          saleId: sale.id,
+          items: chargeItems,
+          actor: { kind: 'bot', userId: input.cashierUserId },
+          backorderIds,
+          now: lockedAt,
+        });
+      } else {
+        await this.requireSaleStock().charge({
+          saleId: sale.id,
+          items: chargeItems,
+          actor: { kind: 'bot', userId: input.cashierUserId },
+        });
+      }
 
       const confirmedAt = new Date();
       const folio = await this.saleRepo.allocateNextFolio(confirmedAt);
@@ -4273,6 +4364,10 @@ export class SalesService {
         items: sale.items,
         appliedOrderPromotion: sale.appliedOrderPromotion ?? null,
       });
+
+      if (backorderIds.length > 0) {
+        await input.backorders!.markConfirmed(saleId, confirmedAt);
+      }
 
       await this.publishSaleConfirmedEvent({
         saleId,

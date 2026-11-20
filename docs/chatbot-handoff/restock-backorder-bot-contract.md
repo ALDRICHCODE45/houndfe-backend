@@ -1,6 +1,6 @@
 # Chatbot ↔ backend: restock backorder («pedido por reposición») — bot contract v1
 
-**Status:** v1 approved by the chatbot on 2026-11-20 (with the §8 one-re-estimate-per-product adjustment). **T1 and T2 are built** on branch `feat/restock-backorder` (not merged, deploy pending): the model and the four routes `POST`, `GET :id`, `GET` list and `POST :id/cancel` under `/chatbot-api/backorders` (T1), and the reservation on arrival, the 24 h confirm window, the sweep and the `backorder.*` feed with the new outcome `PROVIDER_REJECTED` (T2; T2 ships together with the sweep, see the deploy checklist). Everything marked **(T3)**, **(T4)** or **(T5)** is **not live yet**; do not build against it until each task is announced. Migrations: `20261120000000_backorders` (T1, additive: two tables, two enums), `20261120010000_backorder_stock_movements`, `20261121000000_backorder_feed` and `20261121000100_backorder_feed` (T2, additive). Task: `odd/tasks/restock-backorder.md` (S1–S3). Source of truth for the full design (staff API, stock fields, §3–§5, §9): `docs/proposals/restock-backorder-contract.md`.
+**Status:** v1 approved by the chatbot on 2026-11-20 (with the §8 one-re-estimate-per-product adjustment). **T1, T2 and T3 are built** on branch `feat/restock-backorder` (not merged, deploy pending): the model and the four routes `POST`, `GET :id`, `GET` list and `POST :id/cancel` under `/chatbot-api/backorders` (T1), and the reservation on arrival, the 24 h confirm window, the sweep and the `backorder.*` feed with the new outcome `PROVIDER_REJECTED` (T2; T2 ships together with the sweep, see the deploy checklist), and the confirmation through the normal checkout with `sale.items[i].backorderId` (T3, §7). Everything marked **(T4)** or **(T5)** is **not live yet**; do not build against it until each task is announced. Migrations: `20261120000000_backorders` (T1, additive: two tables, two enums), `20261120010000_backorder_stock_movements`, `20261121000000_backorder_feed` and `20261121000100_backorder_feed` (T2, additive). Task: `odd/tasks/restock-backorder.md` (S1–S3). Source of truth for the full design (staff API, stock fields, §3–§5, §9): `docs/proposals/restock-backorder-contract.md`.
 
 Source (T1): `src/backorders/presentation/backorders-bot.controller.ts`, `src/backorders/application/backorders-bot.service.ts`, `src/backorders/domain/backorder-rules.ts`, `src/backorders/backorders.integration.spec.ts`, `prisma/migrations/20261120000000_backorders/migration.sql`.
 
@@ -12,11 +12,11 @@ Source (T2): `src/backorders/application/backorder-allocator.ts` (reserve), `src
 | --- | --- | --- |
 | Schedule (`POST`), read (`GET :id`), list (`GET`), customer cancel (`POST :id/cancel`), scopes, errors, `BackorderBot` | **T1** | built |
 | Reserve on arrival (WAITING → RESERVED), 24 h confirm window, `currentPriceCents`/`finalPriceCents`, reservation reminder and expiry (sweep, §4), expired-lot swap, the `backorder.reserved` / `reservation_reminder` / `reservation_expired` / `reservation_lost` feed items (§10), outcome `PROVIDER_REJECTED`, staff alert | **T2** | **built** |
-| Confirm through the normal checkout with `sale.items[i].backorderId` (§7) | **T3** | not live |
+| Confirm through the normal checkout with `sale.items[i].backorderId` (§7) | **T3** | **built** |
 | Overdue ETA re-estimate, `backorder.eta_updated` / `backorder.eta_unavailable` (§8) | **T4** | not live |
 | Staff API in the POS, `reservedForBackorders` stock fields, `STOCK_RESERVED_FOR_BACKORDER`, `backorder.cancelled_by_staff` (staff cancel), staff-facing notices API | **T5** | not live (staff-facing, nothing for the bot except the cancel item) |
 
-With T2 a backorder is created `WAITING` and, when the product's stock goes up (any adjustment, initial stock, a cancelled or lapsed sale, a released reservation), the backorders of that product/variant are reserved first come, first served (whole quantities only, the next ones that fit when the head does not: Q1). You get `backorder.reserved` and the customer has **24 hours from the reservation** to confirm through the normal checkout (checkout with `backorderId` is **T3**: until it ships a reserved backorder can only be cancelled or expire; **do not deploy T2 against a bot that cannot yet check out a reservation, or tell the customer to wait for staff**). The 24 h run from the reservation, not from delivery: if you cannot deliver `backorder.reserved` or its reminder, ACK `PROVIDER_REJECTED` and staff call the customer (§10).
+With T2 a backorder is created `WAITING` and, when the product's stock goes up (any adjustment, initial stock, a cancelled or lapsed sale, a released reservation), the backorders of that product/variant are reserved first come, first served (whole quantities only, the next ones that fit when the head does not: Q1). You get `backorder.reserved` and the customer has **24 hours from the reservation** to confirm through the normal checkout (checkout with `backorderId` is **T3**, §7, now built in the same branch). The 24 h run from the reservation, not from delivery: if you cannot deliver `backorder.reserved` or its reminder, ACK `PROVIDER_REJECTED` and staff call the customer (§10).
 
 ## 0. Owner decisions this implements
 
@@ -26,7 +26,7 @@ With T2 a backorder is created `WAITING` and, when the product's stock goes up (
 | D2 | "Se le aparta solo y el bot le pide confirmar" — on arrival, reserve for waiting backorders by scheduling order; reserved units are not sellable at the counter | §3, §4 | T2 |
 | D3 | "24 horas" to confirm, reminder before expiry | §4 | T2 |
 | D4 | "Cuando sube el stock del producto" — any increase leaving sellable stock > 0 triggers matching | §4 | T2 |
-| D5 | Pay on arrival, never in advance (no money/deposit). Confirm = normal checkout | §7 | T3 |
+| D5 | Pay on arrival, never in advance (no money/deposit). Confirm = normal checkout | §7 | T3 (live) |
 | D6 | Overdue ETA: new staff estimate BEFORE telling the customer; only once | §8 | T4 |
 | D7 | Customer cancels from chat; staff list and cancel in the POS | §6 | cancel: T1; staff: T5 |
 
@@ -43,7 +43,7 @@ A backorder belongs to one sucursal (the credential's tenant), one customer, one
 
 ```
 WAITING ──(stock arrives, FIFO, full quantity available)──▶ RESERVED                  (T2, live)
-RESERVED ──(bot checkout with backorderId)──▶ CONFIRMED (terminal; saleId set)         (T3)
+RESERVED ──(bot checkout with backorderId)──▶ CONFIRMED (terminal; saleId set)         (T3, live)
 RESERVED ──(24 h without checkout)──▶ EXPIRED (terminal)                               (T2, live)
 RESERVED ──(reserved lot expired, no valid lot to swap)──▶ WAITING (front of the queue) (T2, live)
 WAITING | RESERVED ──(customer or staff cancel)──▶ CANCELLED (terminal)                (T1 customer; T5 staff)
@@ -169,7 +169,7 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 ```
 
 - `queuePosition` (1-based, counted inside the product/variant queue) only while `WAITING`; `null` otherwise.
-- `currentPriceCents`, `finalPriceCents`, `reservedAt`, `reservedUntil`, `reminderAt` are `null` until the backorder is reserved (T2). They are cleared again if the reservation is lost (`RESERVED → WAITING`); after `EXPIRED` they keep the values of the reservation that lapsed. `saleId` is set at checkout (**T3**).
+- `currentPriceCents`, `finalPriceCents`, `reservedAt`, `reservedUntil`, `reminderAt` are `null` until the backorder is reserved (T2). They are cleared again if the reservation is lost (`RESERVED → WAITING`); after `EXPIRED` they keep the values of the reservation that lapsed. `saleId` is set at checkout (T3, live).
 - `cancelledByKind`: `CUSTOMER` (T1) or `STAFF` (T5). `cancelReason` is what was sent (≤280).
 - `productName`, `variantName`, `branchName` and `customerFirstName` are read live (the current names).
 - **Timestamps are ISO 8601 in UTC with `Z`** (`toISOString()`), like every other bot payload today (`holdUntil`, `reminderAt` of the pay-in-store hold, feed items). The approved proposal asked for an offset (`-06:00`); the backend keeps UTC `Z` for every backorder payload, feed items included, for consistency. Convert to local time on your side with the sucursal's time zone (America/Mexico_City).
@@ -181,18 +181,68 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 - A customer the staff deletes from the POS: refused (`409`) while they have a `WAITING`/`RESERVED` backorder; with only `CONFIRMED`/`EXPIRED`/`CANCELLED` ones the customer is deleted and those backorders go with them (`GET /chatbot-api/backorders/:id` then answers `404 BACKORDER_NOT_FOUND`).
 - `currentPriceCents` (T2): at reservation, the price that customer would pay that day through the bot for that quantity **with automatic promotions** (the final unit price `POST /chatbot-api/pricing/evaluate-cart` returns). The customer never pays more than a counter customer would that day.
 - `finalPriceCents = min(referencePriceCents, currentPriceCents)` (T2), frozen at reservation and shown in the arrival message.
-- At checkout the backorder line is priced at `finalPriceCents` and **promotions are not applied again to that line** (**T3**).
+- At checkout the backorder line is priced at `finalPriceCents` and **promotions are not applied again to that line** (T3, live, §7).
 
-## 7. Confirm = normal checkout with `backorderId` (D5) — **T3, not live**
+## 7. Confirm = normal checkout with `backorderId` (D5) — **T3, live**
 
-`POST /chatbot-api/checkouts` will gain an optional `sale.items[i].backorderId`. For a line with `backorderId`, inside the confirm transaction:
+`POST /chatbot-api/checkouts` accepts an optional `sale.items[i].backorderId` (UUID; `null` is the same as omitted). Nothing else of the request or the response changes. The member exists **only on `POST /chatbot-api/checkouts`**: the legacy `POST /chatbot-api/sales` (which shares the confirmation code but has no way to validate and consume a reservation) keeps rejecting it as an unknown member (`400`).
 
-1. The backorder must be `RESERVED` and `reservedUntil > now`, otherwise `409 BACKORDER_NOT_RESERVED {status}` / `409 BACKORDER_RESERVATION_EXPIRED`.
-2. Same customer, product, variant and `quantity`, otherwise `409 BACKORDER_MISMATCH {field}`.
-3. `unitPriceCents` must equal `finalPriceCents`; the line skips the price-list check (`PRICE_OUT_OF_DATE`) and promotions.
-4. The reservation is released and the normal sale `charge` runs (net zero on sellable stock); the backorder becomes `CONFIRMED` with `saleId` and `confirmedAt`.
+```json
+{
+  "phoneCountryCode": "52", "phone": "5512349901",
+  "customer": { "mode": "existing", "customerId": "uuid" },
+  "sale": {
+    "cashierUserId": "uuid",
+    "items": [
+      { "productId": "uuid", "productName": "Croquetas Adulto Raza Grande 18 kg",
+        "quantity": 2, "unitPriceCents": 109900, "backorderId": "uuid-of-the-reserved-backorder" },
+      { "productId": "uuid", "productName": "Collar", "quantity": 1, "unitPriceCents": 50000 }
+    ],
+    "expectedTotalCents": 269800,
+    "shipping": { "mode": "pickup" }
+  }
+}
+```
 
-Other lines in the same cart behave as today. Shipping or pickup and the pay-in-store hold work unchanged. Until T3, a checkout with `backorderId` is rejected (the member is unknown to the DTO).
+**Rules for a line with `backorderId`** (inside the confirm transaction, in this order):
+
+1. The backorder must exist in the sucursal and be `RESERVED` with `reservedUntil > now`.
+2. A reserved lot that expired meanwhile is swapped for a valid one (silent) or, when valid stock cannot cover it, the reservation is lost (owner Q6: an expired lot is never sold).
+3. Same customer, `productId`, `variantId` (omitted = `null`) and `quantity` as the backorder.
+4. `unitPriceCents` must equal the backorder's `finalPriceCents`. **That line skips the list-price check and the promotions** (owner Q3): it is sold at `finalPriceCents × quantity`, as its own line (it never stacks with another line of the same product), stored as a `custom` price. The other lines keep today's rules (`PRICE_OUT_OF_DATE` against the live list price, promotions, stock). The price bypass exists only for a valid reservation: the same price without `backorderId`, or with an expired / cancelled / foreign one, is refused.
+5. The reserved units are consumed by the sale (`BACKORDER_RELEASE` followed by the normal charge of the whole cart, same transaction): the sellable stock does not move and **no other waiting backorder is served in between**. The backorder becomes `CONFIRMED` with `saleId`, `confirmedAt` and `version + 1`.
+
+**`expectedTotalCents` and `PROMO_RE_QUOTE`.** The server totals the backorder lines at `finalPriceCents × quantity` and prices the other lines exactly as before; backorder lines are **outside the promotion base** (an order-level promotion is computed on the ordinary lines only). So:
+
+```
+expectedTotalCents = Σ(finalPriceCents × quantity of the backorder lines)
+                   + total of the ordinary lines (what POST /chatbot-api/pricing/evaluate-cart returns for ONLY those lines)
+                   + shipping charge, if any
+```
+
+A cart made only of backorder lines is `Σ finalPriceCents × quantity`. A wrong total is `409 PROMO_RE_QUOTE { recomputedTotalCents, … }` as today, and `recomputedTotalCents` is computed that way.
+
+**Errors** (code-only body `{ statusCode, error, message }` with `error === message`, plus the detail member shown). Everything else is as for any checkout (`PRICE_OUT_OF_DATE` of an ordinary line, `STOCK_INSUFFICIENT_AT_CONFIRM`, `IDEMPOTENCY_KEY_*`, …).
+
+| Status | `error` (+ detail) | When |
+| --- | --- | --- |
+| 404 | `BACKORDER_NOT_FOUND` | no such backorder in this sucursal (another sucursal's id is the same) |
+| 409 | `BACKORDER_NOT_RESERVED {status}` | `WAITING`, `CONFIRMED`, `EXPIRED` or `CANCELLED` (a second checkout of a confirmed one answers `{status: "CONFIRMED"}`) |
+| 409 | `BACKORDER_RESERVATION_EXPIRED` | `reservedUntil` passed (even if the sweep has not run yet) |
+| 409 | `BACKORDER_RESERVATION_LOST` | the reserved lot expired and valid stock cannot replace it. The backorder is back to `WAITING` at its place and **you also get `backorder.reservation_lost`** (committed even though the checkout failed): apologise as for that item, do not retry |
+| 409 | `BACKORDER_MISMATCH {field}` | `field` is `customerId`, `productId`, `variantId` or `quantity` |
+| 409 | `PRICE_OUT_OF_DATE {currentPriceCents}` | `unitPriceCents` is not the backorder's `finalPriceCents` (`currentPriceCents` is that value). A stale price on an ordinary line is the old code-only `PRICE_OUT_OF_DATE` |
+| 409 | `BACKORDER_RESERVATION_UNAVAILABLE` | the backorder is `RESERVED` but the stock journal holds nothing for it (a data fault, logged by the backend; staff fix it). Not actionable by the bot: tell the customer staff will call |
+| 400 | `INVALID_CHECKOUT_REQUEST` | `backorderId` is not a UUID, or the same backorder appears twice in the cart |
+| 503 | `BACKORDER_CHECKOUT_UNAVAILABLE` | the backorder module is not bound in this backend (a misconfigured deployment) |
+
+A refused checkout writes no sale, no receipt and charges nothing: the same `X-Idempotency-Key` may be retried (except after `BACKORDER_RESERVATION_LOST`, whose retry is a plain `BACKORDER_NOT_RESERVED {status: "WAITING"}`).
+
+**Idempotency.** `backorderId` joins the request hash **only when present**; a request without it hashes byte for byte as before. Same key + same body replays the stored `201` (even though the backorder is no longer `RESERVED`); same key with another `backorderId`, or with none, is `409 IDEMPOTENCY_KEY_CONFLICT`.
+
+**Races.** Against the 24 h sweep, a customer cancel and the arrival allocator, a reservation is taken by exactly one of them: if the checkout commits first the sweep and the cancel find a `CONFIRMED` backorder (the cancel answers `409 BACKORDER_NOT_CANCELLABLE {status: "CONFIRMED"}`); if the expiry or the cancel commits first the checkout answers `BACKORDER_NOT_RESERVED {status: "EXPIRED" | "CANCELLED"}`. Nothing is charged twice.
+
+Mixed carts, shipping or pickup and the pay-in-store hold (`PATCH /chatbot-api/sales/:saleId/payment-intent`) work unchanged. If that sale is later cancelled or its hold expires, the units return to the general stock (`reverseSale`) and the next `WAITING` backorder is reserved (§4). The `CONFIRMED` backorder stays `CONFIRMED`.
 
 ## 8. Overdue ETA (D6) — **T4, not live**
 
@@ -282,8 +332,14 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 
 ## Deploy checklist (T2)
 
-1. **Ship T2 together with its sweep (it is in this build) and not before the bot handles T3** (checkout with `backorderId`): a customer told «apartado por 24 h» must be able to confirm.
+1. **Ship T2 together with its sweep (it is in this build) and not before the bot sends `sale.items[i].backorderId` (T3, §7, in this build)**: a customer told «apartado por 24 h» must be able to confirm.
 2. Your feed consumer must accept `requestId: null` **without** a `saleId` and the four `backorder.*` types above, and the new outcome `PROVIDER_REJECTED` (ACK `STALE` for types you do not handle yet): a strict parser would otherwise reject the page and stall the feed. Deploy the backend **after** the bot can parse them.
 3. Apply migrations (additive, in this order, each in one short transaction at low traffic): `20261120010000_backorder_stock_movements` (three enum values), `20261121000000_backorder_feed` (feed column `backorderId`, subject CHECK widened to request / sale / backorder, tenant-qualified FK, exactly-once partial unique index, two partial indexes of the sweep) and `20261121000100_backorder_feed` (the closed outcome CHECK gains `PROVIDER_REJECTED`). Do not deploy the bot reporting `PROVIDER_REJECTED` before the last one: an older database answers `500`.
 4. The sweep (`@Interval` 30 s) starts with the backend; no new credential or scope. Staff notices go to every active member with `read:Backorder` (the grant is seeded by T5; until then only members with `manage` on `all` receive them).
 5. Existing items, outcomes, payloads, recovery and ACK behaviour of requests, conversations and sales are unchanged (additive only).
+
+## Deploy checklist (T3)
+
+1. No migration: the backorder line is stored with the existing `custom` price source (sticky, no promotion) and the existing `BACKORDER_RELEASE`/`SALE` journal types.
+2. The bot must send `backorderId` only to `POST /chatbot-api/checkouts` and compute `expectedTotalCents` as in §7. Requests without `backorderId` are unchanged (status, body, errors, idempotency hash).
+3. Deploy the bot's handling of the new codes (`BACKORDER_*`, `PRICE_OUT_OF_DATE {currentPriceCents}`) with or before the backend.

@@ -308,3 +308,57 @@ describe('POST /chatbot-api/sales shipping shapes', () => {
     ).toBeGreaterThan(0);
   });
 });
+
+// restock-backorder / T3 (contract v1 §7) — optional `sale.items[i].backorderId`.
+describe('checkout line backorderId', () => {
+  const BACKORDER = '00000000-0000-4000-8000-0000000000b1';
+  const withItem = (item: object) => {
+    const base = input();
+    return { ...base, sale: { ...base.sale, items: [item] } };
+  };
+  const line = { ...input().sale.items[0] };
+
+  it('accepts a UUID backorderId on the checkout line', () => {
+    const { dto, errors } = check(
+      withItem({ ...line, backorderId: BACKORDER }),
+    );
+    expect(errors).toEqual([]);
+    expect(dto.sale.items[0].backorderId).toBe(BACKORDER);
+  });
+
+  it('keeps the member optional (a request without it is unchanged)', () => {
+    const { dto, errors } = check(withItem(line));
+    expect(errors).toEqual([]);
+    expect(dto.sale.items[0].backorderId).toBeUndefined();
+  });
+
+  it.each([['not-a-uuid'], [12], [''], [{}], [['x']]])(
+    'rejects backorderId %j',
+    (backorderId) => {
+      expect(
+        check(withItem({ ...line, backorderId })).errors.length,
+      ).toBeGreaterThan(0);
+    },
+  );
+
+  it('still rejects any other unknown line member', () => {
+    expect(
+      check(withItem({ ...line, backorderid: BACKORDER })).errors.length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('is NOT accepted on the legacy POST /chatbot-api/sales (it shares the confirm path but not the contract)', () => {
+    const dto = plainToInstance(RegisterBotSaleRequestDto, {
+      cashierUserId: id,
+      customerId: id,
+      items: [{ ...line, backorderId: BACKORDER }],
+    });
+    expect(
+      validateSync(dto, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        forbidUnknownValues: true,
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+});

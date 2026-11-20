@@ -29,6 +29,7 @@ import { BackorderReservationService } from './application/backorder-reservation
 import { BackordersBotService } from './application/backorders-bot.service';
 import { BACKORDER_RESERVATION_RELEASER } from './application/ports/backorder-reservation-releaser.port';
 import { BACKORDER_RESERVED_HOOK } from './application/ports/backorder-reserved-hook.port';
+import { BackorderCheckoutService } from './infrastructure/backorder-checkout.service';
 import { BackorderCustomerResolver } from './infrastructure/backorder-customer.resolver';
 import { BackorderReferencePriceListResolver } from './infrastructure/backorder-reference-price-list.resolver';
 import { BackorderSweepScheduler } from './infrastructure/backorder-sweep.scheduler';
@@ -58,6 +59,8 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     // T2b: reminder, expiry, expired-lot swap and the safety-net allocation.
     BackorderSweepStore,
     BackorderSweepScheduler,
+    // T3: confirm a reserved backorder through the bot checkout (registers itself).
+    BackorderCheckoutService,
     // T2a: the real releaser (BACKORDER_RELEASE + next in queue).
     {
       provide: BACKORDER_RESERVATION_RELEASER,

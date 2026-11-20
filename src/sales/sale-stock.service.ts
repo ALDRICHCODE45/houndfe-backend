@@ -96,6 +96,61 @@ export class SaleStockService {
   }
 
   /**
+   * restock-backorder / T3 — charges a cart in which some lines confirm RESERVED
+   * backorders (contract v1 §7.4). The units a backorder holds go back to the
+   * buckets they came from (`BACKORDER_RELEASE`) and the normal charge of the
+   * whole cart follows in the same transaction. The release runs WITHOUT the
+   * stock-increase listeners (`allocate: false`): the released units must not be
+   * offered to another waiting backorder between the release and the sale.
+   * Callers hold the product locks already (`lockStock` of every product of the
+   * cart), so nobody else can take the released units either. The low-stock edge
+   * sees the release and the sale rows together, i.e. the real net change.
+   */
+  async chargeConsumingBackorders(input: {
+    saleId: string;
+    items: StockChargeItem[];
+    actor: SaleStockActor;
+    backorderIds: string[];
+    now?: Date;
+  }): Promise<AppliedStockMovement[]> {
+    const actor = await this.resolveActor(input.actor);
+    const releaseAt = input.now ?? new Date();
+    const released: AppliedStockMovement[] = [];
+    for (const backorderId of input.backorderIds) {
+      released.push(
+        ...(await this.journal.releaseBackorder(
+          { backorderId, actor, allocate: false },
+          releaseAt,
+        )),
+      );
+    }
+    // The sale rows are stamped after the release rows (the kardex orders by createdAt).
+    const chargeAt = new Date(Math.max(Date.now(), releaseAt.getTime() + 1));
+    let charged: AppliedStockMovement[];
+    try {
+      charged = await this.journal.charge(
+        input.items,
+        { saleId: input.saleId, actor },
+        chargeAt,
+      );
+    } catch (error) {
+      if (
+        error instanceof InsufficientStockError ||
+        error instanceof StockBucketNotFoundError
+      ) {
+        throw new BusinessRuleViolationError(
+          STOCK_INSUFFICIENT_AT_CONFIRM,
+          STOCK_INSUFFICIENT_AT_CONFIRM,
+        );
+      }
+      throw error;
+    }
+    const movements = [...released, ...charged];
+    await this.crossing.record(movements);
+    return movements;
+  }
+
+  /**
    * Restores exactly what the sale consumed. A sale confirmed before the
    * journal (no `SALE` rows) is restored from its `lines` through the journal
    * as well; a post-journal sale without `SALE` rows restores nothing.

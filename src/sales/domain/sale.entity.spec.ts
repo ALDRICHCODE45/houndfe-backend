@@ -2703,3 +2703,50 @@ describe('Sale Entity', () => {
     });
   });
 });
+
+// restock-backorder / T3 (contract v1 §7, owner Q3)
+describe('Sale.addFixedPriceItem', () => {
+  const props = (id: string, unitPriceCents: number, quantity = 2) => ({
+    id,
+    saleId: BASE_SALE_ID,
+    productId: 'product-1',
+    variantId: null,
+    productName: 'Croquetas',
+    variantName: null,
+    quantity,
+    unitPriceCents,
+    unitPriceCurrency: 'MXN',
+  });
+
+  it('never stacks onto a line of the same product/variant and keeps its own price', () => {
+    const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+    sale.addItem(props('line-1', 1000, 1));
+
+    sale.addFixedPriceItem(props('line-2', 800, 2));
+
+    expect(sale.items).toHaveLength(2);
+    expect(sale.items[0].quantity).toBe(1);
+    expect(sale.items[1]).toMatchObject({
+      unitPriceCents: 800,
+      quantity: 2,
+      priceSource: 'custom',
+      customPriceCents: 800,
+      discountType: null,
+      promotionId: null,
+    });
+    expect(sale.previewTotals()).toEqual({
+      subtotalCents: 2600,
+      discountCents: 0,
+      totalCents: 2600,
+    });
+  });
+
+  it('accepts a zero price and only works on a DRAFT sale', () => {
+    const sale = Sale.create({ id: BASE_SALE_ID, userId: USER_ID });
+    sale.addFixedPriceItem(props('line-1', 0));
+    expect(sale.items[0].unitPriceCents).toBe(0);
+    expect(() => sale.addFixedPriceItem(props('line-2', -1))).toThrow(
+      InvalidArgumentError,
+    );
+  });
+});

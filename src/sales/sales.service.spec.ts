@@ -6007,6 +6007,306 @@ describe('SalesService', () => {
         expect(result).not.toHaveProperty('fulfillmentMode');
       });
     });
+
+    // restock-backorder / T3 (contract v1 §7) — lines that confirm a reserved backorder.
+    describe('backorder lines', () => {
+      const BACKORDER = 'bo-1';
+      const normalLine = botSaleInput.items[0]; // prod-1 / var-1 × 2 @ 1000 (list)
+      const backorderLine = {
+        ...normalLine,
+        quantity: 3,
+        unitPriceCents: 700,
+        backorderId: BACKORDER,
+      };
+
+      const handler = (
+        prices: Record<string, number> = { [BACKORDER]: 700 },
+      ) => ({
+        inspect: jest.fn().mockResolvedValue(new Map(Object.entries(prices))),
+        lockAndVerify: jest.fn().mockResolvedValue(undefined),
+        markConfirmed: jest.fn().mockResolvedValue(undefined),
+      });
+
+      const stock = () => {
+        const charge = jest.fn().mockResolvedValue([]);
+        const chargeConsumingBackorders = jest.fn().mockResolvedValue([]);
+        Object.assign(service, {
+          saleStock: { charge, chargeConsumingBackorders },
+        });
+        return { charge, chargeConsumingBackorders };
+      };
+
+      it('a cart without backorderId never touches the backorder seam and charges exactly as before', async () => {
+        setupConfirmBotSaleHappyPath();
+        const { charge, chargeConsumingBackorders } = stock();
+        const backorders = handler();
+
+        await service.confirmBotSale({ ...botSaleInput, backorders });
+
+        expect(backorders.inspect).not.toHaveBeenCalled();
+        expect(backorders.lockAndVerify).not.toHaveBeenCalled();
+        expect(backorders.markConfirmed).not.toHaveBeenCalled();
+        expect(chargeConsumingBackorders).not.toHaveBeenCalled();
+        expect(charge).toHaveBeenCalledTimes(1);
+      });
+
+      it('fails closed when a line carries backorderId but no backorder seam is supplied (legacy path)', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+
+        await expect(
+          service.confirmBotSale({ ...botSaleInput, items: [backorderLine] }),
+        ).rejects.toThrow(/backorder/i);
+
+        expect(saleRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('skips the list-price guard for the backorder line only, at its frozen price', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+        const backorders = handler();
+
+        await service.confirmBotSale({
+          ...botSaleInput,
+          items: [normalLine, backorderLine],
+          expectedTotalCents: 2000 + 2100,
+          backorders,
+        });
+
+        // Only the ordinary line is checked against the live price list.
+        expect(productsService.getApplicablePrices).toHaveBeenCalledTimes(1);
+        expect(productsService.getApplicablePrices).toHaveBeenCalledWith(
+          'prod-1',
+          'var-1',
+          2,
+        );
+        expect(backorders.inspect).toHaveBeenCalledTimes(1);
+      });
+
+      it('a stale list price on the ordinary line still answers PRICE_OUT_OF_DATE even beside a backorder line', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items: [{ ...normalLine, unitPriceCents: 999 }, backorderLine],
+            backorders: handler(),
+          }),
+        ).rejects.toMatchObject({ code: 'PRICE_OUT_OF_DATE' });
+        expect(saleRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('rejects with the seam error before any write when the backorder is not checkoutable', async () => {
+        setupConfirmBotSaleHappyPath();
+        const { charge, chargeConsumingBackorders } = stock();
+        const backorders = handler();
+        const refusal = new Error('BACKORDER_NOT_RESERVED');
+        backorders.inspect.mockRejectedValueOnce(refusal);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items: [backorderLine],
+            backorders,
+          }),
+        ).rejects.toBe(refusal);
+
+        expect(saleRepo.save).not.toHaveBeenCalled();
+        expect(charge).not.toHaveBeenCalled();
+        expect(chargeConsumingBackorders).not.toHaveBeenCalled();
+        expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+      });
+
+      it('prices the backorder line at finalPriceCents and never feeds it to the promotion engine (owner Q3)', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+        const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+        // An engine that would discount EVERY line it is shown by 50 %.
+        posEvaluate.evaluate.mockImplementation((input: PosEvalInput) =>
+          Promise.resolve({
+            lines: input.lines.map((line) => ({
+              itemId: line.itemId,
+              discountType: 'percentage' as const,
+              discountValue: 50,
+              discountTitle: '50 %',
+              promotionId: 'promo-half',
+            })),
+            order: null,
+            availableManualPromotions: [],
+            targetableManualPromotionIds: [],
+            promotionCapacityDemands: [],
+            capacityExcludedPromotionIds: [],
+          }),
+        );
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          items: [normalLine, backorderLine],
+          // ordinary line 2 × 500 (half of 1000) + backorder 3 × 700 untouched
+          expectedTotalCents: 1000 + 2100,
+          backorders: handler(),
+        });
+
+        expect(posEvaluate.evaluate.mock.calls[0][0].lines).toHaveLength(1);
+        expect(posEvaluate.evaluate.mock.calls[0][0].lines[0]).toMatchObject({
+          quantity: 2,
+        });
+        expect(result.totalCents).toBe(3100);
+        const persisted = saleRepo.persistChargeConfirmation.mock.calls[0][0];
+        expect(persisted.totalCents).toBe(3100);
+        // Two separate lines: the backorder line never stacks onto the ordinary one.
+        expect(persisted.items).toHaveLength(2);
+        const fixed = persisted.items!.find((item) => item.quantity === 3)!;
+        expect(fixed).toMatchObject({
+          unitPriceCents: 700,
+          priceSource: 'custom',
+          customPriceCents: 700,
+          discountType: null,
+          promotionId: null,
+        });
+        const ordinary = persisted.items!.find((item) => item.quantity === 2)!;
+        expect(ordinary.promotionId).toBe('promo-half');
+      });
+
+      it('PROMO_RE_QUOTE reflects the backorder line: the recomputed total includes it at its frozen price', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items: [normalLine, backorderLine],
+            // A bot that forgot the backorder line (or re-priced it).
+            expectedTotalCents: 2000,
+            backorders: handler(),
+          }),
+        ).rejects.toMatchObject({
+          code: 'PROMO_RE_QUOTE',
+          details: {
+            recomputedTotalCents: 4100,
+            expectedTotalCents: 2000,
+          },
+        });
+        expect(saleRepo.save).not.toHaveBeenCalled();
+      });
+
+      it('a cart made only of backorder lines skips the promotion engine and totals the frozen prices', async () => {
+        setupConfirmBotSaleHappyPath();
+        stock();
+        const posEvaluate = posEvaluateUseCase as PosEvaluateUseCaseMock;
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          items: [backorderLine],
+          expectedTotalCents: 2100,
+          backorders: handler(),
+        });
+
+        expect(posEvaluate.evaluate).not.toHaveBeenCalled();
+        expect(productsService.getApplicablePrices).not.toHaveBeenCalled();
+        expect(result.totalCents).toBe(2100);
+        expect(result.discountCents).toBe(0);
+        expect(promotionUsageRepo.claimForSale).toHaveBeenCalledWith(
+          expect.any(String),
+          [],
+        );
+      });
+
+      it('locks and verifies after the promotion claim and before the charge (lock order), consumes through the sale charge, and marks the backorder after the sale is persisted', async () => {
+        setupConfirmBotSaleHappyPath();
+        const { charge, chargeConsumingBackorders } = stock();
+        const backorders = handler();
+
+        const result = await service.confirmBotSale({
+          ...botSaleInput,
+          items: [normalLine, backorderLine],
+          expectedTotalCents: 4100,
+          backorders,
+        });
+
+        expect(charge).not.toHaveBeenCalled();
+        expect(chargeConsumingBackorders).toHaveBeenCalledTimes(1);
+        expect(chargeConsumingBackorders).toHaveBeenCalledWith({
+          saleId: result.saleId,
+          items: [
+            { productId: 'prod-1', variantId: 'var-1', quantity: 2 },
+            { productId: 'prod-1', variantId: 'var-1', quantity: 3 },
+          ],
+          actor: { kind: 'bot', userId: 'user-bot-cashier' },
+          backorderIds: [BACKORDER],
+          now: expect.any(Date),
+        });
+        const at = (mock: jest.Mock) => mock.mock.invocationCallOrder[0];
+        expect(at(saleRepo.save)).toBeLessThan(
+          at(promotionUsageRepo.claimForSale as jest.Mock),
+        );
+        expect(at(promotionUsageRepo.claimForSale as jest.Mock)).toBeLessThan(
+          at(backorders.lockAndVerify),
+        );
+        expect(at(backorders.lockAndVerify)).toBeLessThan(
+          at(chargeConsumingBackorders),
+        );
+        expect(at(chargeConsumingBackorders)).toBeLessThan(
+          at(saleRepo.persistChargeConfirmation as jest.Mock),
+        );
+        expect(
+          at(saleRepo.persistChargeConfirmation as jest.Mock),
+        ).toBeLessThan(at(backorders.markConfirmed));
+        expect(backorders.markConfirmed).toHaveBeenCalledWith(
+          result.saleId,
+          expect.any(Date),
+        );
+        // The same instant is used for the verification and the consumption.
+        expect(backorders.lockAndVerify.mock.calls[0][0]).toBe(
+          chargeConsumingBackorders.mock.calls[0][0].now,
+        );
+      });
+
+      it('a verification failure under the locks stops before stock, folio, persistence and the backorder update', async () => {
+        setupConfirmBotSaleHappyPath();
+        const { charge, chargeConsumingBackorders } = stock();
+        const backorders = handler();
+        const refusal = new Error('BACKORDER_RESERVATION_LOST');
+        backorders.lockAndVerify.mockRejectedValueOnce(refusal);
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items: [backorderLine],
+            backorders,
+          }),
+        ).rejects.toBe(refusal);
+
+        expect(charge).not.toHaveBeenCalled();
+        expect(chargeConsumingBackorders).not.toHaveBeenCalled();
+        expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+        expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+        expect(backorders.markConfirmed).not.toHaveBeenCalled();
+      });
+
+      it('answers the stock shortage of the ordinary lines with STOCK_INSUFFICIENT_AT_CONFIRM and never marks the backorder', async () => {
+        setupConfirmBotSaleHappyPath();
+        const { chargeConsumingBackorders } = stock();
+        chargeConsumingBackorders.mockRejectedValueOnce(
+          new BusinessRuleViolationError(
+            'STOCK_INSUFFICIENT_AT_CONFIRM',
+            'STOCK_INSUFFICIENT_AT_CONFIRM',
+          ),
+        );
+        const backorders = handler();
+
+        await expect(
+          service.confirmBotSale({
+            ...botSaleInput,
+            items: [normalLine, backorderLine],
+            backorders,
+          }),
+        ).rejects.toMatchObject({ code: 'STOCK_INSUFFICIENT_AT_CONFIRM' });
+
+        expect(backorders.markConfirmed).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('item discount use-cases', () => {

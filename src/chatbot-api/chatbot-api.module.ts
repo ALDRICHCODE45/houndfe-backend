@@ -6,6 +6,7 @@ import { PUBLIC_CATALOG_REPOSITORY } from '../public-catalog/application/ports/p
 import { PrismaPublicCatalogRepository } from '../public-catalog/infrastructure/prisma-public-catalog.repository';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { ChatbotApiService } from './application/chatbot-api.service';
+import { BackorderCheckoutRegistry } from './application/backorder-checkout.registry';
 import { CheckoutService } from './application/checkout.service';
 import { CheckoutController } from './presentation/checkout.controller';
 import { PayInStoreController } from './presentation/pay-in-store.controller';
@@ -54,6 +55,8 @@ import { ReceiptsModule } from '../receipts/receipts.module';
   providers: [
     ChatbotApiService,
     CheckoutService,
+    // restock-backorder / T3: bound by BackordersModule at startup.
+    BackorderCheckoutRegistry,
     ShippingQuoteService,
     ServiceAuthGuard,
     BotAuditInterceptor,
@@ -78,6 +81,7 @@ import { ReceiptsModule } from '../receipts/receipts.module';
     SERVICE_CREDENTIAL_REPOSITORY,
     ServiceAuthGuard,
     ChatbotApiService,
+    BackorderCheckoutRegistry,
     ShippingQuotesModule,
   ],
 })

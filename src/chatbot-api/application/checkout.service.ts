@@ -2,6 +2,10 @@ import { HttpException, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, type CustomerAddress } from '@prisma/client';
 import { createHash } from 'node:crypto';
+import {
+  BackorderCheckoutError,
+  type BackorderCheckoutLine,
+} from '../../sales/domain/backorder-checkout.port';
 import { SalesService } from '../../sales/sales.service';
 import { SaleHoldService } from '../../sales/sale-hold.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
@@ -23,6 +27,7 @@ import {
   classifyBotShipping,
   quoteRejection,
 } from './bot-shipping';
+import { BackorderCheckoutRegistry } from './backorder-checkout.registry';
 
 export const CHECKOUT_OPERATION = 'bot_checkout_create';
 const ADDRESS_FIELDS = [
@@ -101,6 +106,9 @@ export function computeCheckoutRequestHash(input: CheckoutRequestDto): string {
             variantName: item.variantName ?? null,
             quantity: item.quantity,
             unitPriceCents: item.unitPriceCents,
+            // restock-backorder / T3: joins the hash ONLY when present, so every
+            // request without it hashes byte for byte as before (stored receipts replay).
+            ...(item.backorderId ? { backorderId: item.backorderId } : {}),
           })),
           expectedTotalCents: input.sale.expectedTotalCents,
           // Legacy members hash exactly as before T7 (stored receipts replay).
@@ -152,6 +160,8 @@ export class CheckoutService {
     // pay-in-store-pickup / T1 — live hold next to the cached receipt.
     // Always provided by SalesModule; optional only for partial test graphs.
     @Optional() private readonly holds?: SaleHoldService,
+    // restock-backorder / T3 — the backorder module's checkout binding.
+    @Optional() private readonly backorders?: BackorderCheckoutRegistry,
   ) {}
 
   async status(key: string): Promise<CheckoutStatusResponse> {
@@ -187,7 +197,45 @@ export class CheckoutService {
     const tenantId = this.tenantPrisma.getTenantId();
     const requestHash = computeCheckoutRequestHash(input);
     const identity = { tenantId, operation: CHECKOUT_OPERATION, key };
+    const backorderLines: BackorderCheckoutLine[] = input.sale.items.flatMap(
+      (item) =>
+        item.backorderId
+          ? [
+              {
+                backorderId: item.backorderId,
+                productId: item.productId,
+                variantId: item.variantId ?? null,
+                quantity: item.quantity,
+                unitPriceCents: item.unitPriceCents,
+              },
+            ]
+          : [],
+    );
+    const backorderPort =
+      backorderLines.length > 0 ? this.backorders?.get() : undefined;
     try {
+      if (backorderLines.length > 0) {
+        if (!backorderPort)
+          throw checkoutError(503, 'BACKORDER_CHECKOUT_UNAVAILABLE');
+        // A replay (or a key conflict) is answered by the transaction below,
+        // before anything about the backorders is looked at.
+        const known = await this.tenantPrisma
+          .getClient()
+          .saleIdempotency.findUnique({
+            where: { tenantId_operation_key: identity },
+            select: { id: true },
+          });
+        if (!known) {
+          // Owner Q6: an expired lot is swapped or the reservation is lost, and
+          // that is committed (with `backorder.reservation_lost`) before the
+          // checkout transaction, so a refused checkout cannot roll it back.
+          const lost = await backorderPort.settleExpiredLots(
+            backorderLines.map((line) => line.backorderId),
+          );
+          if (lost)
+            throw new BackorderCheckoutError('BACKORDER_RESERVATION_LOST');
+        }
+      }
       return await this.tenantPrisma.runInTransaction(async () => {
         const tx = this.tenantPrisma.getClient();
         // Separate namespaces prevent key/phone lock collisions from lock-order inversion.
@@ -377,6 +425,15 @@ export class CheckoutService {
             ? { shippingQuote, fulfillmentMode: 'DELIVERY' as const }
             : {}),
           ...(pickup ? { fulfillmentMode: 'PICKUP' as const } : {}),
+          ...(backorderPort
+            ? {
+                backorders: backorderPort.forCheckout({
+                  customerId: customer.id,
+                  lines: backorderLines,
+                  productIds: input.sale.items.map((item) => item.productId),
+                }),
+              }
+            : {}),
         });
         const response: CheckoutResponse = {
           status: 'created',
@@ -413,6 +470,18 @@ export class CheckoutService {
         return response;
       });
     } catch (error) {
+      if (
+        error instanceof BackorderCheckoutError &&
+        error.code === 'BACKORDER_RESERVATION_LOST' &&
+        backorderPort
+      ) {
+        // A lot expired between the settlement and the locks: the checkout
+        // rolled back, so settle it again outside to commit the loss and its
+        // feed item (the sweep is the backstop if this fails too).
+        await backorderPort
+          .settleExpiredLots(backorderLines.map((line) => line.backorderId))
+          .catch(() => null);
+      }
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2002') {
           // PostgreSQL aborted the transaction: this read is deliberately OUTSIDE it.

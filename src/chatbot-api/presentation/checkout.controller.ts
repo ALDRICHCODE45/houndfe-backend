@@ -18,6 +18,7 @@ import {
   DomainError,
   InvalidArgumentError,
 } from '../../shared/domain/domain-error';
+import { BackorderCheckoutError } from '../../sales/domain/backorder-checkout.port';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
 import {
   CheckoutRequestDto,
@@ -56,6 +57,18 @@ const MISMATCH_PARTS = new Set(['CUSTOMER', 'LINES', 'DESTINATION']);
 
 /** New boundary only: never persist or return raw driver/domain message/details. */
 function safeError(error: unknown): HttpException {
+  // restock-backorder / T3: contract §7 codes with their small detail member.
+  if (error instanceof BackorderCheckoutError) {
+    return new HttpException(
+      {
+        statusCode: error.status,
+        error: error.code,
+        message: error.code,
+        ...error.details,
+      },
+      error.status,
+    );
+  }
   if (error instanceof DomainError && /^[A-Z][A-Z_]{1,79}$/.test(error.code)) {
     const status = CONFLICTS.has(error.code)
       ? 409
@@ -124,6 +137,12 @@ function parseRequest(value: unknown): CheckoutRequestDto {
           item.unitPriceCents > 2_147_483_647,
       )
     )
+      throw new Error('invalid');
+    // restock-backorder / T3: a backorder is confirmed by one line only.
+    const backorderIds = dto.sale.items.flatMap((item) =>
+      item.backorderId ? [item.backorderId.toLowerCase()] : [],
+    );
+    if (new Set(backorderIds).size !== backorderIds.length)
       throw new Error('invalid');
     // The delivery address may be omitted only for store pickup.
     if (

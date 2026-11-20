@@ -7,6 +7,7 @@ import {
   computeCheckoutRequestHash,
 } from './checkout.service';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import { BackorderCheckoutError } from '../../sales/domain/backorder-checkout.port';
 
 const id = '00000000-0000-4000-8000-000000000001';
 const version = '2026-10-14T00:00:00.000Z';
@@ -40,6 +41,19 @@ const hash = (deliveryAddress: object) =>
   computeCheckoutRequestHash(
     plainToInstance(CheckoutRequestDto, input(deliveryAddress)),
   );
+const normalized = (value: typeof address) => ({
+  street: value.street,
+  label: value.label,
+  exteriorNumber: value.exteriorNumber,
+  interiorNumber: value.interiorNumber,
+  zipCode: value.zipCode,
+  neighborhood: value.neighborhood,
+  municipality: value.municipality,
+  city: value.city,
+  state: value.state,
+  visualReferences: value.visualReferences,
+  carrierPhone: value.carrierPhone,
+});
 const correction = () => ({
   mode: 'existingUpdated',
   addressId: id,
@@ -152,6 +166,72 @@ describe('Checkout intent hash', () => {
     expect(hash(deliveryAddress)).toBe(
       createHash('sha256').update(canonical).digest('hex'),
     );
+  });
+  it('hashes a request without backorderId to the frozen sha256 (restock-backorder T3: byte-identical)', () => {
+    expect(
+      hash({
+        mode: 'existing',
+        addressId: id,
+        expectedVersion: version,
+      }),
+    ).toBe('7095de8856565a9ad42d98c2dd34fb3f06b12778bb5a5b4257e39e4e6920e625');
+  });
+  it('treats an omitted, undefined and null backorderId as the same intent (no key joins the hash)', () => {
+    const withItem = (extra: object) =>
+      computeCheckoutRequestHash(
+        plainToInstance(CheckoutRequestDto, {
+          ...input({ mode: 'newSaved', address }),
+          sale: {
+            ...input({}).sale,
+            items: [{ ...input({}).sale.items[0], ...extra }],
+          },
+        }),
+      );
+    expect(withItem({ backorderId: null })).toBe(withItem({}));
+    expect(withItem({ backorderId: undefined })).toBe(withItem({}));
+  });
+  it('joins the hash only when backorderId is present, per backorder', () => {
+    const BACKORDER_A = '00000000-0000-4000-8000-0000000000a1';
+    const BACKORDER_B = '00000000-0000-4000-8000-0000000000b1';
+    const withItem = (extra: object) =>
+      computeCheckoutRequestHash(
+        plainToInstance(CheckoutRequestDto, {
+          ...input({ mode: 'newSaved', address }),
+          sale: {
+            ...input({}).sale,
+            items: [{ ...input({}).sale.items[0], ...extra }],
+          },
+        }),
+      );
+    const without = withItem({});
+    const a = withItem({ backorderId: BACKORDER_A });
+    expect(a).not.toBe(without);
+    expect(withItem({ backorderId: BACKORDER_B })).not.toBe(a);
+    expect(withItem({ backorderId: BACKORDER_A })).toBe(a);
+    // The canonical form: the member is appended after unitPriceCents, only when set.
+    const canonical = JSON.stringify({
+      phoneCountryCode: '52',
+      phone: '5512345678',
+      customer: { mode: 'existing', customerId: id },
+      deliveryAddress: { mode: 'newSaved', address: normalized(address) },
+      sale: {
+        cashierUserId: id,
+        items: [
+          {
+            productId: id,
+            variantId: null,
+            productName: 'Item',
+            variantName: null,
+            quantity: 1,
+            unitPriceCents: 100,
+            backorderId: BACKORDER_A,
+          },
+        ],
+        expectedTotalCents: 100,
+        shipping: null,
+      },
+    });
+    expect(a).toBe(createHash('sha256').update(canonical).digest('hex'));
   });
   it.each(Object.keys(address))(
     'includes corrected address field %s',
@@ -420,5 +500,152 @@ describe('Checkout backend shipping', () => {
       of({ mode: 'pickup' }),
     ]);
     expect(hashes.size).toBe(4);
+  });
+});
+
+// restock-backorder / T3 — the checkout around a backorder line.
+describe('Checkout with backorderId', () => {
+  const BACKORDER = '00000000-0000-4000-8000-0000000000b1';
+  const body = () => ({
+    ...input({}),
+    deliveryAddress: undefined,
+    customer: { mode: 'existing', customerId: id },
+    sale: {
+      ...input({}).sale,
+      items: [{ ...input({}).sale.items[0], backorderId: BACKORDER }],
+      shipping: { mode: 'pickup' },
+    },
+  });
+
+  function harness(options: { receipt?: boolean; port?: boolean } = {}) {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ acquired: true }]),
+      saleIdempotency: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue(options.receipt ? { id: 'receipt-1' } : null),
+        create: jest.fn(),
+      },
+      tenantMembership: { findFirst: jest.fn().mockResolvedValue({ id }) },
+      customer: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id, firstName: 'Ana', lastName: null }]),
+      },
+    };
+    const tenant = {
+      getTenantId: () => 'tenant-1',
+      getClient: () => tx,
+      runInTransaction: jest.fn((work: () => Promise<unknown>) => work()),
+    };
+    const handle = { inspect: jest.fn() };
+    const port = {
+      settleExpiredLots: jest.fn().mockResolvedValue(null),
+      forCheckout: jest.fn().mockReturnValue(handle),
+    };
+    const confirmBotSale = jest.fn().mockResolvedValue({
+      saleId: 'sale-1',
+      folio: 'A-1',
+      paymentStatus: 'CREDIT',
+      channel: 'ONLINE',
+      deliveryStatus: 'PENDING',
+      totalCents: 100,
+      discountCents: 0,
+      paidCents: 0,
+      debtCents: 100,
+      confirmedAt: version,
+    });
+    const service = new CheckoutService(
+      tenant as never,
+      { confirmBotSale } as never,
+      { get: () => 50000 } as never,
+      {} as never,
+      { resolve: jest.fn().mockResolvedValue({}) } as never,
+      undefined,
+      {
+        get: () => (options.port === false ? undefined : port),
+      } as never,
+    );
+    return { service, port, handle, confirmBotSale, tx, tenant };
+  }
+  const request = () => plainToInstance(CheckoutRequestDto, body());
+
+  it('settles expired lots before the transaction and hands the backorder handle to the sale', async () => {
+    const h = harness();
+
+    await h.service.create(request(), 'k1');
+
+    expect(h.port.settleExpiredLots).toHaveBeenCalledWith([BACKORDER]);
+    expect(h.port.settleExpiredLots.mock.invocationCallOrder[0]).toBeLessThan(
+      h.tenant.runInTransaction.mock.invocationCallOrder[0],
+    );
+    expect(h.port.forCheckout).toHaveBeenCalledWith({
+      customerId: id,
+      lines: [
+        {
+          backorderId: BACKORDER,
+          productId: id,
+          variantId: null,
+          quantity: 1,
+          unitPriceCents: 100,
+        },
+      ],
+      productIds: [id],
+    });
+    expect(
+      (h.confirmBotSale.mock.calls[0] as [{ backorders: unknown }])[0]
+        .backorders,
+    ).toBe(h.handle);
+  });
+
+  it('a lost reservation refuses the checkout before any transaction (the loss was committed by the settlement)', async () => {
+    const h = harness();
+    h.port.settleExpiredLots.mockResolvedValueOnce(BACKORDER);
+
+    await expect(h.service.create(request(), 'k1')).rejects.toMatchObject({
+      code: 'BACKORDER_RESERVATION_LOST',
+    });
+    expect(h.tenant.runInTransaction).not.toHaveBeenCalled();
+    expect(h.confirmBotSale).not.toHaveBeenCalled();
+  });
+
+  it('a replay (receipt exists) never looks at the backorders before the receipt is answered', async () => {
+    const h = harness({ receipt: true });
+
+    await expect(h.service.create(request(), 'k1')).rejects.toBeDefined();
+
+    expect(h.port.settleExpiredLots).not.toHaveBeenCalled();
+  });
+
+  it('a loss found inside the checkout rolls back, then is settled again outside the transaction', async () => {
+    const h = harness();
+    h.confirmBotSale.mockRejectedValueOnce(
+      new BackorderCheckoutError('BACKORDER_RESERVATION_LOST'),
+    );
+
+    await expect(h.service.create(request(), 'k1')).rejects.toMatchObject({
+      code: 'BACKORDER_RESERVATION_LOST',
+    });
+    expect(h.port.settleExpiredLots).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers 503 BACKORDER_CHECKOUT_UNAVAILABLE when no backorder module is bound; a plain checkout never asks', async () => {
+    const h = harness({ port: false });
+    await expect(h.service.create(request(), 'k1')).rejects.toMatchObject({
+      response: { error: 'BACKORDER_CHECKOUT_UNAVAILABLE' },
+    });
+
+    const plain = harness({ port: false });
+    const withoutBackorder = plainToInstance(CheckoutRequestDto, {
+      ...body(),
+      sale: {
+        ...body().sale,
+        items: [input({}).sale.items[0]],
+      },
+    });
+    await plain.service.create(withoutBackorder, 'k2');
+    expect(
+      (plain.confirmBotSale.mock.calls[0] as [object])[0],
+    ).not.toHaveProperty('backorders');
   });
 });

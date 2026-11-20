@@ -69,6 +69,19 @@ export class ExistingUpdatedCheckoutAddressDto extends ExistingCheckoutAddressDt
   @Type(() => NewAddressFields)
   address!: NewAddressFields;
 }
+/**
+ * A checkout line. `backorderId` (restock-backorder / T3, contract v1 §7) is
+ * optional and exists ONLY here: the legacy `POST /chatbot-api/sales` keeps the
+ * plain `BotSaleItemDto` (it has no seam to validate and consume a reservation,
+ * and `forbidNonWhitelisted` rejects the member there). `null` means omitted,
+ * like `variantId`.
+ */
+export class CheckoutSaleItemDto extends BotSaleItemDto {
+  @IsOptional()
+  @IsUUID()
+  backorderId?: string | null;
+}
+
 export class CheckoutSaleDto {
   @IsUUID()
   cashierUserId!: string;
@@ -76,8 +89,8 @@ export class CheckoutSaleDto {
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
-  @Type(() => BotSaleItemDto)
-  items!: BotSaleItemDto[];
+  @Type(() => CheckoutSaleItemDto)
+  items!: CheckoutSaleItemDto[];
 
   @IsInt()
   @Min(0)
