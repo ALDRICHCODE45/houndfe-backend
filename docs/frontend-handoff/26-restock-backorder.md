@@ -24,7 +24,7 @@ Seeded roles (`prisma/seed.ts:1368`, `:1387`): **Manager** `read` + `update`, **
 
 **Existing databases:** the two `permissions` rows are upserted on every backend boot, but the **role grants only come from `prisma db seed`**. A database that was seeded before this change (the dev API on :3003 included) has no `Backorder` grant on any role until the grants are added; only the super admin (`manage:all`) sees the screen. Whoever deploys must add them (see the deploy note in `docs/chatbot-handoff/restock-backorder-bot-contract.md`, «Deploy checklist (T5a)»).
 
-Every route runs `JWT → tenant context → permissions` (`src/backorders/presentation/backorders-staff.controller.ts:56`). The **sucursal is the token's**: never send a tenant, and a backorder of another sucursal is `404`, exactly like an unknown id. A super admin without a selected sucursal gets `403` (`src/shared/prisma/tenant-prisma.service.ts:135`): switch tenant first. All responses carry `Cache-Control: no-store` (a backorder changes state by itself: reservation, expiry, queue position).
+Every route runs `JWT → tenant context → permissions` (`src/backorders/presentation/backorders-staff.controller.ts:57`). The **sucursal is the token's**: never send a tenant, and a backorder of another sucursal is `404`, exactly like an unknown id. A super admin without a selected sucursal gets `403` (`src/shared/prisma/tenant-prisma.service.ts:135`): switch tenant first. All responses carry `Cache-Control: no-store` (a backorder changes state by itself: reservation, expiry, queue position).
 
 ## 2. `GET /backorders` — the list (§9.1)
 
@@ -250,7 +250,7 @@ All three are integers. `availableToSell` is what the counter can sell now (toda
 
 - Routes: `POST /sales/drafts/:id/items` (`src/sales/sales.controller.ts:71`) and `PATCH /sales/drafts/:id/items/:itemId` (`:85`).
 - When the requested cumulative quantity exceeds `availableToSell` but not `stockOnHand`: 200, the line is saved, and that line carries `items[i].stockWarning = { "code": "STOCK_RESERVED_FOR_BACKORDER", "available": 2, "reserved": 3 }`. Only on the touched line and only in that response (not persisted, not on `GET /sales/drafts`). Lines without a warning have no `stockWarning` key.
-- Above `stockOnHand`, or with nothing reserved, the existing 422 is unchanged: `{ "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: N, Requested: M" }`.
+- Above `stockOnHand`, or with nothing reserved, the existing 422 is unchanged: `{ "statusCode": 422, "error": "BUSINESS_RULE_VIOLATION", "message": "Insufficient stock for product …. Available: N, Requested: M", "timestamp": "…" }`.
 - Behaviour change to note: a quantity that today exceeds `availableToSell` while units are reserved used to be 422 and is now 200 with the warning.
 
 ### Counter confirm: `STOCK_RESERVED_FOR_BACKORDER`
@@ -281,6 +281,8 @@ Both conversion requests are blocked while the product has a `WAITING` or `RESER
 ```
 
 Products without backorders, or with only `CONFIRMED`/`EXPIRED`/`CANCELLED` ones, still get variants. What the POS sends to edit variants does not change; only this error is new.
+
+Known limit: deleting a variant that has any backorder (even a finished one) is refused by the database with the generic relation error, because backorders keep their variant as history. Treat it like a variant that already has sales.
 
 ### Dev sample data and publish order
 
