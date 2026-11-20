@@ -25,7 +25,10 @@ import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { createHash, randomUUID } from 'crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import request from 'supertest';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { PERMISSIONS_KEY } from '../auth/authorization/decorators/require-permissions.decorator';
 import type {
   AppAbility,
@@ -4364,4 +4367,11 @@ describeIfDb('live conversation (PostgreSQL)', () => {
   });
 
   // SLICE2-END
+
+  // The shared client lives once per spec file (module registry) and is never
+  // disconnected by itself: release its pool so a combined run does not pile up
+  // every spec's connections until PostgreSQL answers "too many clients".
+  afterAll(async () => {
+    await disconnectIntegrationPrisma();
+  });
 });

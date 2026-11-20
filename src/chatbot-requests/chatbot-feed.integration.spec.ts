@@ -22,7 +22,10 @@ import { Test } from '@nestjs/testing';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import request from 'supertest';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import type {
   AppAbility,
   AppActions,
@@ -230,6 +233,9 @@ describeIfDb('chatbot feed (PostgreSQL)', () => {
     await prisma.user.deleteMany({
       where: { id: { in: Object.values(users) } },
     });
+    // The shared client lives once per spec file: release its pool so a
+    // combined run does not hit PostgreSQL's connection limit.
+    await disconnectIntegrationPrisma();
   });
 
   // -------------------------------------------------------------- helpers

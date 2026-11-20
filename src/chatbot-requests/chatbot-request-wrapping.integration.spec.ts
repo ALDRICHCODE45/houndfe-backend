@@ -19,7 +19,10 @@ import { join } from 'path';
 import { AbilityBuilder, createMongoAbility } from '@casl/ability';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import type {
   AppAbility,
   AppActions,
@@ -1831,5 +1834,12 @@ describeIfDb('chatbot request wrapping (PostgreSQL)', () => {
       ).toEqual([]);
       await expectInvariant(tenantId);
     });
+  });
+
+  // The shared client lives once per spec file (module registry) and is never
+  // disconnected by itself: release its pool so a combined run does not pile up
+  // every spec's connections until PostgreSQL answers "too many clients".
+  afterAll(async () => {
+    await disconnectIntegrationPrisma();
   });
 });

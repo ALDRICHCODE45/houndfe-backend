@@ -25,7 +25,10 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import request from 'supertest';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { PERMISSIONS_KEY } from '../auth/authorization/decorators/require-permissions.decorator';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
 import type {
@@ -259,6 +262,9 @@ describeIfDb('chatbot inbox follow-ups, S9 (PostgreSQL)', () => {
     await prisma.user.deleteMany({
       where: { id: { in: Object.values(users) } },
     });
+    // The shared client lives once per spec file: release its pool so a
+    // combined run does not hit PostgreSQL's connection limit.
+    await disconnectIntegrationPrisma();
   });
 
   // -------------------------------------------------------------- helpers

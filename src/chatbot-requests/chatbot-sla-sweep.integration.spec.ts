@@ -10,7 +10,10 @@
 import { randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import type { PrismaService } from '../shared/prisma/prisma.service';
 import * as writer from '../notifications/infrastructure/chatbot-request-notice.writer';
 import { defaultSettings } from '../chatbot-settings/domain/chatbot-attention-settings';
@@ -824,5 +827,12 @@ describeIfDb('SLA sweep (PostgreSQL)', () => {
       });
       expect(plan).toContain('chatbot_requests_sla_sweep_idx');
     });
+  });
+
+  // The shared client lives once per spec file (module registry) and is never
+  // disconnected by itself: release its pool so a combined run does not pile up
+  // every spec's connections until PostgreSQL answers "too many clients".
+  afterAll(async () => {
+    await disconnectIntegrationPrisma();
   });
 });

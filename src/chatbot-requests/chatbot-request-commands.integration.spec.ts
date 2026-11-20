@@ -10,7 +10,10 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
 import { ClsService } from 'nestjs-cls';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../shared/tenant/tenant-cls-store.interface';
 import {
@@ -640,5 +643,12 @@ describeIfDb('chatbot request staff commands (PostgreSQL)', () => {
     const sorted = [...folios].sort((a, b) => a - b);
     expect(new Set(folios).size).toBe(10);
     expect(sorted[9] - sorted[0]).toBe(9);
+  });
+
+  // The shared client lives once per spec file (module registry) and is never
+  // disconnected by itself: release its pool so a combined run does not pile up
+  // every spec's connections until PostgreSQL answers "too many clients".
+  afterAll(async () => {
+    await disconnectIntegrationPrisma();
   });
 });

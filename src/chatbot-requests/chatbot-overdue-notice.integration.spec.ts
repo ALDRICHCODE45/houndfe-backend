@@ -17,7 +17,10 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ClsModule } from 'nestjs-cls';
 import request from 'supertest';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { SERVICE_CREDENTIAL_REPOSITORY } from '../chatbot-api/domain/service-credential.repository';
 import { PrismaServiceCredentialRepository } from '../chatbot-api/infrastructure/prisma-service-credential.repository';
 import { BotRateLimitModule } from '../chatbot-api/presentation/guards/bot-rate-limit.module';
@@ -346,6 +349,13 @@ describeIfDb(
         }).expect(200);
         expect(await pendingOf()).toEqual([]);
       });
+    });
+
+    // The shared client lives once per spec file (module registry) and is never
+    // disconnected by itself: release its pool so a combined run does not pile up
+    // every spec's connections until PostgreSQL answers "too many clients".
+    afterAll(async () => {
+      await disconnectIntegrationPrisma();
     });
   },
 );

@@ -18,7 +18,10 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { PrismaDeliveryZoneBotRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-bot.repository';
 import { PrismaDeliveryZoneValidationRepository } from '../delivery-zones/infrastructure/prisma-delivery-zone-validation.repository';
 import { DELIVERY_ZONE_TYPE } from '../delivery-zones/domain/delivery-zone-intake.request';
@@ -1499,5 +1502,12 @@ describeIfDb('chatbot request backfill (PostgreSQL)', () => {
       tenantIds: [tenantId],
     });
     expect(totalCreated(tenantReport(rerun, tenantId))).toBe(0);
+  });
+
+  // The shared client lives once per spec file (module registry) and is never
+  // disconnected by itself: release its pool so a combined run does not pile up
+  // every spec's connections until PostgreSQL answers "too many clients".
+  afterAll(async () => {
+    await disconnectIntegrationPrisma();
   });
 });

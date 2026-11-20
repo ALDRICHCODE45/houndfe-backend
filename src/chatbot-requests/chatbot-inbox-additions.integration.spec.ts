@@ -30,7 +30,10 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { ClsModule, ClsService } from 'nestjs-cls';
 import request from 'supertest';
-import { integrationPrisma } from '../../test/integration/reset-db';
+import {
+  disconnectIntegrationPrisma,
+  integrationPrisma,
+} from '../../test/integration/reset-db';
 import { PERMISSIONS_KEY } from '../auth/authorization/decorators/require-permissions.decorator';
 import { InsufficientPermissionsError } from '../shared/domain/domain-error';
 import type {
@@ -266,6 +269,9 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
     await prisma.user.deleteMany({
       where: { id: { in: Object.values(users) } },
     });
+    // The shared client lives once per spec file: release its pool so a
+    // combined run does not hit PostgreSQL's connection limit.
+    await disconnectIntegrationPrisma();
   });
 
   // -------------------------------------------------------------- helpers
@@ -940,12 +946,17 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
       await prisma.tenant.create({
         data: { id: heavy, name: 'Carga S8', slug: `cr-s8-${heavy}` },
       });
+      // `slaPolicyVersion` is stamped like `insert()` does: a NULL version is
+      // "stale" to the REAL SLA sweep, which is database-wide (not per tenant),
+      // so the sweep of the slaLevel tests below would recompute these 4,000
+      // rows (about 10 s per tick, past the 30 s test timeout on a loaded
+      // machine) and the timed-out test would keep running into the N+1 one.
       await prisma.$executeRaw(Prisma.sql`
         INSERT INTO "chatbot_requests"
           ("id", "tenantId", "folio", "kind", "subtype", "status", "customerKey",
            "summary", "source", "sourceRequestId", "claimDeadlineAt",
            "resolveDeadlineAt", "assigneeUserId", "assigneeDisplayName", "claimedAt",
-           "createdAt", "updatedAt")
+           "slaPolicyVersion", "createdAt", "updatedAt")
         SELECT gen_random_uuid()::text, ${heavy}, g, 'CLARIFICATION', 'UNKNOWN_QUESTION',
           (CASE WHEN g % 10 < 3 THEN 'IN_PROGRESS' ELSE 'NEW' END)::"ChatbotRequestStatus",
           '5257' || lpad((g % 1500)::text, 8, '0'), 'abierta', 'perf', gen_random_uuid()::text,
@@ -954,7 +965,7 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
           CASE WHEN g % 10 < 3 THEN ${users.luis} END,
           CASE WHEN g % 10 < 3 THEN 'Luis' END,
           CASE WHEN g % 10 < 3 THEN ${now}::timestamp END,
-          ${now}::timestamp - (g % 600) * interval '1 minute', ${now}::timestamp
+          0, ${now}::timestamp - (g % 600) * interval '1 minute', ${now}::timestamp
         FROM generate_series(1, 4000) AS g`);
       // A third of the NEW ones were released once (the claim clock restarted).
       await prisma.$executeRaw(Prisma.sql`
@@ -1016,6 +1027,12 @@ describeIfDb('chatbot inbox additions, S8 (PostgreSQL)', () => {
       }
       return level;
     };
+
+    // A failed assertion must not leave the injected clock in the future for
+    // the specs that follow (they derive their cutoffs from it).
+    afterEach(() => {
+      now = at('2026-11-10T10:30:00-06:00');
+    });
 
     const sweepAt = async (instant: Date) => {
       now = instant;
