@@ -81,7 +81,7 @@ Route budgets: `POST` and cancel spend from the `write` bucket, the two `GET` fr
 
 Every answer, error included, is `Cache-Control: no-store`: a backorder changes by itself.
 
-Errors have a code-only body `{ "statusCode", "error", "message" }` with `error === message`, plus the small detail member listed in the tables. Unknown failures answer `500 BACKORDER_REQUEST_FAILED`; `503 BACKORDER_RETRY_REQUIRED` means a database transaction was aborted (retry with the same key).
+Errors have a code-only body `{ "statusCode", "error", "message" }` with `error === message`, plus the small detail member listed in the tables. Unknown failures answer `500 BACKORDER_REQUEST_FAILED`; `503 BACKORDER_RETRY_REQUIRED` means a database transaction was aborted (retry with the same key); that includes a database deadlock against a concurrent checkout of the same customer, which should not happen (the locks are taken in the same order) but is mapped to this retry instead of a `500`.
 
 ### 6.1 `POST /chatbot-api/backorders` — schedule (scope `backorders:create`, `X-Idempotency-Key` required)
 

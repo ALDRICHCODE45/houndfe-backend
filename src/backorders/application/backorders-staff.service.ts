@@ -19,6 +19,7 @@ import { Prisma } from '@prisma/client';
 import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { BackorderError } from '../domain/backorder-error';
+import { isRetryableTransactionError } from './backorder-retryable-error';
 import {
   toStatusCounts,
   type BackorderStatusCounts,
@@ -209,10 +210,7 @@ export class BackordersStaffService {
         return this.readOne(tx, row.id);
       });
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        ['P2034', 'P2028', 'P2024'].includes(error.code)
-      ) {
+      if (isRetryableTransactionError(error)) {
         throw new BackorderError('BACKORDER_RETRY_REQUIRED');
       }
       throw error;

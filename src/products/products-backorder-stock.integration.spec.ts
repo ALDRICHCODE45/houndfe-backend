@@ -953,8 +953,10 @@ describeIfDb('restock backorder stock fields and guards (PostgreSQL)', () => {
         wins[bot.status === 'fulfilled' ? 'scheduled' : 'converted'] += 1;
       }
       expect(wins.scheduled + wins.converted).toBe(24);
-      // Evidence of the interleavings that happened (read in the test output).
+      // Both branches ran: the schedule won some rounds, the conversion others.
       console.log(`schedule-vs-conversion outcomes: ${JSON.stringify(wins)}`);
+      expect(wins.scheduled).toBeGreaterThan(0);
+      expect(wins.converted).toBeGreaterThan(0);
     });
   });
 

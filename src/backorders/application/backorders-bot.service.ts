@@ -4,7 +4,8 @@
  * the tenant is read from the request.
  *
  * Intake runs in ONE transaction (like `CheckoutService.create`): advisory key
- * lock → idempotency receipt → validations → customer → folio → insert. The
+ * lock → idempotency receipt → validations → customer (phone advisory lock) →
+ * product row FOR SHARE → re-check → active lock → folio → insert. The
  * receipt is the `backorders` row itself (`(tenantId, idempotencyKey)` unique +
  * `requestHash`), so a replay returns the CURRENT state of the same backorder.
  */
@@ -18,6 +19,7 @@ import { BOT_STOCK_ACTOR_NAME } from '../../sales/sale-stock.service';
 import { DomainError } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { BackorderError } from '../domain/backorder-error';
+import { isRetryableTransactionError } from './backorder-retryable-error';
 import {
   assertExpectedReferencePrice,
   assertStockShortfall,
@@ -148,9 +150,9 @@ export class BackordersBotService {
             };
           }
         }
-        if (['P2034', 'P2028', 'P2024'].includes(error.code)) {
-          throw new BackorderError('BACKORDER_RETRY_REQUIRED');
-        }
+      }
+      if (isRetryableTransactionError(error)) {
+        throw new BackorderError('BACKORDER_RETRY_REQUIRED');
       }
       throw error;
     }
@@ -284,42 +286,28 @@ export class BackordersBotService {
         return this.readOne(tx, row.id);
       });
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        ['P2034', 'P2028', 'P2024'].includes(error.code)
-      ) {
+      if (isRetryableTransactionError(error)) {
         throw new BackorderError('BACKORDER_RETRY_REQUIRED');
       }
       throw error;
     }
   }
 
-  /** Validations (inputs first, then state) and the insert of one new backorder. */
-  private async schedule(
+  /**
+   * The product and (when sent) the variant of an intent, validated: the
+   * product exists and the variant selection matches `hasVariants`
+   * (`VARIANT_REQUIRED`, `VARIANT_NOT_FOUND`, `VARIANT_NOT_OF_PRODUCT`).
+   * `schedule` runs it twice: once as the provisional validation and once under
+   * the product lock, which is the read that counts.
+   */
+  private async readTarget(
     tx: TenantClient,
     tenantId: string,
-    intent: BackorderIntent,
-    key: string,
-    requestHash: string,
-  ): Promise<BackorderBot> {
-    const variantId = intent.variantId ?? null;
-    // T8(a): the product row is locked FOR SHARE BEFORE hasVariants / the variant
-    // are read and before the insert. Product conversion (`addVariant`,
-    // `update` with hasVariants) and `removeVariant` hold it FOR UPDATE, so the
-    // schedule either runs entirely before the conversion (which then sees the
-    // new backorder and answers PRODUCT_HAS_ACTIVE_BACKORDERS) or entirely after
-    // it (this read sees hasVariants=true and answers VARIANT_REQUIRED). SHARE,
-    // not UPDATE: schedules of the same product do not serialise each other and
-    // nothing later in this transaction asks for a stronger lock on the row (no
-    // upgrade deadlock). Lock order: advisory key lock (try) → product row →
-    // phone / active-backorder advisory locks → folio counter; the journal
-    // order (products → lots → variants) is never inverted because this
-    // transaction takes no lot/variant locks.
-    await tx.$queryRaw(
-      Prisma.sql`SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId} AND "id" = ${intent.productId} FOR SHARE`,
-    );
+    productId: string,
+    variantId: string | null,
+  ) {
     const product = await tx.product.findFirst({
-      where: { id: intent.productId, tenantId },
+      where: { id: productId, tenantId },
       select: {
         id: true,
         hasVariants: true,
@@ -340,7 +328,28 @@ export class BackordersBotService {
       variantId,
       variant,
     });
+    return { product, variant };
+  }
 
+  /** Validations (inputs first, then state) and the insert of one new backorder. */
+  private async schedule(
+    tx: TenantClient,
+    tenantId: string,
+    intent: BackorderIntent,
+    key: string,
+    requestHash: string,
+  ): Promise<BackorderBot> {
+    const variantId = intent.variantId ?? null;
+    // Provisional read (NO lock yet): it feeds the input/state validations below
+    // in their documented order. The authoritative read happens under the
+    // product lock, after the customer resolution (see LOCK ORDER).
+    const provisional = await this.readTarget(
+      tx,
+      tenantId,
+      intent.productId,
+      variantId,
+    );
+    const product = provisional.product;
     const decision = await tx.humanDecision.findFirst({
       where: { id: intent.sourceDecisionId, tenantId, type: 'RESTOCK' },
       select: {
@@ -368,8 +377,39 @@ export class BackordersBotService {
 
     const resolved = await this.customers.resolve(tx, tenantId, intent);
 
+    // LOCK ORDER (global, T8 a): bot phone advisory lock → product row → the
+    // rest (active-backorder advisory lock, folio counter, backorder rows).
+    // The customer resolution above already took the phone lock; the bot
+    // checkout takes it first too (phone → customer → products FOR UPDATE), so
+    // the product is always requested AFTER the phone lock. Taking the product
+    // before the phone (the first T8 version) deadlocked the same phone
+    // scheduling P while checking out a cart with P (40P01). The journal order
+    // (products → lots → variants → backorder rows) is untouched: this
+    // transaction takes no lot/variant locks.
+    //
+    // The product row is locked FOR SHARE BEFORE hasVariants / the variant are
+    // read for good and before the insert. Product conversion (`addVariant`,
+    // `update` with hasVariants) and `removeVariant` hold it FOR UPDATE, so the
+    // schedule either runs entirely before the conversion (which then sees the
+    // new backorder and answers PRODUCT_HAS_ACTIVE_BACKORDERS) or entirely after
+    // it (the re-read below sees hasVariants=true and answers VARIANT_REQUIRED).
+    // SHARE, not UPDATE: schedules of the same product do not serialise each
+    // other and nothing later in this transaction asks for a stronger lock on
+    // the row (no upgrade deadlock).
+    await tx.$queryRaw(
+      Prisma.sql`SELECT "id" FROM "products" WHERE "tenantId" = ${tenantId} AND "id" = ${intent.productId} FOR SHARE`,
+    );
+    // Authoritative re-check under the lock: the product may have been converted
+    // (or its variant removed) since the provisional read.
+    const { product: locked, variant } = await this.readTarget(
+      tx,
+      tenantId,
+      intent.productId,
+      variantId,
+    );
+
     assertStockShortfall({
-      sellable: await this.stock.sellable(product, variant),
+      sellable: await this.stock.sellable(locked, variant),
       quantity: intent.quantity,
     });
 

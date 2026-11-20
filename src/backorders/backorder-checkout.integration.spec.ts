@@ -1395,6 +1395,104 @@ d('backorder checkout — sale.items[i].backorderId (PostgreSQL)', () => {
       console.log(`staff cancel vs checkout outcomes: ${JSON.stringify(wins)}`);
     });
 
+    /** `POST /chatbot-api/backorders` of a product-level backorder for customer `customer`. */
+    const schedule = (w: World, customer: number, quantity = 10) =>
+      request(app.getHttpServer())
+        .post('/chatbot-api/backorders')
+        .set('Authorization', `Bearer ${w.token}`)
+        .set('X-Idempotency-Key', randomUUID())
+        .send({
+          ...phoneOf(customer + 1),
+          customer: { mode: 'existing', customerId: w.customers[customer] },
+          productId: w.productId,
+          quantity,
+          sourceDecisionId: w.decisionId,
+        });
+
+    it('the SAME phone scheduling a backorder of P while checking out a cart with P: lock order phone → product, never a deadlock or a 5xx (several interleavings)', async () => {
+      // T8 (a) verify: the schedule used to take the product row (FOR SHARE)
+      // BEFORE the phone advisory lock, the checkout the other way round (phone →
+      // customer → products FOR UPDATE) → 40P01. Several customers race at once so
+      // the windows overlap often.
+      const tally = { scheduled: 0, checkedOut: 0, businessErrors: 0 };
+      const delays = [0, 0, 1, 2, 3, 5, 8, 12, 18, 25, 0, 1, 3, 6, 10, 15];
+      for (const [round, delay] of delays.entries()) {
+        const w = await world({ quantity: 3 });
+        const customers = [0, 1, 2, 3];
+        const scheduleFirst = round % 2 === 0;
+
+        const results = await Promise.allSettled(
+          customers.flatMap((customer) => [
+            sleep(scheduleFirst ? 0 : delay).then(() => schedule(w, customer)),
+            sleep(scheduleFirst ? delay : 0).then(() =>
+              post(
+                w,
+                randomUUID(),
+                checkoutBody(
+                  w,
+                  [
+                    { quantity: 1, unitPriceCents: 1000 },
+                    {
+                      productId: w.otherProductId,
+                      quantity: 1,
+                      unitPriceCents: 500,
+                    },
+                  ],
+                  1500,
+                  customer,
+                ),
+              ),
+            ),
+          ]),
+        );
+
+        expect(deadlocks(results)).toEqual([]);
+        for (const result of results) {
+          expect(result.status).toBe('fulfilled');
+          const response = (result as PromiseFulfilledResult<request.Response>)
+            .value;
+          // Never a 500 / 503 / CHECKOUT_CREATE_FAILED: success or a documented 4xx.
+          expect(response.status).toBeLessThan(500);
+        }
+        const responses = results.map(
+          (r) => (r as PromiseFulfilledResult<request.Response>).value,
+        );
+        for (const [i, response] of responses.entries()) {
+          const isSchedule = i % 2 === 0;
+          if (response.status < 300) {
+            tally[isSchedule ? 'scheduled' : 'checkedOut'] += 1;
+          } else {
+            tally.businessErrors += 1;
+            // Documented business errors only (stock can run out for later carts).
+            expect([
+              'STOCK_INSUFFICIENT',
+              'STOCK_INSUFFICIENT_AT_CONFIRM',
+              'STOCK_AVAILABLE_NOW',
+              'BACKORDER_DUPLICATE',
+            ]).toContain(response.body.error);
+          }
+        }
+        // What succeeded is consistent: a backorder per scheduled request and a
+        // sale per accepted checkout, no negative stock.
+        expect(
+          await prisma.backorder.count({ where: { tenantId: w.tenantId } }),
+        ).toBe(
+          responses.filter((_, i) => i % 2 === 0 && _.status < 300).length,
+        );
+        expect((await salesOf(w)).length).toBe(
+          responses.filter((_, i) => i % 2 === 1 && _.status < 300).length,
+        );
+        expect(await quantityOf(w.productId)).toBeGreaterThanOrEqual(0);
+        await dropTenants();
+      }
+      // Both sides ran to completion in the races (evidence in the test output).
+      console.log(
+        `schedule-vs-checkout (same phone): ${JSON.stringify(tally)}`,
+      );
+      expect(tally.scheduled).toBeGreaterThan(0);
+      expect(tally.checkedOut).toBeGreaterThan(0);
+    });
+
     it('two checkouts of the same backorder (different keys): one sale, one CONFIRMED, one NOT_RESERVED', async () => {
       for (const delay of [0, 3, 8]) {
         const w = await world();
