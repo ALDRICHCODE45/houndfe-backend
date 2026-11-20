@@ -1,6 +1,6 @@
 /**
- * The tick of the backorder sweep (restock-backorder T2b): three phases in a
- * fixed order (due timers, lots, safety net), keyset paging past rows it could
+ * The tick of the backorder sweep (restock-backorder T2b, T4): five phases in a
+ * fixed order (due timers, lots, safety net, overdue-ETA re-estimate, its repair), keyset paging past rows it could
  * not act on, bounded per phase, every counter summed, `@Interval(30 s)`, never
  * overlapping and never rejecting out of the interval.
  */
@@ -13,6 +13,8 @@ import {
 import type {
   BackorderSweepResult,
   DueCursor,
+  EtaApplyCursor,
+  EtaCursor,
   LotCursor,
   QueueCursor,
 } from './backorder-sweep.store';
@@ -25,6 +27,9 @@ const EMPTY: BackorderSweepResult = {
   lost: 0,
   notHeld: 0,
   allocated: 0,
+  reestimates: 0,
+  attached: 0,
+  etaApplied: 0,
   stale: 0,
   skipped: 0,
   failed: 0,
@@ -47,11 +52,15 @@ function fakeStore(
     due?: Array<Partial<BackorderSweepResult>>;
     lot?: Array<Partial<BackorderSweepResult>>;
     queue?: Array<Partial<BackorderSweepResult>>;
+    eta?: Array<Partial<BackorderSweepResult>>;
+    etaApply?: Array<Partial<BackorderSweepResult>>;
   } = {},
 ) {
   const runDueBatch = jest.fn();
   const runLotBatch = jest.fn();
   const runAllocateBatch = jest.fn();
+  const runReestimateBatch = jest.fn();
+  const runReestimateApplyBatch = jest.fn();
   (pages.due ?? [{}]).forEach((p, n) =>
     runDueBatch.mockResolvedValueOnce(page(p, dueCursor(n + 1))),
   );
@@ -67,7 +76,28 @@ function fakeStore(
       }),
     ),
   );
-  const store = { batchSize: 100, runDueBatch, runLotBatch, runAllocateBatch };
+  (pages.eta ?? [{}]).forEach((p, n) =>
+    runReestimateBatch.mockResolvedValueOnce(
+      page<EtaCursor>(p, {
+        tenantId: 't',
+        productId: `p-${n + 1}`,
+        variantKey: '',
+      }),
+    ),
+  );
+  (pages.etaApply ?? [{}]).forEach((p, n) =>
+    runReestimateApplyBatch.mockResolvedValueOnce(
+      page<EtaApplyCursor>(p, { tenantId: 't', decisionId: `d-${n + 1}` }),
+    ),
+  );
+  const store = {
+    batchSize: 100,
+    runDueBatch,
+    runLotBatch,
+    runAllocateBatch,
+    runReestimateBatch,
+    runReestimateApplyBatch,
+  };
   return {
     store,
     scheduler: new BackorderSweepScheduler(store as never),
@@ -75,7 +105,7 @@ function fakeStore(
 }
 
 describe('BackorderSweepScheduler.tick', () => {
-  it('runs due timers, then lots, then the safety net, once each on an idle sweep', async () => {
+  it('runs due timers, lots, the safety net, the overdue-ETA re-estimate and its repair, once each on an idle sweep', async () => {
     const order: string[] = [];
     const idle = (name: string) =>
       jest.fn(() => {
@@ -87,10 +117,14 @@ describe('BackorderSweepScheduler.tick', () => {
       runDueBatch: idle('due'),
       runLotBatch: idle('lot'),
       runAllocateBatch: idle('queue'),
+      runReestimateBatch: idle('eta'),
+      runReestimateApplyBatch: idle('etaApply'),
     };
     const scheduler = new BackorderSweepScheduler(store as never);
     expect(await scheduler.tick(NOW)).toEqual(EMPTY);
-    expect(order).toEqual(['due', 'lot', 'queue']);
+    expect(order).toEqual(['due', 'lot', 'queue', 'eta', 'etaApply']);
+    expect(store.runReestimateBatch).toHaveBeenCalledWith(NOW, null);
+    expect(store.runReestimateApplyBatch).toHaveBeenCalledWith(NOW, null);
     expect(store.runDueBatch).toHaveBeenCalledWith(NOW, null);
     expect(store.runLotBatch).toHaveBeenCalledWith(NOW, null);
     expect(store.runAllocateBatch).toHaveBeenCalledWith(NOW, null);
@@ -116,19 +150,40 @@ describe('BackorderSweepScheduler.tick', () => {
     });
   });
 
-  it('sums the counters of the three phases', async () => {
+  it('sums the counters of the five phases', async () => {
     const { scheduler } = fakeStore({
       due: [{ candidates: 3, reminders: 2, expired: 1 }],
       lot: [{ candidates: 2, swapped: 1, lost: 1 }],
       queue: [{ candidates: 1, allocated: 2 }],
+      eta: [{ candidates: 2, reestimates: 1, attached: 5 }],
+      etaApply: [{ candidates: 1, etaApplied: 2 }],
     });
     expect(await scheduler.tick(NOW)).toMatchObject({
-      candidates: 6,
+      candidates: 9,
       reminders: 2,
       expired: 1,
       swapped: 1,
       lost: 1,
       allocated: 2,
+      reestimates: 1,
+      attached: 5,
+      etaApplied: 2,
+    });
+  });
+
+  it('pages the overdue-ETA phase by keyset like the others', async () => {
+    const { store, scheduler } = fakeStore({
+      eta: [
+        { candidates: 100, stale: 100 },
+        { candidates: 1, attached: 1 },
+      ],
+    });
+    await scheduler.tick(NOW);
+    expect(store.runReestimateBatch).toHaveBeenCalledTimes(2);
+    expect(store.runReestimateBatch).toHaveBeenNthCalledWith(2, NOW, {
+      tenantId: 't',
+      productId: 'p-1',
+      variantKey: '',
     });
   });
 
@@ -158,7 +213,7 @@ describe('BackorderSweepScheduler.tick', () => {
     try {
       await scheduler.poll();
       expect(log).toHaveBeenCalledWith(
-        'backorder sweep: 1 reminders, 1 expired, 0 lots swapped, 0 reservations lost, 0 not held, 0 allocated, 0 stale, 0 skipped, 0 failed',
+        'backorder sweep: 1 reminders, 1 expired, 0 lots swapped, 0 reservations lost, 0 not held, 0 allocated, 0 re-estimates requested, 0 overdue backorders attached, 0 re-estimates applied, 0 stale, 0 skipped, 0 failed',
       );
       store.runDueBatch.mockRejectedValueOnce(new Error('db down'));
       await expect(scheduler.poll()).resolves.toBeUndefined();

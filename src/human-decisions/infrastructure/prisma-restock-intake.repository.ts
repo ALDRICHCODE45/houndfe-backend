@@ -50,6 +50,7 @@ import {
   type IRestockIntakeRepository,
   type PersistedRestockDecision,
   type RestockIntakeInput,
+  type RestockIntakeOptions,
   type RestockIntakeResult,
 } from '../domain/restock-intake.repository';
 
@@ -109,7 +110,10 @@ export class PrismaRestockIntakeRepository implements IRestockIntakeRepository {
     @Optional() private readonly wrapper?: ChatbotRequestWrapper,
   ) {}
 
-  async submit(input: RestockIntakeInput): Promise<RestockIntakeResult> {
+  async submit(
+    input: RestockIntakeInput,
+    options?: RestockIntakeOptions,
+  ): Promise<RestockIntakeResult> {
     // Fail closed BEFORE any query/transaction; see the class-level
     // TRANSACTION PRECONDITION. `isInTransaction()` only reads CLS.
     if (this.tenantPrisma.isInTransaction()) {
@@ -184,13 +188,20 @@ export class PrismaRestockIntakeRepository implements IRestockIntakeRepository {
           },
         });
 
-        await this.wrapper?.wrapHumanDecision({
+        const wrapped = {
           id: created.id,
-          type: 'RESTOCK',
+          type: 'RESTOCK' as const,
           productId: created.productId,
           productName: created.productName,
           variantId: created.variantId,
-        });
+        };
+        // Staff-only (server-created) decisions only; the bot route never
+        // passes options, so its wrapper call is byte-identical.
+        if (options?.staffOnly) {
+          await this.wrapper?.wrapHumanDecision(wrapped, { staffOnly: true });
+        } else {
+          await this.wrapper?.wrapHumanDecision(wrapped);
+        }
         return { status: 'created', request: toPersistedDecision(created) };
       });
     } catch (error) {

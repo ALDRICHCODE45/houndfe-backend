@@ -556,6 +556,8 @@ d('backorder feed and sweep (PostgreSQL)', () => {
         folio: a.folio,
         expiredAt: now.toISOString(),
         version: expired.version,
+        // T4 (additive): the bot reschedules with the same decision.
+        sourceDecisionId: w.decisionId,
       });
       // `a` was served first, then the freed units reserved `b`.
       expect(

@@ -18,6 +18,7 @@
  */
 import { Module } from '@nestjs/common';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { HumanDecisionsModule } from '../human-decisions/human-decisions.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { ProductsModule } from '../products/products.module';
 import { SalesModule } from '../sales/sales.module';
@@ -32,6 +33,7 @@ import { BACKORDER_RESERVED_HOOK } from './application/ports/backorder-reserved-
 import { BackorderCheckoutService } from './infrastructure/backorder-checkout.service';
 import { BackorderCustomerResolver } from './infrastructure/backorder-customer.resolver';
 import { BackorderReferencePriceListResolver } from './infrastructure/backorder-reference-price-list.resolver';
+import { BackorderReestimateService } from './infrastructure/backorder-reestimate.service';
 import { BackorderSweepScheduler } from './infrastructure/backorder-sweep.scheduler';
 import { BackorderSweepStore } from './infrastructure/backorder-sweep.store';
 import { BackorderStockReader } from './infrastructure/backorder-stock.reader';
@@ -45,6 +47,8 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     ProductsModule,
     SalesModule,
     InventoryModule,
+    // T4: the RESTOCK intake (server-created re-estimate) and the resolution registry.
+    HumanDecisionsModule,
     StockAlertsModule,
     TenantModule,
   ],
@@ -56,6 +60,9 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     BackorderReferencePriceListResolver,
     BackorderAllocator,
     BackorderReservationService,
+    // T4: overdue-ETA re-estimate (one RESTOCK decision per product) + its
+    // fan-out on the staff resolution (registers itself).
+    BackorderReestimateService,
     // T2b: reminder, expiry, expired-lot swap and the safety-net allocation.
     BackorderSweepStore,
     BackorderSweepScheduler,

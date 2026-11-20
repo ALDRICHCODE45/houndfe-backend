@@ -14,6 +14,8 @@ import {
   emptyBackorderSweepResult,
   type BackorderSweepResult,
   type DueCursor,
+  type EtaApplyCursor,
+  type EtaCursor,
   type LotCursor,
   type QueueCursor,
 } from './backorder-sweep.store';
@@ -23,7 +25,7 @@ export type { BackorderSweepResult } from './backorder-sweep.store';
 export const BACKORDER_SWEEP_INTERVAL_MS = 30_000;
 const MAX_BATCHES_PER_PHASE = 5;
 
-type Phase = 'due' | 'lot' | 'queue';
+type Phase = 'due' | 'lot' | 'queue' | 'eta' | 'etaApply';
 
 @Injectable()
 export class BackorderSweepScheduler {
@@ -46,11 +48,14 @@ export class BackorderSweepScheduler {
           total.lost +
           total.notHeld +
           total.allocated +
+          total.reestimates +
+          total.attached +
+          total.etaApplied +
           total.failed >
         0
       ) {
         this.logger.log(
-          `backorder sweep: ${total.reminders} reminders, ${total.expired} expired, ${total.swapped} lots swapped, ${total.lost} reservations lost, ${total.notHeld} not held, ${total.allocated} allocated, ${total.stale} stale, ${total.skipped} skipped, ${total.failed} failed`,
+          `backorder sweep: ${total.reminders} reminders, ${total.expired} expired, ${total.swapped} lots swapped, ${total.lost} reservations lost, ${total.notHeld} not held, ${total.allocated} allocated, ${total.reestimates} re-estimates requested, ${total.attached} overdue backorders attached, ${total.etaApplied} re-estimates applied, ${total.stale} stale, ${total.skipped} skipped, ${total.failed} failed`,
         );
       }
     } catch (error) {
@@ -64,7 +69,8 @@ export class BackorderSweepScheduler {
 
   /**
    * One bounded run, the seam of the specs: due timers first (an expiry frees
-   * units for the next one), then lots, then the safety-net allocation.
+   * units for the next one), then lots, then the safety-net allocation, then the
+   * overdue-ETA re-estimate (T4: ask staff, customer told nothing) and its repair.
    */
   async tick(now: Date = new Date()): Promise<BackorderSweepResult> {
     const total = emptyBackorderSweepResult();
@@ -76,6 +82,12 @@ export class BackorderSweepScheduler {
     );
     await this.phase<QueueCursor>('queue', total, (after) =>
       this.store.runAllocateBatch(now, after),
+    );
+    await this.phase<EtaCursor>('eta', total, (after) =>
+      this.store.runReestimateBatch(now, after),
+    );
+    await this.phase<EtaApplyCursor>('etaApply', total, (after) =>
+      this.store.runReestimateApplyBatch(now, after),
     );
     return total;
   }

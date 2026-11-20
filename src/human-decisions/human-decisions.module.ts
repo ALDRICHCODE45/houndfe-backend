@@ -57,6 +57,7 @@ import { PrismaExpirationIntakeRepository } from './infrastructure/prisma-expira
 import { PrismaHumanDecisionReviewReadRepository } from './infrastructure/prisma-human-decision-review-read.repository';
 import { PrismaHumanDecisionReviewResolveRepository } from './infrastructure/prisma-human-decision-review-resolve.repository';
 import { PrismaRestockIntakeRepository } from './infrastructure/prisma-restock-intake.repository';
+import { RestockResolutionRegistry } from './infrastructure/restock-resolution.registry';
 import { BotApplicationOutcomeController } from './presentation/bot-application-outcome.controller';
 import { BotRestockIntakeController } from './presentation/bot-restock-intake.controller';
 import { BotRestockPollController } from './presentation/bot-restock-poll.controller';
@@ -81,6 +82,9 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
   providers: [
     HumanDecisionHttpFilter,
     HumanDecisionActiveReviewerGuard,
+    // restock-backorder / T4: modules that react to a RESTOCK resolution (the
+    // backorder re-estimate fan-out) register here; the resolve adapter notifies.
+    RestockResolutionRegistry,
     {
       provide: RESTOCK_INTAKE_REPOSITORY,
       useClass: PrismaRestockIntakeRepository,
@@ -106,7 +110,13 @@ import { HumanDecisionReviewController } from './presentation/human-decision-rev
       useClass: PrismaHumanDecisionReviewResolveRepository,
     },
   ],
-  // The common `resolve` command (unit 3) calls the resolve use case.
-  exports: [HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY],
+  // The common `resolve` command (unit 3) calls the resolve use case. T4: the
+  // backorder sweep creates its staff-only re-estimate decisions through the
+  // intake port and registers its resolution listener.
+  exports: [
+    HUMAN_DECISION_REVIEW_RESOLVE_REPOSITORY,
+    RESTOCK_INTAKE_REPOSITORY,
+    RestockResolutionRegistry,
+  ],
 })
 export class HumanDecisionsModule {}

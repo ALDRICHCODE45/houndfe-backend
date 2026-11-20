@@ -66,6 +66,16 @@ export class RestockIntakeError extends DomainError {
  */
 export type RestockIntakeInput = Omit<RestockRequestInput, 'tenantId'>;
 
+/**
+ * Server-side options of a submission; never read from a request body. The only
+ * caller that passes them is the overdue-ETA sweep (restock-backorder / T4):
+ * `staffOnly` wraps the decision in a request that carries no conversation and
+ * is marked so its closing produces no generic `request.answered` for the bot.
+ */
+export interface RestockIntakeOptions {
+  staffOnly?: boolean;
+}
+
 /** Persisted decision state. `RESOLVED` is never produced by intake. */
 export type PersistedRestockDecisionStatus = 'PENDING' | 'RESOLVED';
 
@@ -117,7 +127,10 @@ export interface IRestockIntakeRepository {
    * sanitized identity/supersession conflicts, and rethrows unrelated
    * persistence failures untouched.
    */
-  submit(input: RestockIntakeInput): Promise<RestockIntakeResult>;
+  submit(
+    input: RestockIntakeInput,
+    options?: RestockIntakeOptions,
+  ): Promise<RestockIntakeResult>;
 }
 
 /** Injection token used by NestJS DI to resolve the interface. */

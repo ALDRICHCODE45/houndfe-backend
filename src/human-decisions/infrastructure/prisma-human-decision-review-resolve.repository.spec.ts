@@ -34,6 +34,7 @@ import {
 } from '../domain/human-decision-review-resolve.repository';
 import { EXPIRATION_TYPE } from '../domain/expiration-intake.request';
 import { PrismaHumanDecisionReviewResolveRepository } from './prisma-human-decision-review-resolve.repository';
+import type { RestockResolutionRegistry } from './restock-resolution.registry';
 
 const TENANT_ID = '11111111-1111-1111-1111-111111111111';
 const DECISION_ID = '22222222-2222-4222-8222-222222222222';
@@ -528,6 +529,81 @@ describe('PrismaHumanDecisionReviewResolveRepository', () => {
         build(firstClient).resolve(positiveCommand()),
       ).resolves.toMatchObject({ status: 'resolved' });
       expect(wrapper.closeLegacy).toHaveBeenCalledTimes(1);
+    });
+
+    it('notifies the RESTOCK resolution listeners only for the CAS winner, with the written resolvedAt, and never on a replay', async () => {
+      const registry = { notify: jest.fn().mockResolvedValue(undefined) };
+      const build = (client: ClientMock) => {
+        const { tenantPrisma } = makeRepo(client);
+        return new PrismaHumanDecisionReviewResolveRepository(
+          tenantPrisma as unknown as TenantPrismaService,
+          () => FIXED_NOW,
+          undefined,
+          registry as unknown as RestockResolutionRegistry,
+        );
+      };
+
+      const replayClient = makeClient();
+      arrangeReviewer(replayClient);
+      replayClient.humanDecision.findFirst
+        .mockResolvedValueOnce(resolvedState())
+        .mockResolvedValueOnce(resolvedRecord());
+      await build(replayClient).resolve(positiveCommand());
+      expect(registry.notify).not.toHaveBeenCalled();
+
+      const winnerClient = makeClient();
+      arrangeReviewer(winnerClient);
+      winnerClient.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState())
+        .mockResolvedValueOnce(resolvedRecord());
+      winnerClient.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      await build(winnerClient).resolve(positiveCommand());
+      expect(registry.notify).toHaveBeenCalledTimes(1);
+      expect(registry.notify).toHaveBeenCalledWith({
+        tenantId: TENANT_ID,
+        decisionId: DECISION_ID,
+        action: 'PROVIDE_RESTOCK_ESTIMATE',
+        restockDays: 7,
+        resolvedAt: FIXED_NOW,
+      });
+    });
+
+    it('notifies the negative RESTOCK action with null restockDays and never an EXPIRATION resolution', async () => {
+      const registry = { notify: jest.fn().mockResolvedValue(undefined) };
+      const build = (client: ClientMock) => {
+        const { tenantPrisma } = makeRepo(client);
+        return new PrismaHumanDecisionReviewResolveRepository(
+          tenantPrisma as unknown as TenantPrismaService,
+          () => FIXED_NOW,
+          undefined,
+          registry as unknown as RestockResolutionRegistry,
+        );
+      };
+
+      const negative = makeClient();
+      arrangeReviewer(negative);
+      negative.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState())
+        .mockResolvedValueOnce(resolvedRecord());
+      negative.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      await build(negative).resolve(negativeCommand());
+      expect(registry.notify).toHaveBeenCalledWith({
+        tenantId: TENANT_ID,
+        decisionId: DECISION_ID,
+        action: 'REPORT_RESTOCK_ESTIMATE_UNAVAILABLE',
+        restockDays: null,
+        resolvedAt: FIXED_NOW,
+      });
+
+      registry.notify.mockClear();
+      const expiration = makeClient();
+      arrangeReviewer(expiration);
+      expiration.humanDecision.findFirst
+        .mockResolvedValueOnce(pendingState({ type: EXPIRATION_TYPE }))
+        .mockResolvedValueOnce(expirationResolvedRecord());
+      expiration.humanDecision.updateMany.mockResolvedValue({ count: 1 });
+      await build(expiration).resolve(positiveExpirationCommand());
+      expect(registry.notify).not.toHaveBeenCalled();
     });
 
     it('replays an exact negative resolution without mutating', async () => {

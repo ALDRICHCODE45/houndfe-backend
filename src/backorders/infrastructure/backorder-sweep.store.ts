@@ -29,6 +29,17 @@
  *     the stock write); this catches what that savepoint rolled back or an
  *     intake that raced an arrival.
  *
+ *  4. OVERDUE ETA (`runReestimateBatch`, T4; contract §8, D6): WAITING backorders
+ *     with `estimatedAt` in the past and etaStage 0, grouped by (tenant, product,
+ *     variant) → `BackorderReestimateService.requestForGroup` (ONE decision per
+ *     product, attach the group, customer told nothing). It is the only phase
+ *     whose candidate runs OUTSIDE a transaction (the RESTOCK intake opens its
+ *     own); the service re-checks every row under its own locks.
+ *  5. ETA REPAIR (`runReestimateApplyBatch`): an already-RESOLVED re-estimate
+ *     decision with a backorder still WAITING + etaStage 1 (it was RESERVED when
+ *     the answer fanned out, or the listener's savepoint rolled back) → apply
+ *     the answer (`backorder.eta_updated` / `eta_unavailable`).
+ *
  * LOCK ORDER (L7): stock (`StockJournalWriter.lockStock`) BEFORE any backorder
  * row lock, and the feed's advisory lock LAST. Expiry therefore locks the
  * product's stock first and only then takes the backorder row (`SKIP LOCKED`);
@@ -59,6 +70,7 @@ import {
 } from '../application/backorder-allocator';
 import { BackorderReservationService } from '../application/backorder-reservation.service';
 import { planReservationStep, STAGE_AFTER } from '../domain/backorder-sweep';
+import { BackorderReestimateService } from './backorder-reestimate.service';
 import type { BackorderStatusValue } from '../domain/backorder-status';
 import {
   backorderNoticeSubject,
@@ -81,6 +93,12 @@ export interface BackorderSweepResult {
   notHeld: number;
   /** Backorders reserved by the safety-net allocation. */
   allocated: number;
+  /** Re-estimate decisions created (T4): one per product/variant at a time. */
+  reestimates: number;
+  /** Overdue backorders attached to a re-estimate decision (T4, customer told nothing). */
+  attached: number;
+  /** Backorders answered by the repair phase (T4). */
+  etaApplied: number;
   /** Candidates another transaction or sweep moved first, or nothing to do. */
   stale: number;
   /** Candidates that were locked or gone. */
@@ -96,6 +114,9 @@ export const emptyBackorderSweepResult = (): BackorderSweepResult => ({
   lost: 0,
   notHeld: 0,
   allocated: 0,
+  reestimates: 0,
+  attached: 0,
+  etaApplied: 0,
   stale: 0,
   skipped: 0,
   failed: 0,
@@ -115,6 +136,19 @@ export interface QueueCursor {
   tenantId: string;
   productId: string;
   variantKey: string;
+}
+
+/** Keyset of the overdue-ETA phase (same shape as the safety net's). */
+export type EtaCursor = QueueCursor;
+/** Keyset of the ETA repair phase. */
+export interface EtaApplyCursor {
+  tenantId: string;
+  decisionId: string;
+}
+
+interface EtaApplyCandidate {
+  tenantId: string;
+  decisionId: string;
 }
 
 interface DueCandidate {
@@ -170,6 +204,7 @@ export class BackorderSweepStore {
     private readonly reservations: BackorderReservationService,
     private readonly allocator: BackorderAllocator,
     private readonly crossing: LowStockCrossing,
+    private readonly reestimates: BackorderReestimateService,
   ) {}
 
   // ---------------------------------------------------------------- phase 1
@@ -474,6 +509,138 @@ export class BackorderSweepStore {
     return allocation.reservedIds.length > 0 ? null : 'stale';
   }
 
+  // ---------------------------------------------------------------- phase 4
+
+  /**
+   * Products/variants with at least one overdue, not yet asked backorder
+   * (WAITING, etaStage 0, `estimatedAt < now`): one row per group, the unit of
+   * the «one re-estimate per product» rule.
+   */
+  protected readEtaCandidates(
+    now: Date,
+    after: EtaCursor | null,
+    excluded: string[],
+  ): Promise<QueueCandidate[]> {
+    return this.prisma.$queryRaw<QueueCandidate[]>(Prisma.sql`
+      SELECT b."tenantId", b."productId", b."variantId",
+             COALESCE(b."variantId", '') AS "variantKey"
+      FROM "backorders" b
+      WHERE b."status" = 'WAITING' AND b."etaStage" = 0
+        AND b."estimatedAt" < ${now}
+      ${after ? Prisma.sql`AND (b."tenantId", b."productId", COALESCE(b."variantId", '')) > (${after.tenantId}, ${after.productId}, ${after.variantKey})` : Prisma.empty}
+      ${excluded.length > 0 ? Prisma.sql`AND (b."tenantId" || ':' || b."productId" || ':' || COALESCE(b."variantId", '')) NOT IN (${Prisma.join(excluded)})` : Prisma.empty}
+      GROUP BY b."tenantId", b."productId", b."variantId"
+      ORDER BY b."tenantId", b."productId", COALESCE(b."variantId", '')
+      LIMIT ${this.batchSize}`);
+  }
+
+  async runReestimateBatch(
+    now: Date,
+    after: EtaCursor | null,
+  ): Promise<BackorderSweepResult & { last: EtaCursor | null }> {
+    const result = emptyBackorderSweepResult();
+    const candidates = await this.readEtaCandidates(
+      now,
+      after,
+      this.backedOff('eta', now),
+    );
+    result.candidates = candidates.length;
+    const tail = candidates[candidates.length - 1];
+    for (const candidate of candidates) {
+      const key = `${candidate.tenantId}:${candidate.productId}:${candidate.variantKey}`;
+      await this.guarded(
+        result,
+        'eta',
+        key,
+        candidate.tenantId,
+        now,
+        async () => {
+          const outcome = await this.reestimates.requestForGroup(
+            {
+              tenantId: candidate.tenantId,
+              productId: candidate.productId,
+              variantId: candidate.variantId,
+            },
+            now,
+          );
+          if (outcome.created) result.reestimates += 1;
+          result.attached += outcome.attached;
+          return outcome.attached > 0 || outcome.created ? null : 'stale';
+        },
+        // The RESTOCK intake opens its own transaction and refuses to nest.
+        { transactional: false },
+      );
+    }
+    return {
+      ...result,
+      last: tail
+        ? {
+            tenantId: tail.tenantId,
+            productId: tail.productId,
+            variantKey: tail.variantKey,
+          }
+        : null,
+    };
+  }
+
+  // ---------------------------------------------------------------- phase 5
+
+  /** Resolved re-estimate decisions that still have a WAITING etaStage-1 backorder. */
+  protected readEtaApplyCandidates(
+    after: EtaApplyCursor | null,
+    excluded: string[],
+  ): Promise<EtaApplyCandidate[]> {
+    return this.prisma.$queryRaw<EtaApplyCandidate[]>(Prisma.sql`
+      SELECT DISTINCT b."tenantId", b."reestimateDecisionId" AS "decisionId"
+      FROM "backorders" b
+      JOIN "human_decisions" d
+        ON d."id" = b."reestimateDecisionId" AND d."tenantId" = b."tenantId"
+      WHERE b."status" = 'WAITING' AND b."etaStage" = 1
+        AND d."status" = 'RESOLVED'
+      ${after ? Prisma.sql`AND (b."tenantId", b."reestimateDecisionId") > (${after.tenantId}, ${after.decisionId})` : Prisma.empty}
+      ${excluded.length > 0 ? Prisma.sql`AND (b."tenantId" || ':' || b."reestimateDecisionId") NOT IN (${Prisma.join(excluded)})` : Prisma.empty}
+      ORDER BY b."tenantId", b."reestimateDecisionId"
+      LIMIT ${this.batchSize}`);
+  }
+
+  async runReestimateApplyBatch(
+    now: Date,
+    after: EtaApplyCursor | null,
+  ): Promise<BackorderSweepResult & { last: EtaApplyCursor | null }> {
+    const result = emptyBackorderSweepResult();
+    const candidates = await this.readEtaApplyCandidates(
+      after,
+      this.backedOff('etaApply', now),
+    );
+    result.candidates = candidates.length;
+    const tail = candidates[candidates.length - 1];
+    for (const candidate of candidates) {
+      const key = `${candidate.tenantId}:${candidate.decisionId}`;
+      await this.guarded(
+        result,
+        'etaApply',
+        key,
+        candidate.tenantId,
+        now,
+        async () => {
+          const answered = await this.reestimates.applyResolvedDecision(
+            this.tenantPrisma.getClient(),
+            candidate.tenantId,
+            candidate.decisionId,
+          );
+          result.etaApplied += answered;
+          return answered > 0 ? null : 'stale';
+        },
+      );
+    }
+    return {
+      ...result,
+      last: tail
+        ? { tenantId: tail.tenantId, decisionId: tail.decisionId }
+        : null,
+    };
+  }
+
   // ---------------------------------------------------------------- shared
 
   /**
@@ -487,10 +654,13 @@ export class BackorderSweepStore {
     tenantId: string,
     now: Date,
     work: () => Promise<Counter | null>,
+    options: { transactional?: boolean } = {},
   ): Promise<void> {
     try {
       const outcome = await this.tenantRunner.runWithTenant(tenantId, () =>
-        this.tenantPrisma.runInTransaction(work),
+        options.transactional === false
+          ? work()
+          : this.tenantPrisma.runInTransaction(work),
       );
       if (outcome !== null) result[outcome] += 1;
     } catch (error) {

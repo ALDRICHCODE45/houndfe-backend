@@ -45,6 +45,7 @@ function setup(runWithTenant: jest.Mock) {
     {} as never,
     {} as never,
     {} as never,
+    {} as never,
   );
   return store;
 }
@@ -94,5 +95,123 @@ describe('BackorderSweepStore failure backoff', () => {
       id: 'b1',
     });
     expect(runWithTenant).toHaveBeenCalledWith('t1', expect.any(Function));
+  });
+});
+
+describe('BackorderSweepStore overdue-ETA phase (T4)', () => {
+  const candidate = {
+    tenantId: 't1',
+    productId: 'p1',
+    variantId: null,
+    variantKey: '',
+  };
+
+  class EtaStore extends BackorderSweepStore {
+    readonly excludedSeen: string[][] = [];
+    protected override readEtaCandidates(
+      _now: Date,
+      _after: unknown,
+      excluded: string[],
+    ) {
+      this.excludedSeen.push([...excluded]);
+      return Promise.resolve(
+        excluded.includes('t1:p1:') ? [] : [{ ...candidate }],
+      );
+    }
+  }
+
+  function build(requestForGroup: jest.Mock) {
+    const runInTransaction = jest.fn((work: () => Promise<unknown>) => work());
+    const runWithTenant = jest.fn(
+      (_tenant: string, work: () => Promise<unknown>) => work(),
+    );
+    const store = new EtaStore(
+      {} as never,
+      { runInTransaction } as never,
+      { runWithTenant } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { requestForGroup } as never,
+    );
+    return { store, runInTransaction, runWithTenant };
+  }
+
+  let error: jest.SpyInstance;
+  beforeEach(() => {
+    error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+  });
+  afterEach(() => error.mockRestore());
+
+  it('runs the group OUTSIDE a transaction (the RESTOCK intake refuses to nest), in its tenant', async () => {
+    const requestForGroup = jest
+      .fn()
+      .mockResolvedValue({ created: true, attached: 5 });
+    const { store, runInTransaction, runWithTenant } = build(requestForGroup);
+
+    const result = await store.runReestimateBatch(NOW, null);
+
+    expect(runWithTenant).toHaveBeenCalledWith('t1', expect.any(Function));
+    expect(runInTransaction).not.toHaveBeenCalled();
+    expect(requestForGroup).toHaveBeenCalledWith(
+      { tenantId: 't1', productId: 'p1', variantId: null },
+      NOW,
+    );
+    expect(result).toMatchObject({
+      candidates: 1,
+      reestimates: 1,
+      attached: 5,
+      stale: 0,
+      failed: 0,
+    });
+    expect(result.last).toEqual({
+      tenantId: 't1',
+      productId: 'p1',
+      variantKey: '',
+    });
+  });
+
+  it('a group that joins a pending decision creates nothing and counts only the backorders attached', async () => {
+    const { store } = build(
+      jest.fn().mockResolvedValue({ created: false, attached: 2 }),
+    );
+    expect(await store.runReestimateBatch(NOW, null)).toMatchObject({
+      reestimates: 0,
+      attached: 2,
+    });
+  });
+
+  it('a group another tick already handled is stale', async () => {
+    const { store } = build(
+      jest.fn().mockResolvedValue({ created: false, attached: 0 }),
+    );
+    expect(await store.runReestimateBatch(NOW, null)).toMatchObject({
+      candidates: 1,
+      stale: 1,
+      reestimates: 0,
+      attached: 0,
+    });
+  });
+
+  it('a failing group is counted, logged without customer data and backed off by its group key', async () => {
+    const requestForGroup = jest.fn().mockRejectedValue(new Error('boom'));
+    const { store } = build(requestForGroup);
+
+    expect(await store.runReestimateBatch(NOW, null)).toMatchObject({
+      candidates: 1,
+      failed: 1,
+    });
+    const logged = String((error.mock.calls as unknown[][])[0][0]);
+    expect(logged).toContain('t1');
+    expect(logged).toContain('p1');
+
+    const second = await store.runReestimateBatch(
+      new Date(NOW.getTime() + 1000),
+      null,
+    );
+    expect(second.candidates).toBe(0);
+    expect(store.excludedSeen[1]).toEqual(['t1:p1:']);
+    expect(requestForGroup).toHaveBeenCalledTimes(1);
   });
 });

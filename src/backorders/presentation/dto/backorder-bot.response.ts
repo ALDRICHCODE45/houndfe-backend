@@ -28,6 +28,7 @@ export interface BackorderBotSource {
   reservedUntil: Date | null;
   reminderAt: Date | null;
   saleId: string | null;
+  sourceDecisionId: string;
   cancelledByKind: BackorderCancelledByKindValue | null;
   cancelReason: string | null;
   product: { name: string };
@@ -57,6 +58,12 @@ export interface BackorderBot {
   /** 1-based, only while `WAITING`. */
   queuePosition: number | null;
   saleId: string | null;
+  /**
+   * The RESTOCK decision this backorder was scheduled from. After `EXPIRED` /
+   * `CANCELLED` the bot reschedules by repeating `POST /chatbot-api/backorders`
+   * with the same `sourceDecisionId` (contract §6.1).
+   */
+  sourceDecisionId: string;
   cancelledByKind: BackorderCancelledByKindValue | null;
   cancelReason: string | null;
   branchName: string;
@@ -103,6 +110,7 @@ export function toBackorderBot(
     reminderAt: iso(source.reminderAt),
     queuePosition: source.status === 'WAITING' ? queuePosition : null,
     saleId: source.saleId,
+    sourceDecisionId: source.sourceDecisionId,
     cancelledByKind: source.cancelledByKind,
     cancelReason: source.cancelReason,
     branchName: source.tenant.name,

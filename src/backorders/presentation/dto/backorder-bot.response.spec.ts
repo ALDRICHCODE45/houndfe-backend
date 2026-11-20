@@ -22,6 +22,7 @@ const source = (
   reservedUntil: null,
   reminderAt: null,
   saleId: null,
+  sourceDecisionId: 'dec-1',
   cancelledByKind: null,
   cancelReason: null,
   product: { name: 'Croquetas Adulto Raza Grande 18 kg' },
@@ -53,11 +54,27 @@ describe('toBackorderBot (§6.5)', () => {
       reminderAt: null,
       queuePosition: 3,
       saleId: null,
+      sourceDecisionId: 'dec-1',
       cancelledByKind: null,
       cancelReason: null,
       branchName: 'Centro',
       customerFirstName: 'Rosa',
     });
+  });
+
+  it('carries the sourceDecisionId in every status (the bot reschedules with it after EXPIRED / CANCELLED)', () => {
+    for (const status of [
+      'WAITING',
+      'RESERVED',
+      'CONFIRMED',
+      'EXPIRED',
+      'CANCELLED',
+    ] as const) {
+      expect(
+        toBackorderBot(source({ status, sourceDecisionId: 'dec-9' }), 1)
+          .sourceDecisionId,
+      ).toBe('dec-9');
+    }
   });
 
   it('shows queuePosition only while WAITING', () => {
@@ -104,7 +121,6 @@ describe('toBackorderBot (§6.5)', () => {
       'customerId',
       'idempotencyKey',
       'requestHash',
-      'sourceDecisionId',
       'version',
       'etaStage',
       'reservationStage',

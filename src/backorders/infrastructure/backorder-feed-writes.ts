@@ -54,6 +54,7 @@ const FEED_SELECT = {
   productId: true,
   variantId: true,
   customerId: true,
+  sourceDecisionId: true,
   referencePriceCents: true,
   currentPriceCents: true,
   finalPriceCents: true,
@@ -216,10 +217,14 @@ export function enqueueBackorderReservationExpired(
       if (row.status !== 'EXPIRED' || row.expiredAt === null) {
         return wrongState('expired');
       }
-      return buildBackorderReservationExpiredPayload({
-        ...base(row),
-        expiredAt: row.expiredAt,
-      });
+      return {
+        ...buildBackorderReservationExpiredPayload({
+          ...base(row),
+          expiredAt: row.expiredAt,
+        }),
+        // Additive (T4): the bot reschedules with the same decision.
+        sourceDecisionId: row.sourceDecisionId,
+      };
     },
   );
 }
@@ -240,10 +245,14 @@ export function enqueueBackorderCancelledByStaff(
     FEED_TYPE.backorderCancelledByStaff,
     (row) => {
       if (row.status !== 'CANCELLED') return wrongState('cancelled');
-      return buildBackorderCancelledByStaffPayload({
-        ...base(row),
-        reason: row.cancelReason,
-      });
+      return {
+        ...buildBackorderCancelledByStaffPayload({
+          ...base(row),
+          reason: row.cancelReason,
+        }),
+        // Additive (T4): the bot reschedules with the same decision.
+        sourceDecisionId: row.sourceDecisionId,
+      };
     },
   );
 }

@@ -62,6 +62,12 @@
  *
  * MUTATION SCOPE: the only write is the `humanDecision.updateMany` above. This
  * adapter never touches bot outcome, provider, stock, sale or any other model.
+ * RESTOCK LISTENERS (restock-backorder / T4): after the CAS winner closed the
+ * wrapping request, the registered `RestockResolutionRegistry` listeners run in
+ * the SAME transaction (each isolated by a savepoint, so a listener can never
+ * fail or roll back the resolution). A replay and the CAS loser never notify,
+ * and an EXPIRATION resolution never does. Without a registry (specs, partial
+ * graphs) nothing changes.
  *
  * PROJECTION: the committed read reuses the exported `REVIEW_RECORD_SELECT`
  * from the HD-04b3 read adapter, so the response can never widen into a full
@@ -112,6 +118,7 @@ import {
 } from '../domain/human-decision-review-resolve.repository';
 import type { HumanDecisionReviewRecord } from '../domain/human-decision-review-read.repository';
 import { REVIEW_RECORD_SELECT } from './prisma-human-decision-review-read.repository';
+import { RestockResolutionRegistry } from './restock-resolution.registry';
 
 type TenantScopedClient = ReturnType<TenantPrismaService['getClient']>;
 
@@ -222,6 +229,9 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
     // Optional so specs that build the repository alone keep their behavior;
     // the module always provides it (unit 3 wrapping).
     @Optional() private readonly wrapper?: ChatbotRequestWrapper,
+    // Optional for the same reason (restock-backorder / T4): the module
+    // provides it; absent, no listener is notified.
+    @Optional() private readonly restockListeners?: RestockResolutionRegistry,
   ) {}
 
   async resolve(
@@ -298,6 +308,7 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         return fail('VERSION_CONFLICT');
       }
 
+      const resolutionData = this.buildResolutionData(command, actor);
       const updated = await db.humanDecision.updateMany({
         where: {
           id: command.decisionId,
@@ -307,11 +318,16 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
           status: 'PENDING',
           version: command.expectedVersion,
         },
-        data: this.buildResolutionData(command, actor),
+        data: resolutionData,
       });
 
       if (updated.count === 1) {
         await this.closeWrapping(command, actor);
+        await this.notifyRestockResolved(
+          tenantId,
+          command,
+          resolutionData.resolvedAt as Date,
+        );
         return {
           status: 'resolved',
           decision: await this.readProjection(
@@ -354,6 +370,37 @@ export class PrismaHumanDecisionReviewResolveRepository implements IHumanDecisio
         ),
       };
     });
+  }
+
+  /**
+   * The RESTOCK listeners (T4), in this transaction, for the CAS winner only.
+   * An EXPIRATION action is not a RESTOCK answer and notifies nobody.
+   */
+  private async notifyRestockResolved(
+    tenantId: string,
+    command: ResolveHumanDecisionCommand,
+    resolvedAt: Date,
+  ): Promise<void> {
+    if (!this.restockListeners) return;
+    if (command.action === HUMAN_DECISION_RESOLUTION_PROVIDE_ESTIMATE) {
+      await this.restockListeners.notify({
+        tenantId,
+        decisionId: command.decisionId,
+        action: command.action,
+        restockDays: command.restockDays,
+        resolvedAt,
+      });
+    } else if (
+      command.action === HUMAN_DECISION_RESOLUTION_REPORT_UNAVAILABLE
+    ) {
+      await this.restockListeners.notify({
+        tenantId,
+        decisionId: command.decisionId,
+        action: command.action,
+        restockDays: null,
+        resolvedAt,
+      });
+    }
   }
 
   /** Closes the wrapping chatbot request in the same transaction (§2.4). */

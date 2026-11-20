@@ -70,6 +70,15 @@ export const WRAP_SOURCE = {
   receiptEvidence: 'WRAP:RECEIPT_EVIDENCE',
 } as const;
 
+/**
+ * `context.origin` of a STAFF-ONLY wrapper request (restock-backorder / T4): a
+ * RESTOCK decision the server created itself for the overdue-ETA re-estimate.
+ * It has no customer and no conversation and the bot never asked for it, so
+ * closing it produces no generic `request.answered` for the bot (the answer
+ * reaches each customer as `backorder.eta_updated` / `eta_unavailable` instead).
+ */
+export const STAFF_ONLY_REQUEST_ORIGIN = 'BACKORDER_REESTIMATE';
+
 const SUMMARY_MAX = 140;
 const ASSERT_TX = 'ChatbotRequestWrapper must run inside a transaction';
 
@@ -122,21 +131,38 @@ export interface NewWrappedRequest {
   lastCustomerMessageAt?: Date;
 }
 
-/** RESTOCK / EXPIRATION carry no customer (§2.3): one group per decision. */
-export function humanDecisionWrap(decision: {
-  id: string;
-  type: 'RESTOCK' | 'EXPIRATION';
-  productId: string;
-  productName: string;
-  variantId: string | null;
-}): NewWrappedRequest {
+/**
+ * RESTOCK / EXPIRATION carry no customer (§2.3): one group per decision.
+ * `staffOnly` (a RESTOCK the server created for the overdue-ETA re-estimate)
+ * marks the request (`context.origin`, summary «Reposición vencida: …») so staff
+ * recognise it and its closing never feeds the bot.
+ */
+export function humanDecisionWrap(
+  decision: {
+    id: string;
+    type: 'RESTOCK' | 'EXPIRATION';
+    productId: string;
+    productName: string;
+    variantId: string | null;
+  },
+  options: { staffOnly?: boolean } = {},
+): NewWrappedRequest {
+  const label = options.staffOnly
+    ? 'Reposición vencida'
+    : decision.type === 'RESTOCK'
+      ? 'Stock'
+      : 'Caducidad';
   return {
     subtype: decision.type,
     source: WRAP_SOURCE.humanDecision,
     wrappedId: decision.id,
     fallbackKey: `unknown:${decision.id}`,
-    summary: `${decision.type === 'RESTOCK' ? 'Stock' : 'Caducidad'}: ${decision.productName}`,
-    context: { productId: decision.productId, variantId: decision.variantId },
+    summary: `${label}: ${decision.productName}`,
+    context: {
+      productId: decision.productId,
+      variantId: decision.variantId,
+      ...(options.staffOnly ? { origin: STAFF_ONLY_REQUEST_ORIGIN } : {}),
+    },
     link: NO_CUSTOMER,
     wrapped: { humanDecisionId: decision.id },
   };
@@ -397,8 +423,9 @@ export class ChatbotRequestWrapper {
   /** RESTOCK / EXPIRATION carry no customer (§2.3): one group per decision. */
   async wrapHumanDecision(
     decision: Parameters<typeof humanDecisionWrap>[0],
+    options: { staffOnly?: boolean } = {},
   ): Promise<void> {
-    await this.insert(humanDecisionWrap(decision));
+    await this.insert(humanDecisionWrap(decision, options));
   }
 
   /** Only requesters that wait for a human; an EXISTING_ZONE one is resolved. */
@@ -631,6 +658,24 @@ export class ChatbotRequestWrapper {
     return actorDisplayName(user);
   }
 
+  /** Which of these requests are staff-only (`context.origin`, see above). */
+  private async staffOnlyIds(
+    tx: TenantClient,
+    tenantId: string,
+    requestIds: string[],
+  ): Promise<Set<string>> {
+    if (requestIds.length === 0) return new Set();
+    const found = await tx.chatbotRequest.findMany({
+      where: {
+        tenantId,
+        id: { in: requestIds },
+        context: { path: ['origin'], equals: STAFF_ONLY_REQUEST_ORIGIN },
+      },
+      select: { id: true },
+    });
+    return new Set(found.map((request) => request.id));
+  }
+
   /** Call before the legacy code writes the wrapped row (lock order). */
   async lockLegacy(link: WrappedLink): Promise<void> {
     if (this.hooksOff) return;
@@ -678,8 +723,19 @@ export class ChatbotRequestWrapper {
       closedIds.push(row.id);
     }
     // The legacy routes feed the bot too (one state, §2.1): same item as the
-    // staff `resolve`, read from the wrapped row the old code just wrote.
-    await enqueueAnswered(tx, tenantId, closedIds);
+    // staff `resolve`, read from the wrapped row the old code just wrote. A
+    // staff-only request (the server-created overdue-ETA RESTOCK) is the one
+    // exception: nobody on the bot side asked for it.
+    const staffOnly = await this.staffOnlyIds(
+      tx,
+      tenantId,
+      rows.filter((row) => row.subtype === 'RESTOCK').map((row) => row.id),
+    );
+    await enqueueAnswered(
+      tx,
+      tenantId,
+      closedIds.filter((id) => !staffOnly.has(id)),
+    );
     await refreshCustomerGroups(
       tx,
       tenantId,

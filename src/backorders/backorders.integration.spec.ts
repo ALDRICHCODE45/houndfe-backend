@@ -366,6 +366,8 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
           reminderAt: null,
           queuePosition: 1,
           saleId: null,
+          // T4 (additive): the bot reschedules with the same decision.
+          sourceDecisionId: w.decisionId,
           cancelledByKind: null,
           cancelReason: null,
           branchName: w.tenantName,
@@ -1166,7 +1168,13 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
         cancelledByKind: 'CUSTOMER',
         cancelReason: 'ya no lo necesito',
         queuePosition: null,
+        // T4: the bot reschedules with the same decision after a cancel.
+        sourceDecisionId: w.decisionId,
       });
+      expect(
+        (await get(w.token, `/${head.body.backorder.id}`).expect(200)).body
+          .backorder.sourceDecisionId,
+      ).toBe(w.decisionId);
       const row = await prisma.backorder.findUniqueOrThrow({
         where: { id: head.body.backorder.id },
       });
