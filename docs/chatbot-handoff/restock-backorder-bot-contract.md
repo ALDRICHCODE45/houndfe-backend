@@ -204,10 +204,10 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 }
 ```
 
-**Rules for a line with `backorderId`** (inside the confirm transaction, in this order):
+**Rules for a line with `backorderId`** (in this order; rule 2 runs and commits in its own short transaction before the checkout transaction, the rest inside the confirm transaction):
 
 1. The backorder must exist in the sucursal and be `RESERVED` with `reservedUntil > now`.
-2. A reserved lot that expired meanwhile is swapped for a valid one (silent) or, when valid stock cannot cover it, the reservation is lost (owner Q6: an expired lot is never sold).
+2. A reserved lot that expired meanwhile is swapped for a valid one (silent, committed before the checkout) or, when valid stock cannot cover it, the reservation is lost (owner Q6: an expired lot is never sold).
 3. Same customer, `productId`, `variantId` (omitted = `null`) and `quantity` as the backorder.
 4. `unitPriceCents` must equal the backorder's `finalPriceCents`. **That line skips the list-price check and the promotions** (owner Q3): it is sold at `finalPriceCents × quantity`, as its own line (it never stacks with another line of the same product), stored as a `custom` price. The other lines keep today's rules (`PRICE_OUT_OF_DATE` against the live list price, promotions, stock). The price bypass exists only for a valid reservation: the same price without `backorderId`, or with an expired / cancelled / foreign one, is refused.
 5. The reserved units are consumed by the sale (`BACKORDER_RELEASE` followed by the normal charge of the whole cart, same transaction): the sellable stock does not move and **no other waiting backorder is served in between**. The backorder becomes `CONFIRMED` with `saleId`, `confirmedAt` and `version + 1`.
