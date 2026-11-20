@@ -1282,6 +1282,10 @@ enum StockMovementType {
   SALE
   SALE_CANCELLATION
   REMOVAL
+  // restock-backorder T2a: units taken out of / returned to the sellable
+  // buckets for a RESERVED backorder (groupType BACKORDER, groupId = backorderId).
+  BACKORDER_RESERVE
+  BACKORDER_RELEASE
 }
 
 enum StockAdjustmentReason {
@@ -1304,6 +1308,7 @@ enum StockMovementGroupType {
   SALE
   ADJUSTMENT
   PRODUCT
+  BACKORDER
 }
 
 // Append-only. productId/variantId/lotId are scalars (no FK) and the label

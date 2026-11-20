@@ -10,7 +10,9 @@
  */
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
 import { SalesService } from '../../sales/sales.service';
+import { BOT_STOCK_ACTOR_NAME } from '../../sales/sale-stock.service';
 import { DomainError } from '../../shared/domain/domain-error';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import { BackorderError } from '../domain/backorder-error';
@@ -73,6 +75,7 @@ export class BackordersBotService {
     private readonly customers: BackorderCustomerResolver,
     private readonly stock: BackorderStockReader,
     private readonly referencePriceLists: BackorderReferencePriceListResolver,
+    private readonly journal: StockJournalWriter,
     @Inject(BACKORDER_RESERVATION_RELEASER)
     private readonly releaser: BackorderReservationReleaser,
   ) {}
@@ -204,6 +207,17 @@ export class BackordersBotService {
     try {
       return await this.tenantPrisma.runInTransaction(async () => {
         const tx = this.tenantPrisma.getClient();
+        // Lock order: stock BEFORE the backorder row (the allocator takes the
+        // journal locks, then the WAITING rows; a RESERVED row may be released
+        // by it concurrently). The status is re-read under the row lock below.
+        const probe = await tx.backorder.findFirst({
+          where: { id, tenantId },
+          select: { productId: true, status: true },
+        });
+        if (!probe) throw new BackorderError('BACKORDER_NOT_FOUND');
+        if (probe.status === 'WAITING' || probe.status === 'RESERVED') {
+          await this.journal.lockStock([probe.productId]);
+        }
         const locked = await tx.$queryRaw<Array<{ id: string }>>(
           Prisma.sql`SELECT id FROM backorders WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`,
         );
@@ -233,6 +247,7 @@ export class BackordersBotService {
             productId: row.productId,
             variantId: row.variantId,
             quantity: row.quantity,
+            actor: { id: null, displayName: BOT_STOCK_ACTOR_NAME },
           });
         }
         await tx.backorder.update({

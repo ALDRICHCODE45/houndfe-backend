@@ -1220,6 +1220,8 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
         productId: w.productId,
         variantId: null,
         quantity: 1,
+        // T2a: the journal movement is attributed to the bot.
+        actor: { id: null, displayName: 'Bot' },
       });
     });
 

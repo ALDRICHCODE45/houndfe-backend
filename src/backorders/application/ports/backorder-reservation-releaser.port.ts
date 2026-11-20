@@ -1,3 +1,5 @@
+import type { StockActor } from '../../../inventory/domain/stock-journal.types';
+
 /**
  * Seam between cancelling a backorder and the stock journal.
  *
@@ -7,10 +9,10 @@
  * change, and let the allocator serve the next waiting backorder (§4).
  *
  * The cancel use case calls `releaseReservation` for every backorder it cancels
- * out of `RESERVED`, inside its transaction. T1 binds the no-op adapter: no
- * backorder can be `RESERVED` before the reserve/allocate task creates the
- * journal movement, so there is nothing to release yet. That task replaces the
- * binding of this token; the cancel use case does not change.
+ * out of `RESERVED`, inside its transaction, AFTER taking the journal locks
+ * (stock before the backorder row). T2a binds `BackorderReservationService`:
+ * it writes `BACKORDER_RELEASE` and the journal writer serves the next WAITING
+ * backorder in the same transaction.
  */
 export interface BackorderReservationRef {
   tenantId: string;
@@ -18,6 +20,8 @@ export interface BackorderReservationRef {
   productId: string;
   variantId: string | null;
   quantity: number;
+  /** Who moves the stock; the system when omitted (sweep). */
+  actor?: StockActor;
 }
 
 export interface BackorderReservationReleaser {

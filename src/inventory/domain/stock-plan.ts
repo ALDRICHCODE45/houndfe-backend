@@ -1,4 +1,4 @@
-import { allocateFefo } from './fefo-allocator';
+import { allocateFefo, isLotExpired } from './fefo-allocator';
 import {
   InsufficientStockError,
   StockBucketNotFoundError,
@@ -110,6 +110,35 @@ export class StockPlan {
   /** Whether the product exists and tracks stock (`useStock`); false for services. */
   tracksStock(productId: string): boolean {
     return this.products.get(productId)?.useStock ?? false;
+  }
+
+  /**
+   * Units a sale (or a backorder reservation) may take now: the variant's own
+   * quantity, or for a non-variant product the untracked portion plus the
+   * NON-expired lots (an expired lot is never sellable, S6). `null` when the
+   * product exists but does not track stock; 0 for an unknown product/variant.
+   */
+  sellable(productId: string, variantId: string | null): number | null {
+    const product = this.products.get(productId);
+    if (!product) return 0;
+    if (!product.useStock) return null;
+    if (variantId) {
+      const variant = product.variants.find((v) => v.id === variantId);
+      return Math.max(variant?.quantity ?? 0, 0);
+    }
+    if (product.hasVariants) return 0;
+    const validLots = product.lots
+      .filter((l) => !isLotExpired(l.expirationDate, this.today))
+      .reduce((sum, l) => sum + l.quantity, 0);
+    return validLots + Math.max(this.untracked(product), 0);
+  }
+
+  /** Whether a lot of the loaded state is expired on the plan's business day. */
+  isLotExpired(productId: string, lotId: string): boolean {
+    const lot = this.products
+      .get(productId)
+      ?.lots.find((candidate) => candidate.id === lotId);
+    return lot ? isLotExpired(lot.expirationDate, this.today) : false;
   }
 
   /** Current in-plan quantity of a product (non-variant products only). */

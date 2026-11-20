@@ -15,7 +15,9 @@ export type StockMovementType =
   | 'ADJUSTMENT'
   | 'SALE'
   | 'SALE_CANCELLATION'
-  | 'REMOVAL';
+  | 'REMOVAL'
+  | 'BACKORDER_RESERVE'
+  | 'BACKORDER_RELEASE';
 
 export type StockAdjustmentReason =
   | 'PHYSICAL_COUNT'
@@ -31,7 +33,11 @@ export type StockRemovalCause =
   | 'PRODUCT_CONVERTED_TO_SERVICE'
   | 'FIRST_VARIANT_ZEROING';
 
-export type StockMovementGroupType = 'SALE' | 'ADJUSTMENT' | 'PRODUCT';
+export type StockMovementGroupType =
+  | 'SALE'
+  | 'ADJUSTMENT'
+  | 'PRODUCT'
+  | 'BACKORDER';
 
 export type StockBucketRef =
   | { kind: 'PRODUCT_UNTRACKED'; productId: string }
@@ -142,3 +148,76 @@ export type SaleReversalOutcome =
   | { status: 'NOTHING_TO_RESTORE'; movements: [] }
   /** SALE_CANCELLATION rows already exist for this sale; nothing written. */
   | { status: 'ALREADY_REVERSED'; movements: [] };
+
+/**
+ * Units a backorder holds in one bucket, derived from its `BACKORDER_RESERVE`
+ * minus `BACKORDER_RELEASE` movements (restock-backorder T2a). Always > 0.
+ */
+export interface HeldBackorderBucket {
+  bucketKind: StockBucketKind;
+  productId: string;
+  variantId: string | null;
+  lotId: string | null;
+  held: number;
+}
+
+/** `BACKORDER_RESERVE`/`BACKORDER_RELEASE` row fields the held-bucket fold needs. */
+export interface BackorderMovementRecord {
+  bucketKind: StockBucketKind;
+  productId: string;
+  variantId: string | null;
+  lotId: string | null;
+  delta: number;
+}
+
+/** Reserves `quantity` sellable units for one backorder (FEFO over non-expired lots for lot-tracked products). */
+export interface BackorderReserveInput {
+  backorderId: string;
+  productId: string;
+  variantId: string | null;
+  quantity: number;
+  actor: StockActor;
+}
+
+export interface BackorderReleaseInput {
+  backorderId: string;
+  actor: StockActor;
+  /** Release only what is held in these lots (lot swap); omitted = everything. */
+  lotIds?: readonly string[];
+  /**
+   * Run the stock-increase listeners (backorder allocation) after the release.
+   * Default true; the lot-swap primitive turns it off and allocates itself once
+   * the backorder row is consistent.
+   */
+  allocate?: boolean;
+}
+
+export type BackorderRevalidation =
+  /** The backorder holds nothing in the journal (never reserved or already released). */
+  | { status: 'NOT_HELD'; movements: [] }
+  /** No held lot has expired: nothing written. */
+  | { status: 'VALID'; movements: [] }
+  /** Expired-lot units released and the same quantity re-reserved from valid stock. */
+  | { status: 'SWAPPED'; movements: AppliedStockMovement[] }
+  /** Valid stock cannot cover it: everything released; the caller sends the backorder back to WAITING. */
+  | { status: 'LOST'; movements: AppliedStockMovement[] };
+
+/** Product/variant whose sellable quantity just went up in this transaction. */
+export interface StockIncreaseTarget {
+  productId: string;
+  variantId: string | null;
+}
+
+/**
+ * Observer of stock increases (the backorder allocator). Called by the journal
+ * writer INSIDE the writer's transaction, after the increase was persisted and
+ * while its product/lot/variant locks are held. Returns the movements it
+ * wrote (appended to the caller's result so the low-stock edge sees the net
+ * balance change).
+ */
+export interface StockIncreaseListener {
+  onStockIncreased(
+    targets: StockIncreaseTarget[],
+    now: Date,
+  ): Promise<AppliedStockMovement[]>;
+}

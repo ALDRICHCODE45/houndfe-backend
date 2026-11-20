@@ -442,3 +442,80 @@ describe('restock-backorder schema + migration drift guard (T1)', () => {
     expect(created.sort()).toEqual(['backorder_folio_counters', 'backorders']);
   });
 });
+
+/**
+ * restock-backorder / T2a — journal vocabulary (contract v1 §3): the
+ * hand-written enum migration `20261120010000_backorder_stock_movements`.
+ * `ALTER TYPE ... ADD VALUE` is additive, and PostgreSQL forbids USING a value
+ * added in the same transaction, so the file must hold nothing but the three
+ * ADD VALUE statements (plus the lock timeout).
+ */
+describe('restock-backorder journal enum migration drift guard (T2a)', () => {
+  const schemaText = fs.readFileSync(
+    path.join(process.cwd(), 'prisma', 'schema.prisma'),
+    'utf8',
+  );
+  const migrationDir = path.join(
+    process.cwd(),
+    'prisma',
+    'migrations',
+    '20261120010000_backorder_stock_movements',
+  );
+  const sql = fs.existsSync(path.join(migrationDir, 'migration.sql'))
+    ? fs.readFileSync(path.join(migrationDir, 'migration.sql'), 'utf8')
+    : '';
+  const ddl = sql
+    .replace(/^\s*--.*$/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const enumMembers = (name: string): string[] =>
+    (
+      schemaText.match(
+        new RegExp(`enum ${name}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'),
+      )?.[1] ?? ''
+    )
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('//'));
+
+  it('sorts after the backorders migration and adds only enum values', () => {
+    const names = fs
+      .readdirSync(path.join(process.cwd(), 'prisma', 'migrations'))
+      .filter((name) => name.endsWith('_backorder_stock_movements'));
+    expect(names).toEqual(['20261120010000_backorder_stock_movements']);
+    expect(
+      '20261120010000_backorder_stock_movements' > '20261120000000_backorders',
+    ).toBe(true);
+    expect(ddl).toBe(
+      [
+        `SET LOCAL lock_timeout = '5s';`,
+        `ALTER TYPE "StockMovementType" ADD VALUE IF NOT EXISTS 'BACKORDER_RESERVE';`,
+        `ALTER TYPE "StockMovementType" ADD VALUE IF NOT EXISTS 'BACKORDER_RELEASE';`,
+        `ALTER TYPE "StockMovementGroupType" ADD VALUE IF NOT EXISTS 'BACKORDER';`,
+      ].join(' '),
+    );
+  });
+
+  it('never uses a new value in the same migration (PostgreSQL forbids it inside the transaction)', () => {
+    expect(ddl).not.toMatch(/\b(INSERT|UPDATE|DELETE|CREATE|DROP|SELECT)\b/i);
+  });
+
+  it('keeps the Prisma enums in step with the migration', () => {
+    expect(enumMembers('StockMovementType')).toEqual([
+      'OPENING',
+      'INITIAL',
+      'ADJUSTMENT',
+      'SALE',
+      'SALE_CANCELLATION',
+      'REMOVAL',
+      'BACKORDER_RESERVE',
+      'BACKORDER_RELEASE',
+    ]);
+    expect(enumMembers('StockMovementGroupType')).toEqual([
+      'SALE',
+      'ADJUSTMENT',
+      'PRODUCT',
+      'BACKORDER',
+    ]);
+  });
+});
