@@ -1,0 +1,17 @@
+{
+  "arrangement": "free",
+  "positions": {
+    "01-libro-mayor.html": {
+      "x": 2983,
+      "y": 305
+    },
+    "02-fichas.html": {
+      "x": 1453,
+      "y": 261
+    },
+    "03-banda.html": {
+      "x": 0,
+      "y": 70
+    }
+  }
+}

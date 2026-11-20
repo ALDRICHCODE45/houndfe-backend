@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B · Fichas — PDFs A4 HoundFe</title>
+<style>
+  /* ── Canvas chrome (NOT part of the PDF) ───────────────────────── */
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#cfd3d9;font-family:Helvetica,Arial,sans-serif;color:#111827;padding:32px;width:858px;-webkit-font-smoothing:antialiased}
+  .note{width:794px;background:#fff;border:1px solid #8b919a;padding:18px 22px;margin-bottom:28px;font-size:12px;line-height:1.5;color:#1f2937}
+  .note h1{font-size:15px;margin-bottom:6px}
+  .note p{margin-bottom:4px}
+  .cap{width:794px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#374151;margin:0 0 6px}
+  .sheet{margin-bottom:32px}
+  .page{position:relative;width:794px;height:1123px;background:#fff;border:1px solid #6b7280;overflow:hidden}
+
+  /* ── Direction B tokens ─────────────────────────────────────────
+     Card-based: every block is a bordered tile (1px #c7d0d6, radius 6,
+     fill #f4f6f8) on white. Facts are grouped into side-by-side cards and
+     KPI tiles; sales documents use a two-column body (items | summary).
+     Palette: ink #111827, soft #374151, muted #4b5563, border #c7d0d6,
+     surface #f4f6f8, single accent teal #0f766e (doc tag, card titles,
+     total outline). Helvetica only.                                    */
+  .p{padding:40px 44px 66px;font-size:12.5px;line-height:1.4}
+  .hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+  .brand{display:flex;align-items:center}
+  .logo{width:40px;height:40px;border:1.5px solid #0f766e;border-radius:6px;margin-right:12px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#0f766e}
+  .brand b{font-size:19px;display:block;line-height:1.1}
+  .brand span{font-size:11.5px;color:#4b5563}
+  .tag{background:#0f766e;color:#fff;border-radius:6px;padding:7px 14px;text-align:right}
+  .tag small{display:block;font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+  .tag b{display:block;font-size:15px;margin-top:1px}
+
+  .card{background:#f4f6f8;border:1px solid #c7d0d6;border-radius:6px;padding:12px 14px}
+  .card.w{background:#fff}
+  .ct{font-size:10.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#0f766e;margin-bottom:8px;display:flex;justify-content:space-between;align-items:baseline}
+  .ct em{font-style:normal;font-weight:400;letter-spacing:0;text-transform:none;color:#4b5563;font-size:11px}
+  .row{display:flex}.row>*{flex:1}.row>*+*{margin-left:12px}
+  .mb{margin-bottom:12px}
+  .hint{font-size:10.5px;color:#4b5563;line-height:1.4}
+
+  .f{display:flex;flex-wrap:wrap}
+  .f>div{width:50%;padding:0 10px 8px 0}
+  .f.three>div{width:33.33%}
+  .lb{display:block;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#4b5563}
+  .vl{display:block;font-size:12.5px;font-weight:700;margin-top:1px}
+
+  .kpi{background:#fff;border:1px solid #c7d0d6;border-top:3px solid #0f766e;border-radius:6px;padding:8px 10px}
+  .kpi .lb{font-size:9.5px}
+  .kpi b{display:block;font-size:16px;margin-top:3px}
+  .kpi.d{border:2px solid #111827;border-top:3px solid #111827}
+  .kpi small{display:block;font-size:10px;color:#374151;margin-top:1px;font-weight:700}
+  .kpi.big{background:#fff;border:2px solid #0f766e}
+  .kpi.big b{font-size:22px}
+
+  .t .r{display:flex;align-items:flex-start;padding:6px 8px;border-bottom:1px solid #d9dfe4}
+  .t .r:last-child{border-bottom:none}
+  .t .h{background:#e3e8ec;border-radius:4px;border-bottom:none;font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#1f2937;align-items:flex-end;padding:6px 8px}
+  .n{text-align:right}.money{font-variant-numeric:tabular-nums}
+  .small{display:block;font-size:10px;color:#4b5563;font-weight:400}
+  .ch .a{flex:1.5}.ch .m{flex:1.15;text-align:right;padding-left:6px}
+  .ch .tt{background:#fff;border-top:2px solid #111827;font-weight:700}
+
+  /* handover ficha */
+  .hv{background:#fff;border:1px solid #c7d0d6;border-left:4px solid #0f766e;border-radius:6px;padding:8px 12px;margin-bottom:8px}
+  .hv.pe{border-left-color:#111827;border-style:dashed;border-left-style:solid}
+  .hv .l1{display:flex;justify-content:space-between;align-items:baseline}
+  .chip{display:inline-block;border:1px solid #111827;border-radius:10px;padding:1px 8px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+  .hv .am{display:flex}.hv .am>div{margin-left:22px;text-align:right}
+  .hv .am b{display:block;font-size:13.5px}
+  .hv .l2{display:flex;margin-top:6px;padding-top:6px;border-top:1px solid #e3e8ec}
+  .hv .l2>div{flex:1;padding-right:8px}
+  .hv .l2 .vl{font-weight:600;font-size:12px}
+
+  .foot{position:absolute;left:44px;right:44px;bottom:22px;display:flex;justify-content:space-between;align-items:center;font-size:10.5px;color:#4b5563}
+  .foot i{font-style:normal;border:1px solid #0f766e;color:#0f766e;font-weight:700;border-radius:10px;padding:2px 10px}
+  .prov{font-size:10px;font-style:italic;color:#4b5563;margin-top:4px}
+
+  /* sales docs */
+  .body2{display:flex;align-items:flex-start}
+  .body2>.main{flex:1}.body2>.side{width:244px;margin-left:14px}
+  .it{display:flex;justify-content:space-between;padding:9px 10px;border-bottom:1px solid #d9dfe4}
+  .it:last-child{border-bottom:none}
+  .it .nm{font-size:13px;font-weight:700}.it .vr{font-size:11px;color:#4b5563;margin-top:1px}
+  .it .rt{text-align:right;flex-shrink:0;padding-left:12px}.it .rt b{display:block;font-size:13px;margin-top:1px}
+  .it .qt{font-size:11.5px;color:#374151}
+  .sl{display:flex;justify-content:space-between;padding:4px 0;font-size:12.5px}
+  .sl span{color:#374151}.sl b{font-weight:700}
+  .totbox{background:#fff;border:2px solid #0f766e;border-radius:6px;padding:10px 12px;margin-top:8px}
+  .totbox span{display:block;font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#0f766e}
+  .totbox b{display:block;font-size:26px;margin-top:1px;letter-spacing:-.01em}
+  .pay{padding:7px 0;border-bottom:1px solid #d9dfe4}.pay:last-child{border-bottom:none;padding-bottom:0}.pay:first-of-type{padding-top:0}
+  .pay .l1{display:flex;justify-content:space-between;align-items:baseline}.pay b{font-size:12.5px}
+  .closing{margin-top:16px;text-align:center;font-size:11px;color:#374151;line-height:1.5}
+  .closing b{display:block;font-size:12.5px;color:#111827}
+  .rep .f1{flex:1.7;padding-right:6px}.rep .d{flex:1.8;padding-right:6px}.rep .m{flex:1.1;text-align:right;padding-right:8px}.rep .e{flex:1.1;text-align:right}
+  .rep .r{font-size:11.5px}
+  .rep .r:nth-child(even):not(.h){background:#fff}
+  .st{display:inline-block;border:1px solid #111827;border-radius:9px;padding:0 7px;font-size:10px;font-weight:700}
+  .st.ok{border-color:#9aa5ae;color:#374151;font-weight:400}
+  .notes li{margin:0 0 3px 14px;font-size:10.5px;color:#374151;line-height:1.4}
+  .nr{padding:7px 0;border-bottom:1px solid #d9dfe4}.nr:last-child{border-bottom:none;padding-bottom:0}.nr p{font-size:12px;margin-top:2px}
+</style>
+</head>
+<body>
+
+<aside class="note" aria-label="Notas de la dirección">
+  <h1>B · Fichas — card-based</h1>
+  <p><b>Estrategia:</b> cada bloque es una ficha con borde y fondo gris muy claro; los datos se agrupan en fichas lado a lado, los totales del corte son mosaicos (KPI) y cada entrega es una ficha propia. En recibo/cotización/reporte el cuerpo es de dos columnas (partidas | resumen). Acento único verde azulado <b>#0F766E</b> (etiqueta del documento, títulos de ficha, contorno del total).</p>
+  <p><b>Tradeoff:</b> el más escaneable y “de producto”; agrupa por tema y se parece a la UI. Gasta más altura (bordes, rellenos): el corte rinde menos filas por página y las fichas por entrega agregan más páginas con muchas entregas; usa fondos claros que en impresoras B/N salen como gris tenue.</p>
+  <p><b>Implementación react-pdf:</b> <code>View</code> con <code>border</code> + <code>borderRadius</code> + <code>backgroundColor</code> (ya lo hace el kit actual); <code>flexWrap</code> para los campos; <code>wrap={false}</code> por ficha de entrega. Diferencias: tilde de «Faltante» y borde oscuro de 2 px, no solo color. Tamaños en px (×0.75 = pt).</p>
+</aside>
+
+<!-- ═════════════ 1 · CORTE DE CAJA — pág. 1 ═════════════ -->
+<section class="sheet">
+<div class="cap">1 · Corte de caja — página 1 de 2</div>
+<article class="page"><div class="p">
+  <header class="hd">
+    <div class="brand"><div class="logo" aria-hidden="true">LOGO</div><div><b>HoundFe</b><span>Comprobante de corte de caja</span></div></div>
+    <div class="tag"><small>Corte de caja</small><b>CC-2026-000124</b></div>
+  </header>
+
+  <div class="row mb" style="align-items:stretch">
+    <section class="card" style="flex:2.3" aria-label="Datos del corte">
+      <div class="ct">Datos del corte <em>Cierre 15 ene 2026, 21:03</em></div>
+      <div class="f three">
+        <div><span class="lb">Caja</span><span class="vl">Caja Principal · Sucursal Centro</span></div>
+        <div><span class="lb">Sesión</span><span class="vl">SES-000458</span></div>
+        <div><span class="lb">Cajero</span><span class="vl">Mariana Ortega Ruiz</span></div>
+        <div><span class="lb">Verificador</span><span class="vl">Luis Hernández Pérez</span></div>
+        <div><span class="lb">Cerró</span><span class="vl">Carlos Mendoza Vega</span></div>
+        <div><span class="lb">Apertura</span><span class="vl">15 ene 2026, 08:00</span></div>
+        <div><span class="lb">Conteo</span><span class="vl">15 ene 2026, 20:30</span></div>
+        <div><span class="lb">Verificación</span><span class="vl">15 ene 2026, 20:44</span></div>
+        <div><span class="lb">Cierre</span><span class="vl">15 ene 2026, 21:03</span></div>
+      </div>
+    </section>
+    <section class="card w" style="flex:1" aria-label="Fondo inicial">
+      <div class="ct">Fondo inicial</div>
+      <div style="font-size:24px;font-weight:700;letter-spacing:-.01em">$1,500.00</div>
+      <p class="hint" style="margin-top:4px">Apertura. Se cuenta una sola vez y se reporta por separado de los retiros de custodia.</p>
+    </section>
+  </div>
+
+  <div class="ct" style="margin-bottom:6px">Totales del corte</div>
+  <div class="row mb" aria-label="Totales del corte">
+    <div class="kpi"><span class="lb">Esperado</span><b class="money">$32,595.50</b></div>
+    <div class="kpi"><span class="lb">Declarado</span><b class="money">$32,545.50</b></div>
+    <div class="kpi"><span class="lb">Verificado</span><b class="money">$32,525.50</b></div>
+    <div class="kpi d"><span class="lb">Dif. declarado − esperado</span><b class="money">-$50.00</b><small>Faltante</small></div>
+    <div class="kpi d"><span class="lb">Dif. verificado − declarado</span><b class="money">-$20.00</b><small>Faltante</small></div>
+  </div>
+
+  <section class="card w mb t ch" aria-label="Detalle por canal">
+    <div class="ct">Detalle por canal</div>
+    <p class="hint" style="margin-bottom:6px">El canal Efectivo agrupa el total físico del cajón; los demás canales se reportan por separado.</p>
+    <div class="r h"><div class="a">Canal</div><div class="m">Esperado</div><div class="m">Declarado</div><div class="m">Verificado</div><div class="m">Dif. decl. − esp.</div><div class="m">Dif. verif. − decl.</div></div>
+    <div class="r"><div class="a"><b>Efectivo</b></div><div class="m money">$18,420.50</div><div class="m money">$18,370.50</div><div class="m money">$18,370.50</div><div class="m money"><b>-$50.00</b></div><div class="m money">$0.00</div></div>
+    <div class="r"><div class="a"><b>Tarjeta</b></div><div class="m money">$9,865.00</div><div class="m money">$9,865.00</div><div class="m money">$9,865.00</div><div class="m money">$0.00</div><div class="m money">$0.00</div></div>
+    <div class="r"><div class="a"><b>Transferencia</b></div><div class="m money">$4,310.00</div><div class="m money">$4,310.00</div><div class="m money">$4,290.00</div><div class="m money">$0.00</div><div class="m money"><b>-$20.00</b></div></div>
+  </section>
+
+  <section class="mb" aria-label="Custodia y entregas">
+    <div class="ct" style="margin-bottom:4px">Custodia y entregas</div>
+    <p class="hint" style="margin-bottom:6px">El fondo retenido (FLOAT) inicia la siguiente apertura; los retiros (WITHDRAWAL) salen del cajón. No se suman entre sí ni con el fondo inicial.</p>
+    <div class="row">
+      <div class="card w"><span class="lb">Retiros declarados</span><span class="vl money">$19,200.00</span><span class="lb" style="margin-top:6px">Retiros recibidos</span><span class="vl money">$16,680.00 (1 pendiente)</span></div>
+      <div class="card w"><span class="lb">Fondo retenido declarado</span><span class="vl money">$1,500.00</span><span class="lb" style="margin-top:6px">Fondo retenido recibido</span><span class="vl money">$1,500.00</span></div>
+    </div>
+  </section>
+
+  <section aria-label="Entregas y recepciones">
+    <div class="ct" style="margin-bottom:6px">Entregas y recepciones <em>8 registros · continúa en la página 2</em></div>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$5,000.00</b></div><div><span class="lb">Recibido</span><b class="money">$5,000.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Mariana Ortega Ruiz</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 12:05</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 12:12</span></div></div></article>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$4,000.00</b></div><div><span class="lb">Recibido</span><b class="money">$4,000.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Mariana Ortega Ruiz</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 14:20</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 14:26</span></div></div></article>
+  </section>
+
+  <footer class="foot"><span>HoundFe · Corte de caja CC-2026-000124</span><i>Página 1 de 2</i></footer>
+</div></article>
+</section>
+
+<!-- ═════════════ 1b · CORTE DE CAJA — pág. 2 (continuación) ═════════════ -->
+<section class="sheet">
+<div class="cap">1 · Corte de caja — página 2 de 2 (continuación)</div>
+<article class="page"><div class="p">
+  <header class="hd">
+    <div class="brand"><div class="logo" aria-hidden="true">LOGO</div><div><b>HoundFe</b><span>Comprobante de corte de caja</span></div></div>
+    <div class="tag"><small>Entregas y recepciones</small><b>CC-2026-000124</b></div>
+  </header>
+
+  <section aria-label="Entregas y recepciones (continuación)">
+    <div class="ct" style="margin-bottom:6px">Entregas y recepciones <em>continuación · registros 3 a 8 de 8</em></div>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$3,500.00</b></div><div><span class="lb">Recibido</span><b class="money">$3,480.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Mariana Ortega Ruiz</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 16:02</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 16:10</span></div></div></article>
+    <article class="hv pe"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$2,500.00</b></div><div><span class="lb">Recibido</span><b>Pendiente</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Mariana Ortega Ruiz</span></div><div><span class="lb">Recibe</span><span class="vl">—</span></div><div><span class="lb">Confirma</span><span class="vl">—</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 17:45</span></div><div><span class="lb">Recibido en</span><span class="vl">Pendiente</span></div></div></article>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$2,000.00</b></div><div><span class="lb">Recibido</span><b class="money">$2,000.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Jorge Salazar Ibarra</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 18:30</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 18:37</span></div></div></article>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$1,200.00</b></div><div><span class="lb">Recibido</span><b class="money">$1,200.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Jorge Salazar Ibarra</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 19:15</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 19:22</span></div></div></article>
+    <article class="hv"><div class="l1"><span class="chip">Retiro</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$1,000.00</b></div><div><span class="lb">Recibido</span><b class="money">$1,000.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Jorge Salazar Ibarra</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 20:05</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 20:11</span></div></div></article>
+    <article class="hv"><div class="l1"><span class="chip">Fondo (FLOAT)</span><div class="am"><div><span class="lb">Declarado</span><b class="money">$1,500.00</b></div><div><span class="lb">Recibido</span><b class="money">$1,500.00</b></div></div></div>
+      <div class="l2"><div><span class="lb">Entrega</span><span class="vl">Mariana Ortega Ruiz</span></div><div><span class="lb">Recibe</span><span class="vl">Carlos Mendoza Vega</span></div><div><span class="lb">Confirma</span><span class="vl">Luis Hernández Pérez</span></div><div><span class="lb">Declarado en</span><span class="vl">15 ene 2026, 20:50</span></div><div><span class="lb">Recibido en</span><span class="vl">15 ene 2026, 20:58</span></div></div></article>
+  </section>
+
+  <section class="card w" style="margin-top:14px" aria-label="Notas de diferencia">
+    <div class="ct">Notas de diferencia</div>
+    <div class="nr"><span class="lb">Declaración</span><p>Faltante de $50.00 en efectivo: se retiró un billete dañado durante el conteo.</p></div>
+    <div class="nr"><span class="lb">Verificación</span><p>Faltante de $20.00 en transferencias: comisión bancaria no registrada en el sistema.</p></div>
+    <div class="nr"><span class="lb">Cierre</span><p>Sin incidentes adicionales. El retiro de $2,500.00 queda pendiente de recepción por Carlos Mendoza Vega.</p></div>
+  </section>
+  <p class="prov">Documento generado a partir del corte congelado. No se recalcula con movimientos, pagos ni cancelaciones posteriores.</p>
+
+  <footer class="foot"><span>HoundFe · Corte de caja CC-2026-000124</span><i>Página 2 de 2</i></footer>
+</div></article>
+</section>
+
+<!-- ═════════════ 2 · RECIBO A4 ═════════════ -->
+<section class="sheet">
+<div class="cap">2 · Recibo de venta A4 — página 1 de 1</div>
+<article class="page"><div class="p">
+  <header class="hd">
+    <div class="brand"><div class="logo" aria-hidden="true">LOGO</div><div><b>HoundFe</b><span>Punto de Venta</span></div></div>
+    <div class="tag"><small>Recibo</small><b>Folio #A-004217</b></div>
+  </header>
+
+  <div class="row mb">
+    <section class="card" aria-label="Cliente"><span class="lb">Cliente</span><span class="vl" style="font-size:14px">Rosa Elena Cárdenas Juárez</span></section>
+    <section class="card" aria-label="Fecha"><span class="lb">Fecha</span><span class="vl">15 ene 2026, 12:05</span></section>
+    <section class="card" aria-label="Cajero"><span class="lb">Cajero</span><span class="vl">Mariana Ortega Ruiz</span></section>
+    <section class="card" aria-label="Vendedor"><span class="lb">Vendedor</span><span class="vl">Jorge Salazar Ibarra</span></section>
+  </div>
+
+  <div class="body2">
+    <section class="card w main t" style="padding:12px 4px 4px" aria-label="Productos">
+      <div class="ct" style="padding:0 10px">Productos</div>
+      <div class="it"><div><div class="nm">Croquetas Adulto Raza Grande 18 kg</div><div class="vr">Pollo y arroz</div></div><div class="rt"><span class="qt money">2 × $1,149.00</span><b class="money">$2,298.00</b></div></div>
+      <div class="it"><div><div class="nm">Arnés Acolchado para Paseo</div><div class="vr">Talla M · Rojo</div></div><div class="rt"><span class="qt money">1 × $289.00</span><b class="money">$289.00</b></div></div>
+      <div class="it"><div><div class="nm">Arena Aglomerante para Gato 10 kg</div><div class="vr">Aroma lavanda</div></div><div class="rt"><span class="qt money">3 × $189.00</span><b class="money">$567.00</b></div></div>
+      <div class="it"><div><div class="nm">Snacks Dentales para Perro</div><div class="vr">Paquete de 12 piezas</div></div><div class="rt"><span class="qt money">2 × $119.50</span><b class="money">$239.00</b></div></div>
+      <div class="it"><div><div class="nm">Collar Reflejante Ajustable</div><div class="vr">Talla S · Azul</div></div><div class="rt"><span class="qt money">1 × $135.00</span><b class="money">$135.00</b></div></div>
+      <div class="it"><div><div class="nm">Croquetas Cachorro a granel</div><div class="vr">Por kilo</div></div><div class="rt"><span class="qt money">2.5 × $62.00</span><b class="money">$155.00</b></div></div>
+    </section>
+    <div class="side">
+      <section class="card" aria-label="Resumen">
+        <div class="ct">Resumen</div>
+        <div class="sl"><span>Subtotal</span><b class="money">$3,683.00</b></div>
+        <div class="sl"><span>Descuentos</span><b class="money">-$183.00</b></div>
+        <div class="sl"><span>Envío</span><b class="money">$60.00</b></div>
+        <div class="sl"><span>Pagado</span><b class="money">$3,000.00</b></div>
+        <div class="sl"><span>Deuda</span><b class="money">$560.00</b></div>
+        <div class="totbox"><span>Total</span><b class="money">$3,560.00</b></div>
+      </section>
+      <section class="card w" style="margin-top:12px" aria-label="Pagos">
+        <div class="ct">Pagos</div>
+        <div class="pay"><div class="l1"><b>Efectivo</b><b class="money">$2,000.00</b></div><span class="small">12:05</span></div>
+        <div class="pay"><div class="l1"><b>Terminal BBVA</b><b class="money">$1,000.00</b></div><span class="small">Débito ···· 4821 · Ref: 084731</span><span class="small">12:06</span></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="closing"><b>Gracias por su compra.</b>Este comprobante no constituye una factura fiscal.</div>
+  <footer class="foot"><span>HoundFe · Recibo A-004217</span><i>Página 1 de 1</i></footer>
+</div></article>
+</section>
+
+<!-- ═════════════ 3 · COTIZACIÓN ═════════════ -->
+<section class="sheet">
+<div class="cap">3 · Cotización — página 1 de 1</div>
+<article class="page"><div class="p">
+  <header class="hd">
+    <div class="brand"><div class="logo" aria-hidden="true">LOGO</div><div><b>HoundFe</b><span>Punto de Venta</span></div></div>
+    <div class="tag"><small>Cotización</small><b>Folio #COT-000087</b></div>
+  </header>
+
+  <div class="row mb">
+    <section class="card" style="flex:1.6" aria-label="Cliente"><span class="lb">Cliente</span><span class="vl" style="font-size:14px">Clínica Veterinaria San Roque</span><span class="hint" style="display:block;margin-top:2px">compras@sanroque-vet.mx</span></section>
+    <section class="card" aria-label="Fecha y vendedor"><span class="lb">Fecha</span><span class="vl">15 ene 2026</span><span class="lb" style="margin-top:6px">Vendedor</span><span class="vl">Jorge Salazar Ibarra</span></section>
+    <section class="card w" style="border:2px solid #0f766e" aria-label="Vigencia"><span class="lb" style="color:#0f766e">Válido hasta</span><span class="vl" style="font-size:16px;margin-top:3px">14 feb 2026</span></section>
+  </div>
+
+  <section class="card w mb t" style="padding:12px 4px 4px" aria-label="Productos">
+    <div class="ct" style="padding:0 10px">Productos</div>
+    <div class="it"><div><div class="nm">Croquetas Adulto Raza Grande 18 kg</div><div class="vr">Res y vegetales</div></div><div class="rt"><span class="qt money">10 × $1,149.00</span><b class="money">$11,490.00</b></div></div>
+    <div class="it"><div><div class="nm">Arnés Acolchado para Paseo</div><div class="vr">Talla L · Negro</div></div><div class="rt"><span class="qt money">6 × $289.00</span><b class="money">$1,734.00</b></div></div>
+    <div class="it"><div><div class="nm">Correa Retráctil 5 m</div><div class="vr">Negro</div></div><div class="rt"><span class="qt money">8 × $215.00</span><b class="money">$1,720.00</b></div></div>
+    <div class="it"><div><div class="nm">Arena Aglomerante para Gato 10 kg</div><div class="vr">Sin aroma</div></div><div class="rt"><span class="qt money">12 × $189.00</span><b class="money">$2,268.00</b></div></div>
+    <div class="it"><div><div class="nm">Shampoo Hipoalergénico 500 ml</div><div class="vr">Avena y aloe</div></div><div class="rt"><span class="qt money">6 × $98.50</span><b class="money">$591.00</b></div></div>
+  </section>
+
+  <div style="display:flex;justify-content:flex-end">
+    <section class="card" style="width:300px" aria-label="Totales">
+      <div class="sl"><span>Subtotal</span><b class="money">$17,803.00</b></div>
+      <div class="sl"><span>Descuentos</span><b class="money">-$890.15</b></div>
+      <div class="sl"><span>IVA incluido</span><b class="money">$2,332.81</b></div>
+      <div class="totbox"><span>Total</span><b class="money">$16,912.85</b></div>
+    </section>
+  </div>
+
+  <div class="closing" style="margin-top:30px"><b>Válido hasta: 14 feb 2026</b>Gracias por confiar en HoundFe<br>Este comprobante no constituye una factura fiscal.</div>
+  <footer class="foot"><span>HoundFe · Cotización COT-000087</span><i>Página 1 de 1</i></footer>
+</div></article>
+</section>
+
+<!-- ═════════════ 4 · REPORTE DE VENTAS POR VENDEDOR ═════════════ -->
+<section class="sheet">
+<div class="cap">4 · Reporte de ventas por vendedor — página 1 de 4</div>
+<article class="page"><div class="p">
+  <header class="hd">
+    <div class="brand"><div class="logo" aria-hidden="true">LOGO</div><div><b>HoundFe</b><span>Reporte de ventas</span></div></div>
+    <div class="tag"><small>Vendedor</small><b>Jorge Salazar Ibarra</b></div>
+  </header>
+
+  <div class="row mb">
+    <section class="card" aria-label="Periodo"><span class="lb">Periodo</span><span class="vl">Del 1 de enero de 2026 al 1 de febrero de 2026</span><span class="hint">Fecha final excluida</span></section>
+    <section class="card" style="flex:.7" aria-label="Generado"><span class="lb">Generado</span><span class="vl">1 feb 2026, 09:14</span><span class="hint">Hora CDMX</span></section>
+  </div>
+
+  <div class="ct" style="margin-bottom:6px">Resumen · ventas confirmadas</div>
+  <div class="row mb" style="align-items:stretch">
+    <div class="kpi"><span class="lb">Ventas</span><b>38</b></div>
+    <div class="kpi"><span class="lb">Cobrado</span><b class="money">$171,905.50</b></div>
+    <div class="kpi"><span class="lb">Saldo pendiente</span><b class="money">$14,515.00</b></div>
+    <div class="kpi"><span class="lb">Ticket promedio</span><b class="money">$4,905.80</b></div>
+    <div class="kpi big" style="flex:1.3"><span class="lb" style="color:#0f766e">Ventas netas</span><b class="money">$186,420.50</b></div>
+  </div>
+
+  <section class="card w mb notes" aria-label="Notas">
+    <div class="ct" style="margin-bottom:4px">Cómo leer este reporte</div>
+    <ul style="list-style:disc">
+      <li>Este reporte se atribuye al vendedor asignado actualmente a cada venta. Si una venta cambió de vendedor, se muestra bajo el vendedor actual; el historial de reasignaciones no se reconstruye.</li>
+      <li>Los importes de pagado y saldo reflejan el estado actual de cada venta, no flujos por fecha de pago.</li>
+      <li>Las ventas canceladas se incluyen solo como referencia y no se suman a los totales de ventas confirmadas.</li>
+    </ul>
+  </section>
+
+  <section class="card w t rep" style="padding:12px 6px 6px" aria-label="Ventas confirmadas">
+    <div class="ct" style="padding:0 8px">Ventas confirmadas <em>por fecha de confirmación</em></div>
+    <div class="r h"><div class="f1">Folio</div><div class="d">Confirmada</div><div class="m">Total</div><div class="m">Pagado</div><div class="m">Saldo</div><div class="e">Estado</div></div>
+    <div class="r"><div class="f1">A-2026-000781</div><div class="d">02 ene 2026, 10:14</div><div class="m money">$1,284.00</div><div class="m money">$1,284.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000784</div><div class="d">02 ene 2026, 13:40</div><div class="m money">$3,560.00</div><div class="m money">$3,000.00</div><div class="m money">$560.00</div><div class="e"><span class="st">Parcial</span></div></div>
+    <div class="r"><div class="f1">A-2026-000790</div><div class="d">03 ene 2026, 11:02</div><div class="m money">$8,912.50</div><div class="m money">$0.00</div><div class="m money">$8,912.50</div><div class="e"><span class="st">A crédito</span></div></div>
+    <div class="r"><div class="f1">A-2026-000795</div><div class="d">03 ene 2026, 17:25</div><div class="m money">$459.00</div><div class="m money">$459.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000801</div><div class="d">05 ene 2026, 09:48</div><div class="m money">$2,298.00</div><div class="m money">$2,298.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000806</div><div class="d">06 ene 2026, 12:30</div><div class="m money">$6,745.00</div><div class="m money">$6,745.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000812</div><div class="d">07 ene 2026, 16:05</div><div class="m money">$1,149.00</div><div class="m money">$1,149.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000818</div><div class="d">08 ene 2026, 10:51</div><div class="m money">$5,310.00</div><div class="m money">$3,000.00</div><div class="m money">$2,310.00</div><div class="e"><span class="st">Parcial</span></div></div>
+    <div class="r"><div class="f1">A-2026-000823</div><div class="d">09 ene 2026, 14:22</div><div class="m money">$927.50</div><div class="m money">$927.50</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000829</div><div class="d">10 ene 2026, 18:09</div><div class="m money">$2,870.00</div><div class="m money">$2,870.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000835</div><div class="d">12 ene 2026, 11:37</div><div class="m money">$3,742.00</div><div class="m money">$3,742.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000841</div><div class="d">13 ene 2026, 09:33</div><div class="m money">$1,980.00</div><div class="m money">$1,980.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000846</div><div class="d">13 ene 2026, 15:50</div><div class="m money">$7,215.00</div><div class="m money">$5,000.00</div><div class="m money">$2,215.00</div><div class="e"><span class="st">Parcial</span></div></div>
+    <div class="r"><div class="f1">A-2026-000852</div><div class="d">14 ene 2026, 12:18</div><div class="m money">$639.00</div><div class="m money">$639.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000857</div><div class="d">14 ene 2026, 19:02</div><div class="m money">$4,380.00</div><div class="m money">$4,380.00</div><div class="m money">$0.00</div><div class="e"><span class="st ok">Pagada</span></div></div>
+    <div class="r"><div class="f1">A-2026-000863</div><div class="d">15 ene 2026, 10:27</div><div class="m money">$3,560.00</div><div class="m money">$3,000.00</div><div class="m money">$560.00</div><div class="e"><span class="st">Parcial</span></div></div>
+  </section>
+
+  <footer class="foot"><span>HoundFe · Reporte de ventas · Jorge Salazar Ibarra</span><i>Página 1 de 4</i></footer>
+</div></article>
+</section>
+
+</body>
+</html>

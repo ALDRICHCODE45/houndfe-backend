@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "comments": [
+    {
+      "id": "papd4yvo",
+      "file": "03-banda.html",
+      "selector": "body",
+      "excerpt": "C · Banda — strong header band Estrategia: banda de color a sangre en la cabecera (título del documento en blanco, grande), franja de metadatos bajo la banda, cabeceras de tabla y barra de total rellenas, y banda de pie con «Página X de Y». Los datos del corte se reorganizan por persona (cajero → ap",
+      "comment": "Este diseno tiene el color morado com principal.. por que morado??? en que parte del sistema ocupamos el color morado?",
+      "createdAt": "2026-11-19T23:13:42.804Z",
+      "status": "resolved",
+      "sentAt": "2026-11-19T23:13:42.809Z",
+      "resolvedAt": "2026-11-19T23:14:42.918Z",
+      "resolution": "El morado #312e81 era inventado: la C pasa a la paleta del sistema (acento #173968, tinta #24313d/#576574, bordes #dce2e8, faltante #805511)."
+    }
+  ]
+}

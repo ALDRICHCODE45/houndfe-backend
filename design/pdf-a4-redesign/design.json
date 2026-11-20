@@ -1,0 +1,28 @@
+{
+  "title": "PDFs A4 — Corte de caja, Recibo, Cotización y Reporte de vendedor",
+  "brief": "Tres direcciones de diseño para los cuatro PDF A4 del backend HoundFe (punto de venta de una tienda de mascotas en México; copy en español, importes MXN, fechas como «15 ene 2026, 12:05»). Cada artboard apila las primeras páginas de los cuatro documentos a tamaño A4 (794×1123 px con borde de página visible): corte de caja (con segunda página de continuación y 8 entregas con nombres de personas), recibo de venta, cotización y reporte de ventas por vendedor; todas con pie «Página X de Y». Restricciones de implementación (@react-pdf/renderer 4.5): solo flexbox, Helvetica, colores sólidos y bordes, sin imágenes externas, un solo acento por dirección y legibilidad en blanco y negro.",
+  "feature": "odd/tasks/pdf-a4-redesign.md",
+  "artboards": [
+    {
+      "file": "01-libro-mayor.html",
+      "title": "A · Libro mayor (ledger / minimal)",
+      "tradeoff": "Sin tarjetas ni rellenos: jerarquía solo con reglas y columnas alineadas, regla azul #173968 sobre y bajo el Total, con la paleta del frontend (ámbar para faltante/sobrante/deuda, nunca rojo); el más barato de imprimir y el más fiel en B/N (ideal auditoría), pero el más sobrio y con menos presencia de marca.",
+      "width": 858,
+      "height": 6180
+    },
+    {
+      "file": "02-fichas.html",
+      "title": "B · Fichas (card-based)",
+      "tradeoff": "Datos agrupados en fichas y mosaicos KPI, cuerpo a dos columnas en recibo/cotización, una ficha por entrega: el más escaneable y cercano a la UI; gasta más altura (menos filas por página en el corte) y sus fondos grises claros salen tenues en B/N.",
+      "width": 858,
+      "height": 6220
+    },
+    {
+      "file": "03-banda.html",
+      "title": "C · Banda (strong header band)",
+      "tradeoff": "Banda sólida a sangre con título en blanco, cabeceras de tabla y barra de total rellenas, pie en banda: la mayor identidad de marca y un total inconfundible; consume más tinta y la banda sale casi negra en B/N (requiere que la impresora respete el sangrado).",
+      "width": 858,
+      "height": 6220
+    }
+  ]
+}
