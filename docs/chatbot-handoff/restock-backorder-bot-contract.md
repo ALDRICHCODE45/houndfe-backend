@@ -163,6 +163,8 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 ## 5. Price (D1) — reference price live in T1, the rest in T2
 
 - `referencePriceCents` (**T1**): computed by the server at scheduling with the price the bot checkout would use for that customer and quantity — the customer's price list (PUBLICO when none, or when the list has no price for the product) and the tier for `quantity`; **list price, without promotions**. A customer that does not exist yet (`createIfAbsent`) is priced as PUBLICO. If you send `expectedReferencePriceCents` and it differs → `409 PRICE_OUT_OF_DATE {currentPriceCents}`.
+- Which list priced it is stored server-side (`referencePriceListId`, not in the bot payload): the customer's list when that list priced the line, none when the price came from PUBLICO.
+- A customer the staff deletes from the POS: refused (`409`) while they have a `WAITING`/`RESERVED` backorder; with only `CONFIRMED`/`EXPIRED`/`CANCELLED` ones the customer is deleted and those backorders go with them (`GET /chatbot-api/backorders/:id` then answers `404 BACKORDER_NOT_FOUND`).
 - `currentPriceCents` (**T2**): at reservation, the price that customer would pay that day through the bot for that quantity **with automatic promotions** (the final unit price `POST /chatbot-api/pricing/evaluate-cart` returns). The customer never pays more than a counter customer would that day.
 - `finalPriceCents = min(referencePriceCents, currentPriceCents)` (**T2**), frozen at reservation and shown in the arrival message.
 - At checkout the backorder line is priced at `finalPriceCents` and **promotions are not applied again to that line** (**T3**).

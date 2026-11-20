@@ -495,6 +495,25 @@ d('restock backorders — bot routes + constraints (PostgreSQL)', () => {
       expect(row.referencePriceListId).toBe(list.id);
     });
 
+    it('records referencePriceListId null when the price fell back to PUBLICO (T1b)', async () => {
+      const w = await world({ priceCents: 114900 });
+      // The customer's list exists but has NO price for this product.
+      const list = await prisma.globalPriceList.create({
+        data: { name: `SIN-PRECIO-bo-${randomUUID()}` },
+      });
+      createdPriceListIds.push(list.id);
+      await prisma.customer.update({
+        where: { id: w.customerId },
+        data: { globalPriceListId: list.id },
+      });
+      const res = await post(w.token, body(w)).expect(201);
+      expect(res.body.backorder.referencePriceCents).toBe(114900);
+      const row = await prisma.backorder.findUniqueOrThrow({
+        where: { id: res.body.backorder.id },
+      });
+      expect(row.referencePriceListId).toBeNull();
+    });
+
     it('409 PRICE_OUT_OF_DATE {currentPriceCents} when the expected price differs; equal passes', async () => {
       const w = await world({ priceCents: 114900 });
       const stale = await post(

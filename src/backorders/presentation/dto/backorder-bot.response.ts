@@ -2,9 +2,8 @@
  * `BackorderBot` (contract v1 §6.5): the bot-facing projection of a backorder.
  *
  * Timestamps are ISO 8601 UTC (`toISOString()`, `…Z`), like every other bot
- * payload today (`holdUntil`, feed items). Contract §10 asks for an offset
- * (`-06:00`, America/Mexico_City); that is a discrepancy to settle with the
- * chatbot before the feed (T2), so T1 keeps the established UTC form.
+ * payload today (`holdUntil`, feed items). Decided: UTC `Z` everywhere, no
+ * local offset (restock-backorder L4).
  */
 import type {
   BackorderCancelledByKindValue,

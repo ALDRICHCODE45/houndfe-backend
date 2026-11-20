@@ -268,6 +268,8 @@ Actualización parcial. Solo se modifican los campos enviados. Enviar `null` o `
 
 **Respuesta `204 No Content`**.
 
+**Errores**: `404` si no existe. **`409 CUSTOMER_HAS_ACTIVE_BACKORDERS`** — «El cliente tiene pedidos por reposición activos»: el cliente tiene un pedido por reposición en espera (`WAITING`) o apartado (`RESERVED`); no se borra nada. Body: `{ "statusCode": 409, "error": "CUSTOMER_HAS_ACTIVE_BACKORDERS", "message": "El cliente tiene pedidos por reposición activos", "timestamp": "…" }`. Si el cliente solo tiene pedidos por reposición cancelados, vencidos o confirmados, se borra el cliente y esos pedidos se borran con él (`204`). Sin pedidos por reposición el comportamiento no cambia.
+
 > ⚠️ **Importante**: borrar un Customer pone en `null` el `customerId` de todas las ventas históricas que lo referenciaban (`ON DELETE SET NULL`). El historial se conserva pero pierde el nombre del cliente. **Hay un follow-up planeado** para snapshottear el nombre+dirección al confirmar la venta — hasta entonces, advertir en UI antes de borrar.
 
 ---

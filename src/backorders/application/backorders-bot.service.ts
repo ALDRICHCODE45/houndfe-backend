@@ -29,6 +29,7 @@ import {
 } from '../domain/backorder-status';
 import { allocateBackorderFolio } from '../infrastructure/backorder-folio.allocator';
 import { BackorderCustomerResolver } from '../infrastructure/backorder-customer.resolver';
+import { BackorderReferencePriceListResolver } from '../infrastructure/backorder-reference-price-list.resolver';
 import { BackorderStockReader } from '../infrastructure/backorder-stock.reader';
 import {
   toBackorderBot,
@@ -71,6 +72,7 @@ export class BackordersBotService {
     private readonly sales: SalesService,
     private readonly customers: BackorderCustomerResolver,
     private readonly stock: BackorderStockReader,
+    private readonly referencePriceLists: BackorderReferencePriceListResolver,
     @Inject(BACKORDER_RESERVATION_RELEASER)
     private readonly releaser: BackorderReservationReleaser,
   ) {}
@@ -374,9 +376,17 @@ export class BackordersBotService {
         variantId,
         quantity: intent.quantity,
         referencePriceCents,
+        // Null when the price came from the PUBLICO fallback (T1b).
         referencePriceListId:
           resolved.kind === 'existing'
-            ? resolved.customer.globalPriceListId
+            ? await this.referencePriceLists.resolve(
+                resolved.customer.globalPriceListId,
+                {
+                  productId: product.id,
+                  variantId,
+                  quantity: intent.quantity,
+                },
+              )
             : null,
         scheduledAt: new Date(),
         estimatedArrivalDays: estimate.estimatedArrivalDays,

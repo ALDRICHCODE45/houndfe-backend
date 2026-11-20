@@ -5,7 +5,8 @@
  *
  * `ChatbotApiModule` supplies the bot guard and its credential repository;
  * `SalesModule` supplies `SalesService.previewBotPricing` (the same price
- * resolution the bot checkout uses). `DatabaseModule` and `ConfigModule` are
+ * resolution the bot checkout uses); `ProductsModule` supplies the price-list
+ * lookup that tells whether the customer's list or PUBLICO priced the line. `DatabaseModule` and `ConfigModule` are
  * global providers (`TenantPrismaService`, `ConfigService`).
  *
  * `BACKORDER_RESERVATION_RELEASER` is the seam the reserve/allocate task
@@ -14,22 +15,25 @@
  */
 import { Module } from '@nestjs/common';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
+import { ProductsModule } from '../products/products.module';
 import { SalesModule } from '../sales/sales.module';
 import { DatabaseModule } from '../shared/prisma/prisma.module';
 import { BackordersBotService } from './application/backorders-bot.service';
 import { BACKORDER_RESERVATION_RELEASER } from './application/ports/backorder-reservation-releaser.port';
 import { BackorderCustomerResolver } from './infrastructure/backorder-customer.resolver';
+import { BackorderReferencePriceListResolver } from './infrastructure/backorder-reference-price-list.resolver';
 import { BackorderStockReader } from './infrastructure/backorder-stock.reader';
 import { NoOpBackorderReservationReleaser } from './infrastructure/no-op-backorder-reservation.releaser';
 import { BackordersBotController } from './presentation/backorders-bot.controller';
 
 @Module({
-  imports: [DatabaseModule, ChatbotApiModule, SalesModule],
+  imports: [DatabaseModule, ChatbotApiModule, ProductsModule, SalesModule],
   controllers: [BackordersBotController],
   providers: [
     BackordersBotService,
     BackorderCustomerResolver,
     BackorderStockReader,
+    BackorderReferencePriceListResolver,
     {
       provide: BACKORDER_RESERVATION_RELEASER,
       useClass: NoOpBackorderReservationReleaser,
