@@ -41,5 +41,6 @@ export type {
   LedgerCellObject,
   LedgerColumn,
   LedgerRowData,
+  LedgerRowPromo,
   LedgerTableProps,
 } from './a4-kit';

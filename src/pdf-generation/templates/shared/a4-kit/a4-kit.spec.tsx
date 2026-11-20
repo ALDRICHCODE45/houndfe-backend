@@ -392,6 +392,37 @@ describe('LedgerTable', () => {
     expect(fixedOf(false)).toBe(false);
   });
 
+  it('renders an optional promo line inside the same unbreakable row (muted label, ink amount)', () => {
+    const withPromo = [
+      {
+        key: 'p',
+        cells: { name: 'Uno', amount: '$2.00' },
+        promo: { label: 'Promo 2×1', amount: '-$1.00' },
+      },
+    ];
+    const elements = walk(LedgerTable({ columns: COLUMNS, rows: withPromo }));
+    const styleOf = (content: string) => {
+      const match = elements.find(
+        (element) =>
+          element.type === Text &&
+          text(element.props.children as ReactNode).trim() === content,
+      );
+      return Object.assign({}, ...[match?.props.style].flat()) as Record<
+        string,
+        unknown
+      >;
+    };
+
+    expect(
+      elements.filter(
+        (element) => element.type === View && element.props.wrap === false,
+      ),
+    ).toHaveLength(1);
+    expect(styleOf('Promo 2×1').color).toBe(A4_COLORS.muted);
+    expect(styleOf('-$1.00').color).toBe(A4_COLORS.ink);
+    expect(styleOf('-$1.00').textAlign).toBe('right');
+  });
+
   it('has muted bold header text with a bottom rule and no fill', () => {
     expect(A4_STYLES.ledgerHeaderText).toMatchObject({
       color: A4_COLORS.muted,

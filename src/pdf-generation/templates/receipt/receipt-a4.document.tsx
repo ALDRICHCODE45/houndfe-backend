@@ -12,7 +12,9 @@
  *     is the ticket/email logo and is NOT fetched here) + «Recibo» / «Folio #…». Meta bar: Fecha ·
  *     Cajero · Vendedor.
  *   - Cliente («Público en General» fallback), Productos (ledger table with
- *     variant sub-line), totals block, Pagos, closing note.
+ *     variant sub-line; a per-line promotion prints as a promo row under the
+ *     item with the line at GROSS so Σ lines = Subtotal), totals block,
+ *     Pagos, closing note.
  *
  * Palette (L5): discounts print «-$X» in ink (never red); «Deuda» is warning
  * when > 0 and success when zero; danger is reserved for voids/errors and
@@ -42,8 +44,8 @@ import {
   type LedgerRowData,
 } from '../shared/a4-kit';
 import { PUBLIC_CUSTOMER_PLACEHOLDER } from '../shared';
-import type { LineItem, Payment, TotalsBlockProps } from '../shared';
-import type { ReceiptDocumentProps } from './receipt.types';
+import type { Payment, TotalsBlockProps } from '../shared';
+import type { ReceiptDocumentProps, ReceiptLineItem } from './receipt.types';
 
 const BRAND_SUBTITLE = 'Punto de Venta';
 
@@ -125,17 +127,48 @@ const ITEM_COLUMNS: readonly LedgerColumn[] = [
   { key: 'amount', label: 'Importe', flex: 1.3, align: 'right' },
 ];
 
-function ItemsSection({ items }: { items: readonly LineItem[] }) {
-  const rows: LedgerRowData[] = items.map((item, index) => ({
-    key: `${item.productName}-${index}`,
-    cells: {
-      description: item.variantName
-        ? { text: item.productName, sub: item.variantName }
-        : item.productName,
-      qty: `${formatQuantity(item.quantity)} × ${formatA4Money(item.unitPriceCents)}`,
-      amount: { text: formatA4Money(item.subtotalCents), bold: true },
-    },
-  }));
+/**
+ * ARITHMETIC. The visible amounts must add up to the sale «Subtotal» (gross):
+ *   - no discount: `qty × unit = amount` (amount = NET line subtotal);
+ *   - with a discount: the row prints `qty × BASE unit = gross amount` and a
+ *     promo row prints the line's TOTAL discount = gross − net subtotal. That
+ *     covers per-unit discounts (unitPrice already net, base = pre-price) and
+ *     BUY_X_GET_Y (unitPrice full, reward in discountAmountCents) with one
+ *     rule. An order-level promotion is not per line: it only reaches
+ *     «Descuentos».
+ */
+function ItemsSection({ items }: { items: readonly ReceiptLineItem[] }) {
+  const rows: LedgerRowData[] = items.map((item, index) => {
+    const baseCents = item.baseUnitPriceCents ?? item.unitPriceCents;
+    const grossCents = Math.round(baseCents * item.quantity);
+    const lineDiscountCents = item.discountAmountCents
+      ? Math.max(0, grossCents - item.subtotalCents)
+      : 0;
+    const hasDiscount = lineDiscountCents > 0;
+    return {
+      key: `${item.productName}-${index}`,
+      cells: {
+        description: item.variantName
+          ? { text: item.productName, sub: item.variantName }
+          : item.productName,
+        qty: `${formatQuantity(item.quantity)} × ${formatA4Money(
+          hasDiscount ? baseCents : item.unitPriceCents,
+        )}`,
+        amount: {
+          text: formatA4Money(hasDiscount ? grossCents : item.subtotalCents),
+          bold: true,
+        },
+      },
+      ...(hasDiscount
+        ? {
+            promo: {
+              label: item.discountTitle?.trim() || 'Descuento',
+              amount: formatA4Money(-lineDiscountCents),
+            },
+          }
+        : {}),
+    };
+  });
   return (
     <A4Section title="Productos">
       <LedgerTable columns={ITEM_COLUMNS} rows={rows} emptyText="---" />

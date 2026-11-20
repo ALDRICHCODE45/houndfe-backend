@@ -170,6 +170,25 @@ export const A4_STYLES = StyleSheet.create({
     borderBottomColor: A4_COLORS.border,
     borderBottomStyle: 'solid',
   },
+  // Row with a secondary promo line: cells row + promo row stacked.
+  ledgerRowStacked: { flexDirection: 'column', alignItems: 'stretch' },
+  ledgerRowCells: { flexDirection: 'row', alignItems: 'flex-start' },
+  ledgerPromoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: px(3),
+  },
+  ledgerPromoLabel: {
+    fontSize: px(10),
+    color: A4_COLORS.muted,
+    fontFamily: A4_FONTS.regular,
+  },
+  ledgerPromoAmount: {
+    fontSize: px(10.5),
+    color: A4_COLORS.ink,
+    fontFamily: A4_FONTS.regular,
+    textAlign: 'right',
+  },
   ledgerTotalRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',

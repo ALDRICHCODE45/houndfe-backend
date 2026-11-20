@@ -8,7 +8,12 @@ import {
   View,
 } from '@react-pdf/renderer';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
-import { A4_COLORS, A4_LOGO_PATH } from '../shared/a4-kit';
+import {
+  A4_COLORS,
+  A4_LOGO_PATH,
+  LedgerTable,
+  type LedgerRowData,
+} from '../shared/a4-kit';
 import { ReceiptA4Document } from './receipt-a4.document';
 import type { ReceiptDocumentProps } from './receipt.types';
 
@@ -270,7 +275,6 @@ describe('ReceiptA4Document', () => {
       expect(text).toContain('Collar clásico');
       expect(text).toContain('Mediano / Negro');
       expect(text).toContain('2 × $125.00');
-      expect(text).toContain('$225.00');
       expect(text).toContain('Croquetas 18 kg');
       expect(text).toContain('2.5 × $1,149.00');
       expect(text).toContain('$2,872.50');
@@ -362,6 +366,188 @@ describe('ReceiptA4Document', () => {
 
       expect(text).not.toContain('Pagado');
       expect(text).not.toContain('Cambio');
+    });
+  });
+
+  describe('per-line promotions (arithmetic reconciliation)', () => {
+    // Same fixtures as the thermal ticket spec. Cents:
+    //   plain   1 × 1,149.00                                  = 1,149.00 gross
+    //   BXGY    2 × 119.50 (unit stays full, R = 119.50)       =   239.00 gross
+    //   per-unit 3 × 329.00 base → 296.10 net (10 %, 32.90/u)  =   987.00 gross
+    //   Σ gross = 2,375.00 · line discounts 119.50 + 98.70 · order promo 50.00
+    //   Descuentos = 268.20 · Envío 60.00 · Total = 2,166.80
+    const plain = {
+      productName: 'Croquetas Adulto Raza Grande 18 kg',
+      variantName: 'Pollo y arroz',
+      quantity: 1,
+      unitPriceCents: 114_900,
+      baseUnitPriceCents: 114_900,
+      subtotalCents: 114_900,
+    };
+    const bxgy = {
+      productName: 'Snacks Dentales para Perro',
+      variantName: 'Paquete de 12 piezas',
+      quantity: 2,
+      unitPriceCents: 11_950,
+      baseUnitPriceCents: 11_950,
+      discountTitle: 'Promo 2×1',
+      discountAmountCents: 11_950,
+      subtotalCents: 11_950,
+    };
+    const perUnit = {
+      productName: 'Pipeta Antipulgas para Perro',
+      variantName: 'Caja de 3 pipetas',
+      quantity: 3,
+      unitPriceCents: 29_610,
+      baseUnitPriceCents: 32_900,
+      discountTitle: 'Cliente frecuente 10%',
+      discountAmountCents: 3_290,
+      subtotalCents: 88_830,
+    };
+    const mixed: ReceiptDocumentProps = {
+      ...receipt,
+      items: [plain, bxgy, perUnit],
+      totals: {
+        subtotalCents: 237_500,
+        discountCents: 26_820,
+        shippingChargeCents: 6_000,
+        totalCents: 216_680,
+        paidCents: 216_680,
+        debtCents: 0,
+        changeDueCents: 0,
+      },
+    };
+
+    // The shared `receipt` totals carry a 25.00 order discount: zero it when a
+    // test asserts that NO «-$» is printed anywhere.
+    const noOrderDiscount = { ...receipt.totals, discountCents: 0 };
+    const cents = (printed: string): number =>
+      Math.round(Number(printed.replace(/[^0-9.-]/g, '')) * 100);
+    const printedRows = (props: ReceiptDocumentProps) => {
+      const table = tree(props).find((element) => element.type === LedgerTable);
+      return (table?.props.rows ?? []) as LedgerRowData[];
+    };
+    const amountOf = (row: LedgerRowData): string => {
+      const cell = row.cells.amount;
+      return typeof cell === 'string' ? cell : cell.text;
+    };
+    const promoOf = (row: LedgerRowData) =>
+      (row as { promo?: { label: string; amount: string } }).promo;
+
+    it('prints no discount: qty × unit = amount, no promo row', () => {
+      const text = textOf({
+        ...receipt,
+        items: [plain],
+        totals: noOrderDiscount,
+      });
+
+      expect(text).toContain('1 × $1,149.00 $1,149.00');
+      expect(text).not.toMatch(/-\$/);
+    });
+
+    it('BUY_X_GET_Y: prints qty × full unit = gross amount, then the reward as the promo row', () => {
+      const text = textOf({ ...receipt, items: [bxgy] });
+
+      expect(text).toContain('2 × $119.50 $239.00');
+      expect(text).toContain('Promo 2×1 -$119.50');
+      expect(text).not.toContain('2 × $119.50 $119.50');
+    });
+
+    it('per-unit discount: prints qty × BASE price = gross amount, then the line total discount', () => {
+      const text = textOf({ ...receipt, items: [perUnit] });
+
+      expect(text).toContain('3 × $329.00 $987.00');
+      expect(text).toContain('Cliente frecuente 10% -$98.70');
+      expect(text).not.toContain('$296.10');
+      expect(text).not.toContain('$888.30');
+    });
+
+    it('falls back to «Descuento» when the promo title is missing', () => {
+      const text = textOf({
+        ...receipt,
+        items: [{ ...bxgy, discountTitle: null }],
+      });
+
+      expect(text).toContain('Descuento -$119.50');
+    });
+
+    it('prints no promo row when the discount amount is zero (net equals gross)', () => {
+      const zero = textOf({
+        ...receipt,
+        items: [{ ...bxgy, discountAmountCents: 0, subtotalCents: 23_900 }],
+        totals: noOrderDiscount,
+      });
+
+      expect(zero).toContain('2 × $119.50 $239.00');
+      expect(zero).not.toContain('Promo');
+      expect(zero).not.toMatch(/-\$/);
+    });
+
+    it('reconciles: Σ item amounts = Subtotal and Subtotal − Descuentos + Envío = Total', () => {
+      const rows = printedRows(mixed);
+      const amounts = rows.map((row) => cents(amountOf(row)));
+      const promos = rows.flatMap((row) => {
+        const promo = promoOf(row);
+        return promo ? [cents(promo.amount)] : [];
+      });
+      const text = textOf(mixed);
+
+      expect(amounts).toEqual([114_900, 23_900, 98_700]);
+      expect(promos).toEqual([-11_950, -9_870]);
+      expect(amounts.reduce((sum, value) => sum + value, 0)).toBe(
+        mixed.totals.subtotalCents,
+      );
+      expect(text).toContain('Subtotal $2,375.00');
+      expect(text).toContain('Descuentos -$268.20');
+      expect(text).toContain('Envío $60.00');
+      expect(text).toContain('Total $2,166.80');
+      expect(
+        mixed.totals.subtotalCents -
+          mixed.totals.discountCents +
+          (mixed.totals.shippingChargeCents ?? 0),
+      ).toBe(mixed.totals.totalCents);
+    });
+
+    it('prints an order-level promotion only in Descuentos, never under a line', () => {
+      // Line discounts 21,820 + order promo 5,000 = Descuentos 26,820.
+      const lineDiscounts = -printedRows(mixed)
+        .flatMap((row) => {
+          const promo = promoOf(row);
+          return promo ? [cents(promo.amount)] : [];
+        })
+        .reduce((sum, value) => sum + value, 0);
+
+      expect(lineDiscounts).toBe(21_820);
+      expect(mixed.totals.discountCents - lineDiscounts).toBe(5_000);
+      expect(
+        textOf({ ...receipt, items: [plain], totals: noOrderDiscount }),
+      ).not.toMatch(/-\$/);
+      expect(
+        textOf({
+          ...receipt,
+          items: [plain],
+          totals: { ...receipt.totals, discountCents: 5_000 },
+        }),
+      ).toContain('Descuentos -$50.00');
+    });
+
+    it('without baseUnitPriceCents the unit price is the base (BXGY still reconciles)', () => {
+      const { baseUnitPriceCents: _omitted, ...legacy } = bxgy;
+      void _omitted;
+      const text = textOf({ ...receipt, items: [legacy] });
+
+      expect(text).toContain('2 × $119.50 $239.00');
+      expect(text).toContain('Promo 2×1 -$119.50');
+    });
+
+    it('prints the promo row in ink (never red) with a muted label', () => {
+      const props = { ...receipt, items: [bxgy] };
+      const amount = textStyleOf('-$119.50', props);
+      const label = textStyleOf('Promo 2×1', props);
+
+      expect(amount.color).toBe(A4_COLORS.ink);
+      expect(label.color).toBe(A4_COLORS.muted);
+      expect(amount.color).not.toBe(A4_COLORS.danger);
     });
   });
 

@@ -298,9 +298,21 @@ export interface LedgerCellObject {
 /** A cell is plain text or a structured value with tone / sub line. */
 export type LedgerCell = string | LedgerCellObject;
 
+/**
+ * Secondary line printed inside the row (same unbreakable block), e.g. the
+ * promotion applied to a product: `label` muted under the leading columns,
+ * `amount` in ink under the last (amount) column.
+ */
+export interface LedgerRowPromo {
+  readonly label: string;
+  readonly amount: string;
+}
+
 export interface LedgerRowData {
   readonly key: string;
   readonly cells: Readonly<Record<string, LedgerCell>>;
+  /** Optional second line under the cells; absent rows render as before. */
+  readonly promo?: LedgerRowPromo;
 }
 
 export interface LedgerTableProps {
@@ -361,6 +373,29 @@ function LedgerCellView({
   );
 }
 
+function LedgerPromoLine({
+  columns,
+  promo,
+}: {
+  columns: readonly LedgerColumn[];
+  promo: LedgerRowPromo;
+}) {
+  const last = columns[columns.length - 1];
+  const leadingFlex = columns
+    .slice(0, -1)
+    .reduce((sum, column) => sum + column.flex, 0);
+  return (
+    <View style={s.ledgerPromoRow}>
+      <View style={{ flex: leadingFlex, paddingRight: 4 }}>
+        <Text style={s.ledgerPromoLabel}>{promo.label}</Text>
+      </View>
+      <View style={{ flex: last.flex, paddingRight: 4 }}>
+        <Text style={s.ledgerPromoAmount}>{promo.amount}</Text>
+      </View>
+    </View>
+  );
+}
+
 export function LedgerHeaderRow({
   columns,
 }: {
@@ -400,18 +435,38 @@ export function LedgerTable({
       {rows.length === 0 && emptyText ? (
         <Text style={s.ledgerEmpty}>{emptyText}</Text>
       ) : (
-        rows.map((row) => (
-          <View key={row.key} style={s.ledgerRow} wrap={false}>
-            {columns.map((column, index) => (
-              <LedgerCellView
-                key={column.key}
-                column={column}
-                cell={row.cells[column.key]}
-                strong={index === 0}
-              />
-            ))}
-          </View>
-        ))
+        rows.map((row) =>
+          row.promo ? (
+            <View
+              key={row.key}
+              style={[s.ledgerRow, s.ledgerRowStacked]}
+              wrap={false}
+            >
+              <View style={s.ledgerRowCells}>
+                {columns.map((column, index) => (
+                  <LedgerCellView
+                    key={column.key}
+                    column={column}
+                    cell={row.cells[column.key]}
+                    strong={index === 0}
+                  />
+                ))}
+              </View>
+              <LedgerPromoLine columns={columns} promo={row.promo} />
+            </View>
+          ) : (
+            <View key={row.key} style={s.ledgerRow} wrap={false}>
+              {columns.map((column, index) => (
+                <LedgerCellView
+                  key={column.key}
+                  column={column}
+                  cell={row.cells[column.key]}
+                  strong={index === 0}
+                />
+              ))}
+            </View>
+          ),
+        )
       )}
       {total ? (
         <View style={s.ledgerTotalRow} wrap={false}>
