@@ -151,6 +151,23 @@ describeIfPostgres('sales repository atomic parent lock (PostgreSQL)', () => {
     return false;
   };
 
+  const waitForBlockedBy = async (holderPid: number) => {
+    const deadline = Date.now() + POLL_DEADLINE_MS;
+    while (Date.now() < deadline) {
+      const waiting = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity waiter
+          WHERE waiter.wait_event_type = 'Lock'
+            AND waiter.query ILIKE '%FOR UPDATE%'
+            AND ${holderPid}::int = ANY (pg_blocking_pids(waiter.pid))
+        ) AS blocked
+      `;
+      if (waiting[0]?.blocked) return true;
+      await sleep(25);
+    }
+    return false;
+  };
+
   const createDraftSale = async (
     itemOverrides: Array<
       Partial<{ id: string; quantity: number; unitPriceCents: number }>
@@ -175,7 +192,9 @@ describeIfPostgres('sales repository atomic parent lock (PostgreSQL)', () => {
 
   it('waits on the parent lock, then rereads committed state through save', async () => {
     const staleSale = (await repository.findById(saleId))!;
+    let lockReady!: (holderPid: number) => void;
     let release!: () => void;
+    const locked = new Promise<number>((resolve) => (lockReady = resolve));
     const held = new Promise<void>((resolve) => (release = resolve));
     const first = prisma.$transaction(async (tx) => {
       await tx.$queryRaw(
@@ -189,29 +208,27 @@ describeIfPostgres('sales repository atomic parent lock (PostgreSQL)', () => {
         where: { id: saleId },
         data: { status: 'CANCELED' },
       });
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`
+        SELECT pg_backend_pid() AS pid
+      `;
+      lockReady(pid);
       await held;
     });
+    // The holder must own the lock BEFORE save starts; otherwise save can win
+    // the race, never block, and the holder then stalls until its 5 s timeout.
+    // If the holder fails before signalling, surface that instead of hanging.
+    const holderPid = await Promise.race([
+      locked,
+      first.then(() => {
+        throw new Error('lock holder finished before signalling');
+      }),
+    ]);
 
-    let blocked = false;
     const second = repository.save(staleSale);
     try {
-      const deadline = Date.now() + POLL_DEADLINE_MS;
-      while (Date.now() < deadline) {
-        const waiting = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
-          SELECT EXISTS (
-            SELECT 1 FROM pg_stat_activity waiter
-            WHERE waiter.wait_event_type = 'Lock'
-              AND waiter.query ILIKE '%FOR UPDATE%'
-              AND cardinality(pg_blocking_pids(waiter.pid)) > 0
-          ) AS blocked
-        `;
-        if (waiting[0]?.blocked) {
-          blocked = true;
-          break;
-        }
-        await sleep(25);
-      }
-      expect(blocked).toBe(true);
+      // Assert save is waiting on THIS holder (pg_blocking_pids), not just any
+      // FOR UPDATE waiter that happens to exist in the shared database.
+      expect(await waitForBlockedBy(holderPid)).toBe(true);
     } finally {
       release();
     }
