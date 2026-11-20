@@ -1,9 +1,10 @@
 /**
- * Every error code the bot backorder routes can answer, with its HTTP status
- * (contract v1 §6.1, §6.2, §6.4). Bodies are code-only: `{ statusCode, error,
- * message }` with `error === message`, plus the small detail member named in
- * the contract (`availableToSell`, `backorderId`, `currentPriceCents`,
- * `status`).
+ * Every error code the bot and staff backorder routes can answer, with its
+ * HTTP status (contract v1 §6.1, §6.2, §6.4, §9.2, §9.3). Bodies are code-only:
+ * `{ statusCode, error, message }` with `error === message`, plus the small
+ * detail member named in the contract (`availableToSell`, `backorderId`,
+ * `currentPriceCents`, `status`, `currentVersion`) at the ROOT of the body, the
+ * same envelope as the sale-hold errors (`HOLD_VERSION_CONFLICT`).
  */
 export const BACKORDER_ERROR_STATUS = {
   // 400
@@ -24,6 +25,8 @@ export const BACKORDER_ERROR_STATUS = {
   IDEMPOTENCY_KEY_IN_FLIGHT: 409,
   IDEMPOTENCY_KEY_CONFLICT: 409,
   BACKORDER_NOT_CANCELLABLE: 409,
+  // Staff cancel (§9.3): the `version` the POS sent is not the current one.
+  VERSION_CONFLICT: 409,
   // 422
   VARIANT_REQUIRED: 422,
   VARIANT_NOT_OF_PRODUCT: 422,
@@ -40,6 +43,7 @@ export type BackorderErrorDetails = Partial<{
   backorderId: string;
   currentPriceCents: number;
   status: string;
+  currentVersion: number;
 }>;
 
 export class BackorderError extends Error {

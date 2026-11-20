@@ -1363,6 +1363,10 @@ async function main() {
       permissionKey('CustomerPhone', 'read'),
       permissionKey('ChatbotSettings', 'read'),
       permissionKey('ChatbotSettings', 'update'),
+      // restock-backorder / T5a (contract v1 §9): list, open and cancel
+      // restock backorders; `read` also receives their staff notices.
+      permissionKey('Backorder', 'read'),
+      permissionKey('Backorder', 'update'),
     ];
 
     const cashierPermissionKeys: SeedPermissionKey[] = [
@@ -1378,6 +1382,9 @@ async function main() {
       permissionKey('ChatbotRequest', 'read'),
       permissionKey('ChatbotRequest', 'update'),
       permissionKey('ChatbotConversation', 'read'),
+      // restock-backorder / T5a: see the backorders and their notices; cancel
+      // stays with the Manager.
+      permissionKey('Backorder', 'read'),
     ];
 
     for (const managerRole of managerRoleByTenant.values()) {

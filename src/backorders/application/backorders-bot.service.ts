@@ -23,7 +23,6 @@ import {
   assertStockShortfall,
   assertVariantSelection,
   computeBackorderRequestHash,
-  queuePositions,
   resolveRestockEstimate,
   type BackorderIntent,
 } from '../domain/backorder-rules';
@@ -34,6 +33,7 @@ import {
 import { allocateBackorderFolio } from '../infrastructure/backorder-folio.allocator';
 import { BackorderCustomerResolver } from '../infrastructure/backorder-customer.resolver';
 import { BackorderReferencePriceListResolver } from '../infrastructure/backorder-reference-price-list.resolver';
+import { readWaitingPositions } from '../infrastructure/backorder-queue-positions';
 import { BackorderStockReader } from '../infrastructure/backorder-stock.reader';
 import {
   toBackorderBot,
@@ -195,7 +195,7 @@ export class BackordersBotService {
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take: BACKORDER_LIST_LIMIT,
     });
-    const positions = await this.waitingPositions(tx, tenantId, rows);
+    const positions = await readWaitingPositions(tx, tenantId, rows);
     return rows.map((row) =>
       toBackorderBot(row, positions.get(row.id) ?? null),
     );
@@ -470,41 +470,7 @@ export class BackordersBotService {
       include: BOT_INCLUDE,
     });
     if (!row) throw new BackorderError('BACKORDER_NOT_FOUND');
-    const positions = await this.waitingPositions(tx, tenantId, [row]);
+    const positions = await readWaitingPositions(tx, tenantId, [row]);
     return toBackorderBot(row, positions.get(row.id) ?? null);
-  }
-
-  /** Queue position of every WAITING row, counted inside its own product/variant queue. */
-  private async waitingPositions(
-    tx: TenantClient,
-    tenantId: string,
-    rows: ReadonlyArray<{
-      status: BackorderStatusValue;
-      productId: string;
-      variantId: string | null;
-    }>,
-  ): Promise<Map<string, number>> {
-    const queues = new Map<
-      string,
-      { productId: string; variantId: string | null }
-    >();
-    for (const row of rows) {
-      if (row.status !== 'WAITING') continue;
-      queues.set(`${row.productId}\u0000${row.variantId ?? ''}`, {
-        productId: row.productId,
-        variantId: row.variantId,
-      });
-    }
-    if (queues.size === 0) return new Map();
-    const waiting = await tx.backorder.findMany({
-      where: {
-        tenantId,
-        status: 'WAITING',
-        OR: [...queues.values()],
-      },
-      select: { id: true, productId: true, variantId: true, scheduledAt: true },
-      orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
-    });
-    return queuePositions(waiting);
   }
 }

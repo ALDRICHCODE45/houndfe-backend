@@ -1,6 +1,6 @@
 # Chatbot ↔ backend: restock backorder («pedido por reposición») — bot contract v1
 
-**Status:** v1 approved by the chatbot on 2026-11-20 (with the §8 one-re-estimate-per-product adjustment). **T1, T2, T3 and T4 are built** on branch `feat/restock-backorder` (not merged, deploy pending): the model and the four routes `POST`, `GET :id`, `GET` list and `POST :id/cancel` under `/chatbot-api/backorders` (T1), and the reservation on arrival, the 24 h confirm window, the sweep and the `backorder.*` feed with the new outcome `PROVIDER_REJECTED` (T2; T2 ships together with the sweep, see the deploy checklist), the confirmation through the normal checkout with `sale.items[i].backorderId` (T3, §7), and the overdue-ETA re-estimate with `backorder.eta_updated` / `backorder.eta_unavailable` (T4, §8). Everything marked **(T5)** is **not live yet**; do not build against it until each task is announced. Migrations: `20261120000000_backorders` (T1, additive: two tables, two enums), `20261120010000_backorder_stock_movements`, `20261121000000_backorder_feed` and `20261121000100_backorder_feed` (T2, additive); T3 and T4 add no migration. Task: `odd/tasks/restock-backorder.md` (S1–S3). Source of truth for the full design (staff API, stock fields, §3–§5, §9): `docs/proposals/restock-backorder-contract.md`.
+**Status:** v1 approved by the chatbot on 2026-11-20 (with the §8 one-re-estimate-per-product adjustment). **T1, T2, T3, T4 and the staff half of T5 (T5a: staff list/detail/cancel and the `backorder.cancelled_by_staff` item) are built** on branch `feat/restock-backorder` (not merged, deploy pending): the model and the four routes `POST`, `GET :id`, `GET` list and `POST :id/cancel` under `/chatbot-api/backorders` (T1), and the reservation on arrival, the 24 h confirm window, the sweep and the `backorder.*` feed with the new outcome `PROVIDER_REJECTED` (T2; T2 ships together with the sweep, see the deploy checklist), the confirmation through the normal checkout with `sale.items[i].backorderId` (T3, §7), and the overdue-ETA re-estimate with `backorder.eta_updated` / `backorder.eta_unavailable` (T4, §8). The `reservedForBackorders` stock fields and `STOCK_RESERVED_FOR_BACKORDER` (T5b) are staff-facing and not live yet; nothing in them is for the bot. Migrations: `20261120000000_backorders` (T1, additive: two tables, two enums), `20261120010000_backorder_stock_movements`, `20261121000000_backorder_feed` and `20261121000100_backorder_feed` (T2, additive); T3 and T4 add no migration. Task: `odd/tasks/restock-backorder.md` (S1–S3). Source of truth for the full design (staff API, stock fields, §3–§5, §9): `docs/proposals/restock-backorder-contract.md`.
 
 Source (T1): `src/backorders/presentation/backorders-bot.controller.ts`, `src/backorders/application/backorders-bot.service.ts`, `src/backorders/domain/backorder-rules.ts`, `src/backorders/backorders.integration.spec.ts`, `prisma/migrations/20261120000000_backorders/migration.sql`.
 
@@ -14,7 +14,8 @@ Source (T2): `src/backorders/application/backorder-allocator.ts` (reserve), `src
 | Reserve on arrival (WAITING → RESERVED), 24 h confirm window, `currentPriceCents`/`finalPriceCents`, reservation reminder and expiry (sweep, §4), expired-lot swap, the `backorder.reserved` / `reservation_reminder` / `reservation_expired` / `reservation_lost` feed items (§10), outcome `PROVIDER_REJECTED`, staff alert | **T2** | **built** |
 | Confirm through the normal checkout with `sale.items[i].backorderId` (§7) | **T3** | **built** |
 | Overdue ETA re-estimate (one staff RESTOCK per product), `backorder.eta_updated` / `backorder.eta_unavailable` (§8); `sourceDecisionId` in `BackorderBot` and in the `reservation_expired` / `cancelled_by_staff` payloads | **T4** | **built** |
-| Staff API in the POS, `reservedForBackorders` stock fields, `STOCK_RESERVED_FOR_BACKORDER`, `backorder.cancelled_by_staff` (staff cancel), staff-facing notices API | **T5** | not live (staff-facing, nothing for the bot except the cancel item) |
+| Staff API in the POS (`GET /backorders`, `GET /backorders/:id`, `POST /backorders/:id/cancel`), `backorder.cancelled_by_staff` (staff cancel), staff notices resolved through `read:Backorder` | **T5a** | **built** (staff-facing; for the bot only the cancel item, §10) |
+| `reservedForBackorders` stock fields, `STOCK_RESERVED_FOR_BACKORDER` | **T5b** | not live (staff-facing, nothing for the bot) |
 
 With T2 a backorder is created `WAITING` and, when the product's stock goes up (any adjustment, initial stock, a cancelled or lapsed sale, a released reservation), the backorders of that product/variant are reserved first come, first served (whole quantities only, the next ones that fit when the head does not: Q1). You get `backorder.reserved` and the customer has **24 hours from the reservation** to confirm through the normal checkout (checkout with `backorderId` is **T3**, §7, now built in the same branch). The 24 h run from the reservation, not from delivery: if you cannot deliver `backorder.reserved` or its reminder, ACK `PROVIDER_REJECTED` and staff call the customer (§10).
 
@@ -28,7 +29,7 @@ With T2 a backorder is created `WAITING` and, when the product's stock goes up (
 | D4 | "Cuando sube el stock del producto" — any increase leaving sellable stock > 0 triggers matching | §4 | T2 |
 | D5 | Pay on arrival, never in advance (no money/deposit). Confirm = normal checkout | §7 | T3 (live) |
 | D6 | Overdue ETA: new staff estimate BEFORE telling the customer; only once | §8 | T4 (live) |
-| D7 | Customer cancels from chat; staff list and cancel in the POS | §6 | cancel: T1; staff: T5 |
+| D7 | Customer cancels from chat; staff list and cancel in the POS | §6 | cancel: T1; staff: T5a (live) |
 
 ## 1. Model (what the bot sees)
 
@@ -46,7 +47,7 @@ WAITING ──(stock arrives, FIFO, full quantity available)──▶ RESERVED  
 RESERVED ──(bot checkout with backorderId)──▶ CONFIRMED (terminal; saleId set)         (T3, live)
 RESERVED ──(24 h without checkout)──▶ EXPIRED (terminal)                               (T2, live)
 RESERVED ──(reserved lot expired, no valid lot to swap)──▶ WAITING (front of the queue) (T2, live)
-WAITING | RESERVED ──(customer or staff cancel)──▶ CANCELLED (terminal)                (T1 customer; T5 staff)
+WAITING | RESERVED ──(customer or staff cancel)──▶ CANCELLED (terminal)                (T1 customer; T5a staff)
 ```
 
 `CONFIRMED`, `EXPIRED` and `CANCELLED` are **terminal**. After `EXPIRED` or `CANCELLED` you may offer to schedule again: that creates a **new** backorder at the back of the queue (§6.1, rescheduling). Since T2, `RESERVED` and `EXPIRED` rows exist too.
@@ -149,7 +150,7 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 | 409 | `BACKORDER_NOT_CANCELLABLE {status}` | already `CONFIRMED`, `EXPIRED` or `CANCELLED` (a retry of a cancel that succeeded answers this with `status: "CANCELLED"`: treat it as done) |
 | 400 | `INVALID_BACKORDER_REQUEST` | reason over 280 characters, wrong type or unknown member |
 
-`WAITING` cancels now. A `RESERVED` backorder hands its units back to the next waiting backorder in the same transaction (T2, live). The customer cancel writes **no** feed item (you just cancelled it); only the staff cancel (T5) does.
+`WAITING` cancels now. A `RESERVED` backorder hands its units back to the next waiting backorder in the same transaction (T2, live). The customer cancel writes **no** feed item (you just cancelled it); only the staff cancel (T5a, live) does: `backorder.cancelled_by_staff` (§10). A `RESERVED` backorder cancelled by staff hands its units to the next waiting backorder in the same transaction, exactly like the customer cancel; staff cancel only `WAITING` or `RESERVED` ones.
 
 ### 6.5 `BackorderBot`
 
@@ -173,7 +174,7 @@ Body (optional as a whole): `{ "reason": "≤280 characters" }`; a blank reason 
 - `queuePosition` (1-based, counted inside the product/variant queue) only while `WAITING`; `null` otherwise.
 - `currentPriceCents`, `finalPriceCents`, `reservedAt`, `reservedUntil`, `reminderAt` are `null` until the backorder is reserved (T2). They are cleared again if the reservation is lost (`RESERVED → WAITING`); after `EXPIRED` they keep the values of the reservation that lapsed. `saleId` is set at checkout (T3, live).
 - `sourceDecisionId` (T4, additive): the RESTOCK decision the backorder was scheduled from, in every status. To reschedule after `EXPIRED` / `CANCELLED` repeat `POST /chatbot-api/backorders` with this same id (§6.1). It is the decision you sent, never the server's re-estimate decision of §8.
-- `cancelledByKind`: `CUSTOMER` (T1) or `STAFF` (T5). `cancelReason` is what was sent (≤280).
+- `cancelledByKind`: `CUSTOMER` (T1) or `STAFF` (T5a, live). `cancelReason` is what was sent (≤280).
 - `productName`, `variantName`, `branchName` and `customerFirstName` are read live (the current names).
 - `phoneCountryCode` and `phone` (T4b, additive): the customer's phone, exactly the pair the bot checkout locks on (`customers.phoneCountryCode` / `phone`), or `null` / `null` when the customer has none. They let you reach the customer when a feed item arrives with `conversationRef: null`, without asking again. They are the phone of **this backorder's own customer** and nothing else, and appear wherever a `BackorderBot` does (create, `GET :id`, list, cancel: each under the scope of its route) and in every `backorder.*` feed item (§10); never in any other payload.
 - **Timestamps are ISO 8601 in UTC with `Z`** (`toISOString()`), like every other bot payload today (`holdUntil`, `reminderAt` of the pay-in-store hold, feed items). The approved proposal asked for an offset (`-06:00`); the backend keeps UTC `Z` for every backorder payload, feed items included, for consistency. Convert to local time on your side with the sucursal's time zone (America/Mexico_City).
@@ -266,7 +267,7 @@ What you receive, and when. **Nothing, until staff answer.** When a `WAITING` ba
 - `eta_updated`: tell the customer the new date. It is a human estimate («aproximadamente»), not a guaranteed stock date; `estimatedAt` may be close or already past if staff answered a very short number of days late (the answer is anchored to the moment staff resolved, not to delivery).
 - `eta_unavailable`: staff have **no confirmed date**. It does not mean «never»: the backorder stays `WAITING` in its place and is reserved as soon as stock arrives (you will get `backorder.reserved`). Offer to keep waiting or cancel (`POST …/cancel`).
 - Skipped without a message: a backorder that became `RESERVED`, `CONFIRMED`, `CANCELLED` or `EXPIRED` before staff answered (a reserved customer already has a real date: the reservation). If a reservation is lost (`backorder.reservation_lost`) and the backorder returns to `WAITING` still attached to an already answered question, the next sweep tick applies that answer to it and you get the eta item then (so the customer is never left with a stale past date without a message).
-- **Only once per backorder** (`etaStage` 0 → 1 → 2): after the answer there is no second automatic re-estimate. If its (new) `estimatedAt` passes too, nothing is sent; the staff list flags it as overdue (T5).
+- **Only once per backorder** (`etaStage` 0 → 1 → 2): after the answer there is no second automatic re-estimate. If its (new) `estimatedAt` passes too, nothing is sent; the staff list flags it as overdue (`etaOverdue`, T5a).
 - **No generic `request.answered`, and the question never reaches you.** The staff-side request that carries the question is created by the server with no customer and no conversation and is staff-only (`context.origin = "BACKORDER_REESTIMATE"`): you never get a `request.answered` for it, **whichever screen staff answer it from** (the request inbox, `POST /chatbot-requests/:id/resolve`, or the human-decisions screen, `POST /human-decisions/:id/resolve`), and it is **never listed by the request recovery read** (`GET /chatbot-api/requests?status=open`, with or without `updatedSince`) nor served by the feed. Only the two items above reach you. Your own RESTOCK requests (`POST /chatbot-api/requests`) are unchanged: staff answers still arrive as `request.answered`.
 - **No expiry.** A RESTOCK decision has no expiry or cancel path: if staff never answer, the question stays pending, the backorders stay `WAITING` and you hear nothing. (If every attached backorder is cancelled meanwhile the question stays open for staff until they answer it; the answer then affects nobody.)
 - Both items follow §10 (ACK, `deliveryId` dedupe, `PROVIDER_REJECTED` is only recorded). `version` in the payload is the **bumped** version, so a retry or a second backend replica never repeats the item.
@@ -275,7 +276,7 @@ Staff-facing note (POS): the server-created question is a normal RESTOCK request
 
 Source (T4): `src/backorders/infrastructure/backorder-reestimate.service.ts`, `src/backorders/infrastructure/backorder-sweep.store.ts` (phases 4–5), `src/backorders/domain/backorder-reestimate.ts`, `src/human-decisions/infrastructure/restock-resolution.registry.ts` + `prisma-human-decision-review-resolve.repository.ts` (the hook), `src/chatbot-requests/infrastructure/chatbot-request-wrapper.ts` (staff-only request), `src/chatbot-requests/domain/staff-only-request.ts` (the origin), `src/chatbot-requests/infrastructure/chatbot-feed-writes.ts` (`enqueueAnswered` skips it), `src/chatbot-requests/infrastructure/prisma-chatbot-recovery.store.ts` (recovery read), `src/backorders/backorder-reestimate.integration.spec.ts`.
 
-## 10. Feed items — **T2 live (reserved, reminder, expired, lost); T4 live (eta_updated, eta_unavailable); T5 (cancelled_by_staff) not yet**
+## 10. Feed items — **T2 live (reserved, reminder, expired, lost); T4 live (eta_updated, eta_unavailable); T5a live (cancelled_by_staff)**
 
 A backorder-level feed subject. The envelope of a `backorder.*` item is the standard feed item with `requestId: null` and **no `saleId` key**; the `backorderId` is in the `payload`:
 
@@ -307,7 +308,7 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 | `backorder.reservation_reminder` | T2 | sweep, `reminderAt` passed, once | `reservedUntil` |
 | `backorder.reservation_expired` | T2 | sweep, `reservedUntil` passed, terminal | `expiredAt`, `sourceDecisionId` (T4, additive: reschedule with it, §6.1) |
 | `backorder.reservation_lost` | T2 | sweep, the reserved lot expired and no valid lot replaced it; back to `WAITING`, front of the queue (apologise) | `reason: "LOT_EXPIRED"`, `queuePosition` (1-based, right now), `estimatedAt` |
-| `backorder.cancelled_by_staff` | T5 | staff cancelled it from the POS | `reason` (`null` when staff gave none), `sourceDecisionId` (T4, additive) |
+| `backorder.cancelled_by_staff` | **T5a live** | staff cancelled it from the POS (`POST /backorders/:id/cancel`), written in the cancelling transaction, exactly once (`version` is the cancelled state's) | `reason` (`null` when staff gave none), `sourceDecisionId` (T4, additive: reschedule with it, §6.1) |
 | `backorder.eta_updated` | **T4 live** | overdue-ETA re-estimate answered with an estimate (§8) | `estimatedAt`, `restockDays` |
 | `backorder.eta_unavailable` | **T4 live** | staff have no new estimate (§8) | — |
 
@@ -318,6 +319,7 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 ```json
 { "type": "backorder.reservation_reminder", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 3, "reservedUntil": "2026-11-21T15:00:00.000Z" } }
 { "type": "backorder.reservation_expired", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 4, "expiredAt": "2026-11-21T15:00:01.000Z", "sourceDecisionId": "uuid" } }
+{ "type": "backorder.cancelled_by_staff", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 3, "reason": "Producto descontinuado", "sourceDecisionId": "uuid" } }
 { "type": "backorder.eta_updated", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 2, "estimatedAt": "2026-11-27T15:00:00.000Z", "restockDays": 7 } }
 { "type": "backorder.eta_unavailable", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 2 } }
 { "type": "backorder.reservation_lost", "payload": { "backorderId": "uuid", "folio": "BO-000012", "productName": "…", "variantName": null, "quantity": 2, "branchName": "Centro", "customerFirstName": "Rosa", "phoneCountryCode": "52", "phone": "5512349901", "version": 4, "reason": "LOT_EXPIRED", "queuePosition": 1, "estimatedAt": "2026-11-27T15:00:00.000Z" } }
@@ -360,7 +362,7 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 1. **Ship T2 together with its sweep (it is in this build) and not before the bot sends `sale.items[i].backorderId` (T3, §7, in this build)**: a customer told «apartado por 24 h» must be able to confirm.
 2. Your feed consumer must accept `requestId: null` **without** a `saleId` and the four `backorder.*` types above, and the new outcome `PROVIDER_REJECTED` (ACK `STALE` for types you do not handle yet): a strict parser would otherwise reject the page and stall the feed. Deploy the backend **after** the bot can parse them.
 3. Apply migrations (additive, in this order, each in one short transaction at low traffic): `20261120010000_backorder_stock_movements` (three enum values), `20261121000000_backorder_feed` (feed column `backorderId`, subject CHECK widened to request / sale / backorder, tenant-qualified FK, exactly-once partial unique index, two partial indexes of the sweep) and `20261121000100_backorder_feed` (the closed outcome CHECK gains `PROVIDER_REJECTED`). Do not deploy the bot reporting `PROVIDER_REJECTED` before the last one: an older database answers `500`.
-4. The sweep (`@Interval` 30 s) starts with the backend; no new credential or scope. Staff notices go to every active member with `read:Backorder` (the grant is seeded by T5; until then only members with `manage` on `all` receive them).
+4. The sweep (`@Interval` 30 s) starts with the backend; no new credential or scope. Staff notices go to every active member with `read:Backorder` (T5a registers the subject and seeds the grant: Manager read + update, Cashier read; `manage` / `all` holders receive them too).
 5. Existing items, outcomes, payloads, recovery and ACK behaviour of requests, conversations and sales are unchanged (additive only).
 
 ## Deploy checklist (T3)
@@ -375,3 +377,10 @@ A backorder-level feed subject. The envelope of a `backorder.*` item is the stan
 2. Your feed consumer must accept `backorder.eta_updated` / `backorder.eta_unavailable` (same envelope as the other `backorder.*` items; ACK `STALE` for a type you do not handle yet) and the additive `sourceDecisionId` member in `BackorderBot` and in the `reservation_expired` / `cancelled_by_staff` payloads (unknown members must be ignored). Deploy the backend **after** the bot parses them.
 3. The sweep gains two phases (overdue-ETA request, repair of an answered re-estimate) on the same 30 s interval; no new credential or scope. The first tick after the deploy creates ONE staff RESTOCK request per product/variant that already has overdue `WAITING` backorders (staff get the usual new-request notice).
 4. Existing RESTOCK/EXPIRATION flows are unchanged: bot intake, staff review and resolve, `request.answered` for a bot-created RESTOCK.
+
+## Deploy checklist (T5a)
+
+1. **No migration.** New CASL subject `Backorder` (`read`, `update`): `PermissionSeeder` upserts the two `permissions` rows on boot; a fresh `prisma db seed` grants Manager read + update and Cashier read. **Existing databases** need the role grants added by hand (or a grant script): without them only super admins (`manage:all`) see the staff screen and receive the staff notices.
+2. Your feed consumer must accept `backorder.cancelled_by_staff` (same envelope as the other `backorder.*` items; ACK `STALE` for a type you do not handle yet). A staff cancel is the only way you hear about a cancellation you did not make. Deploy the backend **after** the bot parses it.
+3. Staff cancel of a `RESERVED` backorder re-allocates the released units to the next `WAITING` backorder in the same transaction: that backorder's own `backorder.reserved` is written then, as for any other release.
+4. The staff API is documented for the frontend in `docs/frontend-handoff/26-restock-backorder.md`; nothing in it is called by the bot.

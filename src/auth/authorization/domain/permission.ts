@@ -91,6 +91,9 @@ export type AppSubjects =
   | 'CustomerPhone'
   | 'ChatbotSettings'
   | 'ChatbotSettingsAllBranches'
+  // restock-backorder / T5a (contract v1 §9) — staff list/detail/cancel of the
+  // restock backorders («pedidos por reposición»).
+  | 'Backorder'
   | 'all';
 
 /**
@@ -938,5 +941,28 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     action: 'update',
     description:
       'Copy chatbot settings to every branch where the user holds this permission',
+  },
+
+  // Backorder permissions (restock-backorder / T5a, contract v1 §9).
+  //   read   — list and open the restock backorders of the branch; also the
+  //            grant that receives the staff notices (reserved, expired, notice
+  //            not delivered).
+  //   update — cancel a WAITING or RESERVED backorder (releases the reserved
+  //            units to the next in the queue and tells the customer through
+  //            the bot).
+  // `create` stays out (the bot schedules; no staff creation in v1) and
+  // `manage` is never registered: it is a CASL wildcard, so only the super
+  // admin's `manage:all` implies it. Seeded defaults (prisma/seed.ts): Manager
+  // read + update, Cashier read. Existing databases need the same rows through
+  // PermissionSeeder (auto-upsert on boot) and a role grant.
+  {
+    subject: 'Backorder',
+    action: 'read',
+    description: 'View restock backorders and receive their staff notices',
+  },
+  {
+    subject: 'Backorder',
+    action: 'update',
+    description: 'Cancel restock backorders (WAITING or RESERVED)',
   },
 ];

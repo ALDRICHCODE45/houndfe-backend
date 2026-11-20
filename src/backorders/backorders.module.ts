@@ -15,8 +15,13 @@
  * `BackorderReservationService` (BACKORDER_RELEASE + next in queue) and
  * `BACKORDER_RESERVED_HOOK` is the seam T2b binds to `FeedBackorderReservedHook`
  * (`backorder.reserved` + staff notice in the reserving transaction).
+ *
+ * T5a: `BackordersStaffController` serves the POS staff API (`GET /backorders`,
+ * `GET /backorders/:id`, `POST /backorders/:id/cancel`) behind the JWT chain;
+ * `AuthModule` supplies its guards.
  */
 import { Module } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
 import { ChatbotApiModule } from '../chatbot-api/chatbot-api.module';
 import { HumanDecisionsModule } from '../human-decisions/human-decisions.module';
 import { InventoryModule } from '../inventory/inventory.module';
@@ -28,6 +33,7 @@ import { StockAlertsModule } from '../stock-alerts/stock-alerts.module';
 import { BackorderAllocator } from './application/backorder-allocator';
 import { BackorderReservationService } from './application/backorder-reservation.service';
 import { BackordersBotService } from './application/backorders-bot.service';
+import { BackordersStaffService } from './application/backorders-staff.service';
 import { BACKORDER_RESERVATION_RELEASER } from './application/ports/backorder-reservation-releaser.port';
 import { BACKORDER_RESERVED_HOOK } from './application/ports/backorder-reserved-hook.port';
 import { BackorderCheckoutService } from './infrastructure/backorder-checkout.service';
@@ -39,10 +45,13 @@ import { BackorderSweepStore } from './infrastructure/backorder-sweep.store';
 import { BackorderStockReader } from './infrastructure/backorder-stock.reader';
 import { FeedBackorderReservedHook } from './infrastructure/feed-backorder-reserved.hook';
 import { BackordersBotController } from './presentation/backorders-bot.controller';
+import { BackordersStaffController } from './presentation/backorders-staff.controller';
 
 @Module({
   imports: [
     DatabaseModule,
+    // T5a: `JwtAuthGuard`, `CaslAbilityFactory` and `PermissionsGuard` of the staff routes.
+    AuthModule,
     ChatbotApiModule,
     ProductsModule,
     SalesModule,
@@ -52,9 +61,11 @@ import { BackordersBotController } from './presentation/backorders-bot.controlle
     StockAlertsModule,
     TenantModule,
   ],
-  controllers: [BackordersBotController],
+  controllers: [BackordersBotController, BackordersStaffController],
   providers: [
     BackordersBotService,
+    // T5a: staff list / detail / cancel (POS).
+    BackordersStaffService,
     BackorderCustomerResolver,
     BackorderStockReader,
     BackorderReferencePriceListResolver,
