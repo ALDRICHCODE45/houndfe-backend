@@ -180,4 +180,11 @@ export const TENANT_SCOPED_MODELS = new Set([
   'ChatbotSessionTemplate',
   // Unit 14 (§4.9): the per-block capacity counter. `tenantId` + tenant FK.
   'ScheduledSlotCounter',
+  // restock-backorder / T1 — backorders and their per-tenant folio counter.
+  // Same fail-open allowlist semantics: without these entries a read or
+  // update through TenantPrismaService would not inject `tenantId`, so one
+  // sucursal could read, replay (idempotency key) or cancel another's
+  // backorder, or advance its folio counter.
+  'Backorder',
+  'BackorderFolioCounter',
 ]);

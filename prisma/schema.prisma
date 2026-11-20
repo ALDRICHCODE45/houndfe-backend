@@ -540,6 +540,12 @@ model Tenant {
   cashClosingFolioCounter CashClosingFolioCounter?
   cashCommands  CashCommand[]
 
+  // restock-backorder / T1 — tenant-scoped backorders and their folio counter.
+  // Runtime gate: the two `Backorder*` entries in
+  // src/shared/tenant/tenant-scoped-models.constant.ts.
+  backorders            Backorder[]
+  backorderFolioCounter BackorderFolioCounter?
+
   // human-intervention / unit 2 — common chatbot request inbox.
   chatbotRequests             ChatbotRequest[]
   chatbotCustomerGroups       ChatbotCustomerGroup[]
@@ -687,6 +693,7 @@ model Product {
   privateMediaAssets PrivateMediaAsset[]
   // shipping-zones / T2 — packed-item weight/dimensions (not editorial net mass).
   packaging      ProductPackaging?
+  backorders     Backorder[]
 
   @@unique([tenantId, id])
   @@index([tenantId])
@@ -1188,6 +1195,7 @@ model Variant {
   quotationItems QuotationItem[]
   // shipping-zones / T2 — whole-record packaging override of the product's.
   packaging      VariantPackaging?
+  backorders     Backorder[]
 
   @@index([tenantId])
   @@index([productId, catalogPublishMode])
@@ -1559,6 +1567,7 @@ model Sale {
   comments           SaleComment[]
   idempotencyRecords SaleIdempotency[]
   receiptEvidences   ReceiptEvidence[]
+  backorders         Backorder[]
   appliedPromotion   SalePromotionApplied?
   promotionVetoes    SalePromotionVeto[]
   promotionOptIns    SalePromotionOptIn[]
@@ -1963,6 +1972,7 @@ model User {
   cashHandoversCreated    CashHandover[] @relation("CashHandoverCreator")
   cashHandoversReceivedBy CashHandover[] @relation("CashHandoverReceiver")
   cashClosings          CashClosing[]  @relation("CashClosingActor")
+  backordersCancelled Backorder[] @relation("BackorderCancelledBy")
   // human-intervention / unit 6 — own in-app notices and delivery preferences.
   notifications           Notification[]
   notificationPreference  NotificationPreference?
@@ -2126,6 +2136,7 @@ model Customer {
   addresses          CustomerAddress[]
   promotionCustomers PromotionCustomer[]
   chatbotRequests    ChatbotRequest[]
+  backorders         Backorder[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3206,6 +3217,9 @@ model HumanDecision {
   updatedAt DateTime @updatedAt
 
   chatbotRequest ChatbotRequest?
+  // restock-backorder / T1 — backorders scheduled from / re-estimated by this decision.
+  backordersFromDecision    Backorder[] @relation("BackorderSourceDecision")
+  backordersReestimating    Backorder[] @relation("BackorderReestimateDecision")
 
   @@unique([tenantId, source, sourceRequestId])
   @@unique([tenantId, source, supersedesDecisionId])
@@ -3978,6 +3992,8 @@ model ChatbotRequest {
   events              ChatbotRequestEvent[]
   feedItems           ChatbotFeedItem[]
   liveSessions        ChatbotLiveSession[]
+  // restock-backorder / T1 — backorders created from this wrapper request (nullable FK).
+  backorders          Backorder[]
   sessionTemplates    ChatbotSessionTemplate[]
 
   @@unique([tenantId, id])
@@ -4524,4 +4540,153 @@ model ScheduledSlotCounter {
 
   @@id([tenantId, startsAt])
   @@map("scheduled_slot_counters")
+}
+
+// ============================================================================
+// RESTOCK BACKORDER — restock-backorder / T1 (contract v1 §1, §6)
+// ============================================================================
+// «Pedido por reposición»: a customer schedules units of an out-of-stock
+// product/variant; the queue (scheduledAt, id) is served FIFO when stock
+// arrives (T2), the customer confirms through the normal bot checkout (T3).
+// T1 persists the whole §1 model so T2-T5 need no further column changes.
+//
+// Additive only: two new tables and two new enums; nothing existing is altered
+// (the relation fields added to Tenant/Customer/Product/Variant/Sale/User/
+// HumanDecision/ChatbotRequest are Prisma-side only, with no DDL).
+//
+// Tenant safety: `tenantId` on every row; the product, chatbot request and
+// sale links are tenant-qualified composite FKs (their targets already carry
+// `@@unique([tenantId, id])`), so PostgreSQL rejects a cross-tenant link. The
+// customer, variant and human-decision targets have no `(tenantId, id)` unique
+// today (existing tables are not altered), so those three FKs are plain `id`
+// FKs like `chatbot_requests`/`sale_items`; the service always resolves them
+// with the tenant filter first. All FKs are `Restrict`: a backorder is
+// business history, never deleted by removing its customer/product/variant.
+//
+// Migration-authoritative objects Prisma's DSL cannot express (see
+// `20261120000000_backorders/migration.sql`, pinned by
+// `prisma/backorders-schema.spec.ts`):
+//   - `backorders_one_active_per_customer_product_variant_uq`: partial unique
+//     ("tenantId", "customerId", "productId", COALESCE("variantId", ''))
+//     WHERE status IN ('WAITING','RESERVED') — one active backorder per
+//     customer + product + variant, NULL variants compared as equal;
+//   - CHECK constraints for folio shape, quantity/price/stage ranges and the
+//     status ↔ timestamp coupling (cancelled/reserved/confirmed/expired).
+
+enum BackorderStatus {
+  WAITING
+  RESERVED
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+}
+
+enum BackorderCancelledByKind {
+  STAFF
+  CUSTOMER
+}
+
+model Backorder {
+  id       String @id @default(uuid())
+  tenantId String
+  // `BO-000001`, per-tenant counter (`backorder_folio_counters`).
+  folio    String
+
+  status  BackorderStatus @default(WAITING)
+  // Optimistic concurrency token for the staff cancel (T5); 1 at creation.
+  version Int             @default(1)
+
+  customerId String
+  productId  String
+  // Required when the product has variants (service rule).
+  variantId  String?
+  quantity   Int
+
+  // Unit price at scheduling (server-computed). `referencePriceListId` is the
+  // customer's assigned global price list, null = PUBLICO; a snapshot with no
+  // FK so a later list deletion never rewrites history.
+  referencePriceCents  Int
+  referencePriceListId String?
+  // Set at reservation (T2): that day's bot price with auto promotions, and
+  // `min(reference, current)`.
+  currentPriceCents    Int?
+  finalPriceCents      Int?
+
+  // Queue order key (ties by `id`).
+  scheduledAt          DateTime
+  estimatedArrivalDays Int
+  estimatedAt          DateTime
+
+  // The RESTOCK decision answered with PROVIDE_RESTOCK_ESTIMATE. A decision may
+  // back several backorders over time (rescheduling), so it is not unique.
+  sourceDecisionId String
+  // Wrapper request, when the bot created it through `/chatbot-api/requests`.
+  chatbotRequestId String?
+
+  reservedAt       DateTime?
+  reservedUntil    DateTime?
+  reminderAt       DateTime?
+  // Exactly-once timers (like `holdStage`): 0 none, 1 reminded, 2 expired.
+  reservationStage Int       @default(0) @db.SmallInt
+  // 0 none, 1 re-estimate requested, 2 re-estimate answered (T4).
+  etaStage         Int       @default(0) @db.SmallInt
+  // Later backorders reserved while this one (head, quantity not covered) kept
+  // waiting (T2, Q1); shown in the POS.
+  passedOverCount  Int       @default(0)
+  // The server-created RESTOCK decision of the overdue-ETA flow (T4).
+  reestimateDecisionId String?
+
+  // Set by the bot checkout (T3).
+  confirmedAt DateTime?
+  saleId      String?
+
+  cancelledAt       DateTime?
+  cancelReason      String?                   @db.VarChar(280)
+  cancelledByKind   BackorderCancelledByKind?
+  cancelledByUserId String?
+  expiredAt         DateTime?
+
+  // Bot `X-Idempotency-Key`, unique per tenant; `requestHash` is the canonical
+  // intent hash (same key + different hash => IDEMPOTENCY_KEY_CONFLICT).
+  idempotencyKey String
+  requestHash    String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant             Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  product            Product        @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  variant            Variant?       @relation(fields: [variantId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  customer           Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sourceDecision     HumanDecision  @relation("BackorderSourceDecision", fields: [sourceDecisionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reestimateDecision HumanDecision? @relation("BackorderReestimateDecision", fields: [reestimateDecisionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  chatbotRequest     ChatbotRequest? @relation(fields: [tenantId, chatbotRequestId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  sale               Sale?          @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Restrict, onUpdate: Cascade)
+  cancelledBy        User?          @relation("BackorderCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, folio])
+  @@unique([tenantId, idempotencyKey])
+  // FIFO queue walk of one product/variant (T2 allocator, queuePosition).
+  @@index([tenantId, productId, variantId, status, scheduledAt, id], map: "backorders_queue_idx")
+  @@index([tenantId, customerId, status])
+  @@index([tenantId, updatedAt])
+  @@index([customerId])
+  @@index([reestimateDecisionId])
+  @@map("backorders")
+}
+
+// Per-tenant consecutive folio (BO-000001): one row per tenant, incremented
+// atomically by `upsert` inside the creating transaction (same pattern as
+// CashClosingFolioCounter).
+model BackorderFolioCounter {
+  id         String   @id @default(uuid())
+  tenantId   String   @unique
+  lastNumber Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("backorder_folio_counters")
 }
