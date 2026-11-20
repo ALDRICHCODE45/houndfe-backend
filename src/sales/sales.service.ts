@@ -3362,7 +3362,8 @@ export class SalesService {
         sale.items.map((item) => item.productId),
       );
 
-      // pca-2c2 — claim before stock/persist/outbox; a race rolls back the tx.
+      // pca-2c2 — claim (after the T6 stock lock, before the stock charge,
+      // persist and outbox); a race rolls back the tx.
       await this.promotionUsageRepo.claimForSale(
         sale.id,
         promotionCapacityDemands,
