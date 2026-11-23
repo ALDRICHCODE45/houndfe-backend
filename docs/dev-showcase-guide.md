@@ -72,7 +72,7 @@ Los endpoints son de la API; la pantalla del frontend que los consume es la de l
 
 - El bot se autentica con `Authorization: Bearer svc_…` en las rutas `/chatbot-api/*`. El token debe empezar con `svc_`.
 - En la base **solo se guarda el hash**: `service_credentials.hashedKey` es el SHA-256 en hex del token (`ServiceAuthGuard`). El token en claro no se puede recuperar desde la base; si se pierde, se rota.
-- Cada credencial pertenece a una sucursal (`tenantId`) y tiene `scopes` exactos (sin comodines): `catalog:read`, `customers:read`, `customers:write`, `sales:create`, `sales:read`, `sales:write`, `pricing:evaluate`, `payment-details:read`, `human-decisions:create`, `human-decisions:read`, `human-decisions:ack`, `shipping:quote`. Una cabecera `x-branch-id` distinta de su sucursal da 403. Tiene límite de peticiones por minuto (`rateLimit`, 60 por defecto).
+- Cada credencial pertenece a una sucursal (`tenantId`) y tiene `scopes` exactos (sin comodines): `catalog:read`, `customers:read`, `customers:write`, `sales:create`, `sales:read`, `sales:write`, `pricing:evaluate`, `payment-details:read`, `human-decisions:create`, `human-decisions:read`, `human-decisions:ack`, `shipping:quote`, `pets:read`, `pets:write`, `pets:delete` (mascotas de los clientes; sin `pets:read` el bot no ve `customer.pets` en `GET customers/by-phone`). Una cabecera `x-branch-id` distinta de su sucursal da 403. Tiene límite de peticiones por minuto (`rateLimit`, 60 por defecto).
 - El seed **no crea** credenciales. En dev hay una creada a mano para las pruebas E2E del bot.
 
 **Rotarla sin imprimir el token:**

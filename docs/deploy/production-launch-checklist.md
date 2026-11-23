@@ -16,6 +16,7 @@ El contenedor corre `npx prisma migrate deploy` solo al arrancar (`docker-entryp
 3. **Teléfonos de clientes (`20261018000100_normalize_customer_phone_digits`).** Deja los teléfonos solo con dígitos y no une duplicados. Antes corré el reporte de duplicados que trae el comentario de la migración.
 4. Las demás migraciones nuevas (editorial, proveedores, compras, zonas, envíos, comprobantes) son aditivas o agregan valores a enums en migraciones separadas. No necesitan nada a mano.
 5. **Deuda abierta de ventas (`20261108090000_sales_open_debt_cents`).** Agrega a `sales` una columna generada; al aplicarse, Postgres reescribe toda la tabla y la bloquea (ni lecturas ni escrituras) hasta terminar. Con pocas ventas es instantáneo; mirá «Para tener siempre en mente».
+6. **Mascotas de clientes (`20261123000000_customer_pets` y `20261123010000_customer_pet_bot_receipt_kind`).** Son aditivas y van en ese orden. La primera crea la tabla `customer_pets` y agrega tres columnas nulas y un índice a `sale_items`; el índice bloquea las escrituras de `sale_items` mientras se construye, así que desplegá con poco tráfico. La segunda amplía el CHECK `chatbot_bot_receipts_kind_chk` con `CUSTOMER_PET_CREATE` y no cambia datos: **no despliegues el bot con el alta de mascotas antes de que corra**, porque con el CHECK viejo el alta responde 500. No necesitan nada a mano. Los permisos de las rutas del POS (`read`/`update`/`delete` sobre `Customer`) ya existen: no hay permisos nuevos.
 
 Después del deploy: **resincronizá Inngest Cloud** con `https://api.houndfe.com/api/inngest`, así registra las funciones nuevas (correos de validación de zona y de comprobantes, purga de comprobantes).
 
@@ -41,7 +42,7 @@ Revisá que estén en Dokploy. Las marcadas con ★ son nuevas para este lanzami
 
 `BOT_SHIPPING_CHARGE_MAX_CENTS` no hace falta: el chatbot ya manda el envío por `quoteId` o pickup, no por el formato viejo.
 
-## 3. Credencial del bot (ServiceCredential con los 12 scopes)
+## 3. Credencial del bot (ServiceCredential con 15 scopes: los 12 de siempre y `pets:*`)
 
 No hay endpoint ni pantalla para crearla, y el script de rotación del showcase se niega a correr contra producción. Se crea en dos pasos y el token **nunca** pasa por producción ni se imprime: en producción solo se guarda su hash.
 
@@ -61,7 +62,7 @@ console.log(c.createHash("sha256").update(t).digest("hex"));'
 ```sql
 INSERT INTO "service_credentials" ("id","tenantId","name","hashedKey","scopes","isActive","rateLimit","createdAt")
 SELECT gen_random_uuid()::text, t."id", 'chatbot-whatsapp', '<HASH_DEL_PASO_A>',
-  ARRAY['catalog:read','customers:read','customers:write','human-decisions:ack','human-decisions:create','human-decisions:read','payment-details:read','pricing:evaluate','sales:create','sales:read','sales:write','shipping:quote'],
+  ARRAY['catalog:read','customers:read','customers:write','human-decisions:ack','human-decisions:create','human-decisions:read','payment-details:read','pets:delete','pets:read','pets:write','pricing:evaluate','sales:create','sales:read','sales:write','shipping:quote'],
   true, 60, now()
 FROM "Tenant" t WHERE t."slug" = '<SLUG_DE_LA_SUCURSAL>';
 ```
@@ -69,6 +70,7 @@ FROM "Tenant" t WHERE t."slug" = '<SLUG_DE_LA_SUCURSAL>';
 Tiene que decir `INSERT 0 1`. Después copiá la línea de `.tmp/prod-bot-token` al entorno del chatbot en producción (`SERVICE_KEY`) y borrá el archivo (`rm .tmp/prod-bot-token`).
 
 Notas:
+- `pets:read`, `pets:write` y `pets:delete` son los scopes de las mascotas de los clientes (`docs/chatbot-handoff/customer-pets-bot-contract.md`). Sin `pets:read` el bot no ve `customer.pets` en `GET customers/by-phone` (que además pide `customers:read`). Una credencial que ya existe se rota o se actualiza con esos tres scopes antes de desplegar el bot nuevo.
 - El bot queda atado a esa sucursal. Si manda `x-branch-id`, tiene que ser el id de esa misma sucursal; si no, da 403.
 - El checkout pide un `cashierUserId`: tiene que ser un usuario **miembro de esa sucursal** en producción (si no, 404 `CASHIER_NOT_FOUND`). Pasale ese id al chatbot.
 - Para revocarla: `UPDATE "service_credentials" SET "isActive"=false, "revokedAt"=now() WHERE "name"='chatbot-whatsapp';`

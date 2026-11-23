@@ -1,6 +1,6 @@
 # Customer pets («varias mascotas por cliente») — contract proposal v0
 
-Status: **v1 APPROVED by the chatbot and the frontend 2026-11-23; owner answers Q1/Q2/D8 given directly in the backend session (§10).** Nothing is implemented yet. v1 changes: §11. The owner decided the feature on 2026-11-23, relayed by the chatbot agent. Facts below cite the current backend (`main` b6c9fbd6).
+Status: **v1 APPROVED by the chatbot and the frontend 2026-11-23; owner answers Q1/Q2/D8 given directly in the backend session (§10).** Implemented on `feat/customer-pets` (final routes and the points the contract left open: §12). v1 changes: §11. The owner decided the feature on 2026-11-23, relayed by the chatbot agent. Facts below cite the current backend (`main` b6c9fbd6).
 
 ## 0. Owner decisions this contract implements
 
@@ -242,3 +242,17 @@ If the volume is large (thousands), tell me and I add a rate note or a batch end
 - Bot create conflict code aligned to `IDEMPOTENCY_KEY_CONFLICT`.
 - Write responses return the complete pet; derived age always present with `birthDate`.
 - `pet` per line in all POS sale responses; erased pet → `pet: null`; `petsCleared` on draft update; `?petId=` foreign → 404; `matchedPetName` in the customer list; 400 format as customers.
+
+## 12. Implementation notes (final routes)
+
+Built on `feat/customer-pets`. The two handoffs are the reference for the shipped behavior: `docs/chatbot-handoff/customer-pets-bot-contract.md` (bot) and `docs/frontend-handoff/27-customer-pets.md` (POS). Where this proposal and the code differ, the handoffs follow the code. Routes and details the proposal left open:
+
+- **POS sale line routes (§4.2).** `POST /sales/drafts/:id/items` accepts an optional `petId` (absent keeps the line's pet, a uuid assigns it, `null` clears it), and the new `PUT /sales/drafts/:id/items/:itemId/pet` takes `{ petId: uuid | null }` (required member). Both need `update:Sale` and answer with the draft.
+- **`petsCleared` (§4.2).** `PUT /sales/drafts/:id/customer` returns `petsCleared: true` only when some line really lost a pet (`false` otherwise, also when the same customer is assigned again). **`DELETE /sales/drafts/:id/customer` stays `204` with no body** and clears the line pets server-side.
+- **POS history route (§5).** `GET /sales?customerId=<uuid>&petId=<uuid>`: `petId` needs exactly one `customerId` (`400 PET_FILTER_REQUIRES_CUSTOMER`, code-only envelope); a pet that is not that customer's → `404 PET_NOT_FOUND`. `data`, `pagination.total`/`totalPages` and `filterSummary` narrow to the pet; `counts` and `summary` (the KPIs) stay customer-wide.
+- **Customer search (§5).** `GET /customers?search=` **did not exist before**; it was added here. Every word (at most 6) must match `firstName`, `lastName`, `email`, `phone` or `businessName`, case-insensitive and accent-sensitive; a customer also matches when an ACTIVE pet's name contains the whole term (accent-folded, via `nameKey`). `matchedPetName` is the pet's name only when the customer matched through a pet alone, otherwise `null`.
+- **`INVALID_CHECKOUT_REQUEST` (§4.2).** The sale merges lines of one product/variant into one line with one pet, so a checkout with lines of the same product/variant that disagree on the pet (two different pets, or a pet and none) answers `400 INVALID_CHECKOUT_REQUEST` and creates nothing. The checkout response carries no `pet`.
+- **Bot order history (§4.1, §7).** `?petId=` keeps **all** the lines of the matching orders; a snapshot whose pet row is gone is `{ id: null, name, species, status: null }`; `?petId=` with an unknown phone is `404 PET_NOT_FOUND` too. The order of the lines inside an order is not guaranteed (pre-existing).
+- **`DELETE` of a customer (§6)** is unchanged (`204`); its pets are removed with it.
+- **Receipt kind (§7).** The `chatbot_bot_receipts_kind_chk` CHECK blocked the new kind, so migration `20261123010000_customer_pet_bot_receipt_kind` widens it (alongside `20261123000000_customer_pets`).
+- **Age label.** «menos de 1 mes» carries no `«~»` prefix even for `MONTH`/`YEAR` precision.
