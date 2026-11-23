@@ -21,6 +21,7 @@ import { SERVICE_CREDENTIAL_REPOSITORY } from '../domain/service-credential.repo
 import { ServiceCredential } from '../domain/service-credential.entity';
 import { BOT_AUDIT_LOG_REPOSITORY } from '../infrastructure/prisma-bot-audit-log.repository';
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
+import { CustomerPetError } from '../../customer-pets/domain/customer-pet-error';
 import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
 import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
 
@@ -681,6 +682,102 @@ describe('Atomic checkout public HTTP contract', () => {
     expect((await status(app)).body).toEqual({
       status: 'not_observed',
       checkout: null,
+    });
+  });
+
+  // customer-pets / T3 (S7, contract §4.2) — optional `sale.items[i].petId`.
+  describe('line petId', () => {
+    const PET = '60000000-0000-4000-8000-000000000001';
+    const OTHER_PET = '60000000-0000-4000-8000-000000000002';
+    const withPet = (petId?: string | null): Row => {
+      const body: Row = input();
+      if (petId !== undefined) body.sale.items[0].petId = petId;
+      return body;
+    };
+
+    it('passes petId to confirmBotSale and answers the unchanged 201 body', async () => {
+      const without = await post(app, input(), 'k-no-pet');
+      const result = await post(app, withPet(PET), 'k-pet');
+      expect(result.status).toBe(201);
+      expect(Object.keys(result.body)).toEqual(Object.keys(without.body));
+      expect(f.sales.confirmBotSale.mock.calls[1][0].items[0]).toMatchObject({
+        productId: PRODUCT,
+        petId: PET,
+      });
+    });
+
+    it('a request without petId (or with null) hashes as before: a stored receipt replays', async () => {
+      const first = await post(app, input());
+      expect(first.status).toBe(201);
+      const replay = await post(app, withPet(null));
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(f.sales.confirmBotSale).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['adding', undefined, PET],
+      ['removing', PET, undefined],
+      ['changing', PET, OTHER_PET],
+    ])(
+      'a retry %s petId under the same key is IDEMPOTENCY_KEY_CONFLICT with no new sale',
+      async (_label, first, retry) => {
+        const created = await post(app, withPet(first));
+        expect(created.status).toBe(201);
+        const conflict = await post(app, withPet(retry));
+        expect(conflict.status).toBe(409);
+        expect(conflict.body).toEqual(safe('IDEMPOTENCY_KEY_CONFLICT', 409));
+        expect(f.sales.confirmBotSale).toHaveBeenCalledTimes(1);
+        // the same request still replays
+        expect((await post(app, withPet(first))).body).toEqual(created.body);
+      },
+    );
+
+    it.each([
+      ['PET_NOT_FOUND', 404],
+      ['PET_CUSTOMER_MISMATCH', 422],
+      ['PET_ARCHIVED', 422],
+    ] as const)(
+      '%s from the sale is answered code-only with %i, rolls back and leaves the key retryable',
+      async (code, statusCode) => {
+        f.sales.confirmBotSale.mockRejectedValueOnce(
+          new CustomerPetError(code),
+        );
+        const rejected = await post(app, withPet(PET));
+        expect(rejected.status).toBe(statusCode);
+        expect(rejected.body).toEqual(safe(code, statusCode));
+        expect((await status(app)).body).toEqual({
+          status: 'not_observed',
+          checkout: null,
+        });
+        expect((await post(app, withPet(PET))).status).toBe(201);
+      },
+    );
+
+    it('lines that stack (same product, no variant) must agree on the pet: otherwise 400 INVALID_CHECKOUT_REQUEST, nothing runs', async () => {
+      const body = withPet(PET);
+      body.sale.items.push({ ...body.sale.items[0], petId: OTHER_PET });
+      body.sale.expectedTotalCents = 20000;
+      const conflict = await post(app, body);
+      expect(conflict.status).toBe(400);
+      expect(conflict.body).toEqual(safe('INVALID_CHECKOUT_REQUEST', 400));
+
+      const mixed = withPet(PET);
+      mixed.sale.items.push({ ...mixed.sale.items[0], petId: undefined });
+      expect((await post(app, mixed)).status).toBe(400);
+      expect(f.sales.confirmBotSale).not.toHaveBeenCalled();
+
+      const same = withPet(PET);
+      same.sale.items.push({ ...same.sale.items[0] });
+      same.sale.expectedTotalCents = 20000;
+      expect((await post(app, same, 'k-same')).status).toBe(201);
+    });
+
+    it('rejects a non-uuid petId (400) and leaves the legacy line members unchanged', async () => {
+      const result = await post(app, withPet('not-a-uuid'));
+      expect(result.status).toBe(400);
+      expect(result.body).toEqual(safe('INVALID_CHECKOUT_REQUEST', 400));
+      expect(f.sales.confirmBotSale).not.toHaveBeenCalled();
     });
   });
 

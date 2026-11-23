@@ -28,4 +28,6 @@ export interface SalesListExtendedFilter extends SalesListBaseFilter {
   dueDateFrom?: Date;
   dueDateTo?: Date;
   dueDateIncludeNull?: boolean;
+  /** customer-pets / T3: sales with at least one line for this pet. */
+  petId?: string;
 }

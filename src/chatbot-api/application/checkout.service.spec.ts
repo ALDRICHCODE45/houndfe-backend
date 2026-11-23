@@ -233,6 +233,62 @@ describe('Checkout intent hash', () => {
     });
     expect(a).toBe(createHash('sha256').update(canonical).digest('hex'));
   });
+  it('joins the hash only when petId is present (omitted/undefined/null hash as before), per pet', () => {
+    const PET_A = '00000000-0000-4000-8000-0000000000c1';
+    const PET_B = '00000000-0000-4000-8000-0000000000c2';
+    const BACKORDER_A = '00000000-0000-4000-8000-0000000000a1';
+    const withItem = (extra: object) =>
+      computeCheckoutRequestHash(
+        plainToInstance(CheckoutRequestDto, {
+          ...input({ mode: 'newSaved', address }),
+          sale: {
+            ...input({}).sale,
+            items: [{ ...input({}).sale.items[0], ...extra }],
+          },
+        }),
+      );
+    const without = withItem({});
+    expect(withItem({ petId: null })).toBe(without);
+    expect(withItem({ petId: undefined })).toBe(without);
+    const a = withItem({ petId: PET_A });
+    expect(a).not.toBe(without);
+    expect(withItem({ petId: PET_B })).not.toBe(a);
+    expect(withItem({ petId: PET_A })).toBe(a);
+    // Canonical form: appended after unitPriceCents / backorderId, only when set.
+    const canonical = (member: object) =>
+      createHash('sha256')
+        .update(
+          JSON.stringify({
+            phoneCountryCode: '52',
+            phone: '5512345678',
+            customer: { mode: 'existing', customerId: id },
+            deliveryAddress: { mode: 'newSaved', address: normalized(address) },
+            sale: {
+              cashierUserId: id,
+              items: [
+                {
+                  productId: id,
+                  variantId: null,
+                  productName: 'Item',
+                  variantName: null,
+                  quantity: 1,
+                  unitPriceCents: 100,
+                  ...member,
+                },
+              ],
+              expectedTotalCents: 100,
+              shipping: null,
+            },
+          }),
+        )
+        .digest('hex');
+    // an upper-cased UUID is the same intent as the lower-cased one
+    expect(withItem({ petId: PET_A.toUpperCase() })).toBe(a);
+    expect(a).toBe(canonical({ petId: PET_A }));
+    expect(withItem({ backorderId: BACKORDER_A, petId: PET_A })).toBe(
+      canonical({ backorderId: BACKORDER_A, petId: PET_A }),
+    );
+  });
   it.each(Object.keys(address))(
     'includes corrected address field %s',
     (field) => {

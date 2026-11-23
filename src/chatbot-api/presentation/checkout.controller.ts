@@ -19,6 +19,7 @@ import {
   InvalidArgumentError,
 } from '../../shared/domain/domain-error';
 import { BackorderCheckoutError } from '../../sales/domain/backorder-checkout.port';
+import { CustomerPetError } from '../../customer-pets/domain/customer-pet-error';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
 import {
   CheckoutRequestDto,
@@ -68,6 +69,11 @@ function safeError(error: unknown): HttpException {
       },
       error.status,
     );
+  }
+  // customer-pets / T3 (contract §8): PET_NOT_FOUND 404, PET_CUSTOMER_MISMATCH /
+  // PET_ARCHIVED 422, code-only like every checkout error.
+  if (error instanceof CustomerPetError) {
+    return checkoutError(error.status, error.code);
   }
   if (error instanceof DomainError && /^[A-Z][A-Z_]{1,79}$/.test(error.code)) {
     const status = CONFLICTS.has(error.code)
@@ -144,6 +150,18 @@ function parseRequest(value: unknown): CheckoutRequestDto {
     );
     if (new Set(backorderIds).size !== backorderIds.length)
       throw new Error('invalid');
+    // customer-pets / T3: the sale merges lines of one product/variant into a
+    // single line, which has ONE pet, so such lines must agree on it (a
+    // backorder line stays a line of its own).
+    const petOfLine = new Map<string, string | null>();
+    for (const item of dto.sale.items) {
+      if (item.backorderId) continue;
+      const line = `${item.productId.toLowerCase()}|${item.variantId?.toLowerCase() ?? ''}`;
+      const pet = item.petId?.toLowerCase() ?? null;
+      if (petOfLine.has(line) && petOfLine.get(line) !== pet)
+        throw new Error('invalid');
+      petOfLine.set(line, pet);
+    }
     // The delivery address may be omitted only for store pickup.
     if (
       !dto.deliveryAddress &&

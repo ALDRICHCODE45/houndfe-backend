@@ -56,8 +56,12 @@ describe('PrismaCustomerRepository.delete — backorders (T1b)', () => {
     await repo.delete('cust-1');
 
     expect(tenantPrisma.runInTransaction).toHaveBeenCalledTimes(1);
+    // Three raw locks (customer-pets T3): customer, its sale rows, its pets;
+    // the exact order is pinned in prisma-customer.repository.spec.ts.
     expect(calls).toEqual([
       'begin',
+      'lock',
+      'lock',
       'lock',
       'findActive',
       'deleteTerminal',

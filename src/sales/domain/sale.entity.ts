@@ -758,6 +758,9 @@ export class Sale {
 
     if (customerId !== this._customerId) {
       this._shippingAddressId = null;
+      // customer-pets / T3 (contract §4.2): the pets belong to the previous
+      // customer; a different customer clears every line pet and snapshot.
+      this.clearLinePets();
     }
 
     this._customerId = customerId;
@@ -767,9 +770,22 @@ export class Sale {
 
   clearCustomer(): void {
     this.ensureDraft();
+    this.clearLinePets();
     this._customerId = null;
     this._shippingAddressId = null;
     this._shippingAddressSnapshot = null;
+  }
+
+  /** True when some line carries a pet or a leftover snapshot of one. */
+  hasLinePets(): boolean {
+    return this._items.some((item) => item.hasPet());
+  }
+
+  /** Clears the pet and snapshot of every line; true when something changed. */
+  clearLinePets(): boolean {
+    const had = this.hasLinePets();
+    for (const item of this._items) item.clearPet();
+    return had;
   }
 
   setShippingAddress(addressId: string | null): void {

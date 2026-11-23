@@ -6,6 +6,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   Min,
 } from 'class-validator';
@@ -139,6 +140,15 @@ export class ListSalesQueryDto {
   @Transform(({ value }) => toBoolean(value))
   @IsBoolean()
   customerIncludeNull: boolean = false;
+
+  /**
+   * customer-pets / T3 (contract §5): the customer card's history of ONE pet —
+   * sales with at least one line for it. Needs exactly one `customerId`; a pet
+   * that is not of that customer (or unknown) answers `404 PET_NOT_FOUND`.
+   */
+  @IsOptional()
+  @IsUUID()
+  petId?: string;
 
   @IsOptional()
   @Transform(({ value }) => toBoolean(value))

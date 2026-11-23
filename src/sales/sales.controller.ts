@@ -29,6 +29,8 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { SalesService } from './sales.service';
 import { StockReservedForBackorderFilter } from './stock-reserved-for-backorder.filter';
+import { CustomerPetErrorFilter } from './customer-pet-error.filter';
+import { SetItemPetDto } from './dto/set-item-pet.dto';
 import { AddItemDto } from './dto/add-item.dto';
 import { UpdateItemQuantityDto } from './dto/update-item-quantity.dto';
 import { OverrideItemPriceDto } from './dto/override-item-price.dto';
@@ -43,6 +45,8 @@ import { SetPriceListDto } from './dto/set-price-list.dto';
 
 @Controller('sales/drafts')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
+// customer-pets / T3 — PET_NOT_FOUND / PET_CUSTOMER_MISMATCH / PET_ARCHIVED.
+@UseFilters(CustomerPetErrorFilter)
 export class SalesController {
   constructor(private readonly salesService: SalesService) {}
 
@@ -91,6 +95,23 @@ export class SalesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.salesService.updateItemQuantity(id, user.userId, itemId, dto);
+  }
+
+  /**
+   * PUT /sales/drafts/:id/items/:itemId/pet — customer-pets / T3 (contract
+   * §4.2). `{ petId: uuid }` assigns an ACTIVE pet of the sale's customer to the
+   * line (snapshot copied now); `{ petId: null }` clears it.
+   */
+  @Put(':id/items/:itemId/pet')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(['update', 'Sale'])
+  setItemPet(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: SetItemPetDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.salesService.setItemPet(id, user.userId, itemId, dto);
   }
 
   /**

@@ -113,7 +113,8 @@ export class PrismaCustomerRepository implements ICustomerRepository {
    * customer. `FOR UPDATE` conflicts with the key-share lock a concurrent
    * backorder insert takes on the customer, so an active backorder can neither
    * slip in after the check nor be missed by it. The business FKs are RESTRICT,
-   * hence the explicit delete of the terminal rows first.
+   * hence the explicit delete of the terminal rows first. Lock order:
+   * customer → its sale rows → its pets, then the cascades.
    */
   async delete(id: string): Promise<void> {
     const tenantId = this.tenantPrisma.getTenantId();
@@ -121,6 +122,17 @@ export class PrismaCustomerRepository implements ICustomerRepository {
       const tx = this.tenantPrisma.getClient();
       await tx.$queryRaw`
         SELECT id FROM customers WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE
+      `;
+      // customer-pets / T3 — the cascades below SET NULL the customer's sales
+      // and delete its pets (which SET NULL their sale lines). POS draft writes
+      // lock sales row → pets → lines, so take the same order up front instead
+      // of leaving it to the order the FK triggers happen to fire in:
+      // customer → its sale rows → its pets (each in id order).
+      await tx.$queryRaw`
+        SELECT id FROM sales WHERE "customerId" = ${id} AND "tenantId" = ${tenantId} ORDER BY id FOR UPDATE
+      `;
+      await tx.$queryRaw`
+        SELECT id FROM customer_pets WHERE "customerId" = ${id} AND "tenantId" = ${tenantId} ORDER BY id FOR UPDATE
       `;
       const active = await tx.backorder.findFirst({
         where: {

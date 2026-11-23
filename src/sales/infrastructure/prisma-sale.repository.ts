@@ -24,6 +24,11 @@ import {
   type AppliedOrderPromotionSnapshot,
 } from '../domain/sale.entity';
 import { SaleItem } from '../domain/sale-item.entity';
+import { toSaleLinePetView } from '../../customer-pets/domain/customer-pet-sale-line';
+import type {
+  PetSpecies,
+  PetStatus,
+} from '../../customer-pets/domain/customer-pet.types';
 import type { ShippingAddressSnapshot } from '../domain/shipping-address-snapshot';
 import {
   shippingAddressColumns,
@@ -87,6 +92,30 @@ function extractCatalogSnapshot(
       ? rawSubtitle
       : null;
   return { paymentMethodId, name, subtitle };
+}
+
+/**
+ * customer-pets / T3 — every aggregate load joins the pet's CURRENT status
+ * (contract §4.1: the snapshot status would always read ACTIVE). The join is by
+ * the line's own FK, so it cannot cross tenants.
+ */
+const ITEMS_WITH_PET_STATUS = {
+  include: { pet: { select: { status: true } } },
+} as const;
+
+/** The pet columns of a loaded line, as `SaleItem.fromPersistence` takes them. */
+function petColumnsOf(item: {
+  petId?: string | null;
+  petNameSnapshot?: string | null;
+  petSpeciesSnapshot?: PetSpecies | null;
+  pet?: { status: PetStatus } | null;
+}) {
+  return {
+    petId: item.petId ?? null,
+    petNameSnapshot: item.petNameSnapshot ?? null,
+    petSpeciesSnapshot: item.petSpeciesSnapshot ?? null,
+    petStatus: item.pet?.status ?? null,
+  };
 }
 
 /** WU6 — raw persisted SaleItem row: exactly the save-projection columns
@@ -193,10 +222,57 @@ export class PrismaSaleRepository implements ISaleRepository {
     throw new BusinessRuleViolationError(code, code);
   }
 
+  /**
+   * customer-pets / T3 — locks (`FOR SHARE`) the pet rows the lines point to
+   * and returns the ids that still exist. Callers run it BEFORE touching the
+   * sale's lines, so it never waits on a pet DELETE (which locks the pet
+   * `FOR UPDATE` and then scrubs `sale_items`) while holding line locks: a
+   * concurrent erase either finished first (the pet is gone and its lines are
+   * written without pet) or waits for this transaction. The order for writes
+   * of an existing sale is: sales row FOR UPDATE → pets FOR SHARE (id order) →
+   * sale_items rows. The charge reaches this point after its stock locks (a
+   * pet erase / customer DELETE never takes stock locks, so that cannot
+   * cycle); the bot checkout creates the sale after its customer → pets locks.
+   */
+  private async lockLivePetIds(
+    items: readonly SaleItem[],
+    tenantId: string,
+  ): Promise<ReadonlySet<string>> {
+    const petIds = [
+      ...new Set(
+        items.flatMap((item) => (item.petId !== null ? [item.petId] : [])),
+      ),
+    ].sort();
+    if (petIds.length === 0) return new Set();
+    const rows = await this.tenantPrisma
+      .getClient()
+      .$queryRaw<
+        Array<{ id: string }>
+      >(Prisma.sql`SELECT id FROM customer_pets WHERE id IN (${Prisma.join(petIds)}) AND "tenantId" = ${tenantId} ORDER BY id FOR SHARE`);
+    return new Set(rows.map((row) => row.id));
+  }
+
+  /**
+   * The three pet columns of a line. A line whose pet row vanished since it
+   * was loaded (erased in between) is written without pet AND without snapshot,
+   * exactly like the erasure scrub (contract §6).
+   */
+  private petWriteColumns(item: SaleItem, livePets: ReadonlySet<string>) {
+    if (item.petId !== null && !livePets.has(item.petId)) {
+      return { petId: null, petNameSnapshot: null, petSpeciesSnapshot: null };
+    }
+    return {
+      petId: item.petId,
+      petNameSnapshot: item.petNameSnapshot,
+      petSpeciesSnapshot: item.petSpeciesSnapshot,
+    };
+  }
+
   private toWriteRow(
     item: SaleItem,
     saleId: string,
     tenantId: string,
+    livePets: ReadonlySet<string> = new Set(),
   ): Prisma.SaleItemCreateManyInput {
     return {
       id: item.id,
@@ -232,6 +308,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       discountTitle: item.discountTitle,
       discountedAt: item.discountedAt,
       promotionId: item.promotionId,
+      ...this.petWriteColumns(item, livePets),
       tenantId,
     };
   }
@@ -378,6 +455,23 @@ export class PrismaSaleRepository implements ISaleRepository {
       }
     }
 
+    // customer-pets / T3 — sales row, then pets (FOR SHARE), then lines; see
+    // `lockLivePetIds`. `save` and the charge already hold the row; a draft
+    // write takes it here when a pet is involved on EITHER side: the new lines
+    // carry one, or the persisted lines do (removing or clearing the last pet
+    // line deletes a row a customer DELETE / pet erase cascade would update).
+    // The persisted side is read from the database, not the aggregate: `Sale`
+    // keeps no copy of its loaded lines (they are mutated / dropped in place).
+    // Drafts that never had a pet stay lock-free.
+    if (
+      existing &&
+      (sale.items.some((item) => item.petId !== null) ||
+        (await this.persistedLinesHavePet(sale.id, tenantId)))
+    ) {
+      await this.lockSaleRow(sale.id, tenantId);
+    }
+    const livePets = await this.lockLivePetIds(sale.items, tenantId);
+
     // Delete existing items only after the snapshot compare (we recreate
     // them from domain state); tenantId keeps this destructive write
     // inside the tenant.
@@ -427,7 +521,9 @@ export class PrismaSaleRepository implements ISaleRepository {
     // Create items
     if (sale.items.length > 0) {
       await prisma.saleItem.createMany({
-        data: sale.items.map((i) => this.toWriteRow(i, sale.id, tenantId)),
+        data: sale.items.map((i) =>
+          this.toWriteRow(i, sale.id, tenantId, livePets),
+        ),
       });
     } else {
       // Explicitly handle empty items (for clearItems case)
@@ -552,11 +648,11 @@ export class PrismaSaleRepository implements ISaleRepository {
     const saleData = await prisma.sale.findUnique({
       where: { id },
       include: {
-        items: true,
+        items: ITEMS_WITH_PET_STATUS,
         shippingAddress: { select: { id: true } },
         // Unit 3 — W2: load veto set + applied order-promo so the engine can
         // exclude vetoed promotions and the draft preview can show the order
-        // discount. Item-level promotionId flows through `items: true`.
+        // discount. Item-level promotionId flows through `items`.
         promotionVetoes: {
           select: { promotionId: true },
           where: { tenantId },
@@ -642,6 +738,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
         promotionId: item.promotionId ?? null,
+        ...petColumnsOf(item),
       })),
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
@@ -679,7 +776,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     const saleData = await prisma.sale.findUnique({
       where: { id },
       include: {
-        items: true,
+        items: ITEMS_WITH_PET_STATUS,
         customer: {
           select: {
             id: true,
@@ -765,6 +862,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
         promotionId: item.promotionId ?? null,
+        ...petColumnsOf(item),
       })),
       createdAt: saleData.createdAt,
       updatedAt: saleData.updatedAt,
@@ -845,7 +943,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         status: 'DRAFT',
       },
       include: {
-        items: true,
+        items: ITEMS_WITH_PET_STATUS,
         shippingAddress: { select: { id: true } },
         // Unit 3 — W2: load veto + applied-promo on the draft-list path too.
         promotionVetoes: { select: { promotionId: true }, where: { tenantId } },
@@ -911,6 +1009,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           discountTitle: item.discountTitle,
           discountedAt: item.discountedAt,
           promotionId: item.promotionId ?? null,
+          ...petColumnsOf(item),
         })),
         confirmedAt: (saleData as any).confirmedAt,
         folio: (saleData as any).folio,
@@ -953,6 +1052,28 @@ export class PrismaSaleRepository implements ISaleRepository {
     );
   }
 
+  async lockSaleForUpdate(id: string): Promise<void> {
+    await this.lockSaleRow(id, this.requireTenantId());
+  }
+
+  /** Whether a stored line of the sale points to a pet (index on petId). */
+  private async persistedLinesHavePet(
+    saleId: string,
+    tenantId: string,
+  ): Promise<boolean> {
+    const row = await this.tenantPrisma.getClient().saleItem.findFirst({
+      where: { saleId, tenantId, petId: { not: null } },
+      select: { id: true },
+    });
+    return row !== null && row !== undefined;
+  }
+
+  private async lockSaleRow(id: string, tenantId: string): Promise<void> {
+    await this.tenantPrisma.getClient().$queryRaw`
+      SELECT id FROM sales WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE
+    `;
+  }
+
   async findByIdForUpdate(id: string): Promise<Sale | null> {
     const prisma = this.tenantPrisma.getClient();
     const tenantId = this.requireTenantId();
@@ -969,7 +1090,7 @@ export class PrismaSaleRepository implements ISaleRepository {
     const saleData = await prisma.sale.findFirst({
       where: { id, tenantId },
       include: {
-        items: true,
+        items: ITEMS_WITH_PET_STATUS,
         shippingAddress: { select: { id: true } },
         // Unit 3 — W2: charge path needs veto + applied-promo so the
         // charge-time recompute excludes vetoed ids and keeps the order
@@ -1054,6 +1175,7 @@ export class PrismaSaleRepository implements ISaleRepository {
         discountTitle: item.discountTitle,
         discountedAt: item.discountedAt,
         promotionId: item.promotionId ?? null,
+        ...petColumnsOf(item),
       })),
       createdAt: persistedSale.createdAt,
       updatedAt: persistedSale.updatedAt,
@@ -1277,6 +1399,9 @@ export class PrismaSaleRepository implements ISaleRepository {
     // tx (chargeDraft calls `saleRepo.runInTransaction` then this method),
     // and `tenantPrisma.getClient()` resolves to the tx client via CLS.
     if (input.items !== undefined) {
+      // customer-pets / T3 — pets before lines, as in `writeImpl`; the charge
+      // already holds the sales row (`findByIdForUpdate`).
+      const livePets = await this.lockLivePetIds(input.items, tenantId);
       await prisma.saleItem.deleteMany({
         where: { saleId: input.saleId },
       });
@@ -1321,6 +1446,7 @@ export class PrismaSaleRepository implements ISaleRepository {
             discountTitle: item.discountTitle,
             discountedAt: item.discountedAt,
             promotionId: item.promotionId,
+            ...this.petWriteColumns(item, livePets),
             tenantId,
           })) as Prisma.SaleItemCreateManyInput[],
         });
@@ -1792,6 +1918,12 @@ export class PrismaSaleRepository implements ISaleRepository {
       andClauses.push({ dueDate: null });
     }
 
+    if (input.petId) {
+      // customer-pets / T3 — at least one line for the pet (EXISTS, so a sale
+      // with two lines for it is one row and the count/aggregate stay exact).
+      andClauses.push({ items: { some: { petId: input.petId } } });
+    }
+
     if (input.paymentMethod?.length) {
       const somePaymentMethod = {
         payments: { some: { method: { in: input.paymentMethod } } },
@@ -2184,6 +2316,12 @@ export class PrismaSaleRepository implements ISaleRepository {
             // back-compat fallback for pre-migration rows whose column
             // is null but whose shape still matches BXGY.
             rewardKind: true,
+            // customer-pets / T3 (contract §4.1) — the line's pet snapshot
+            // plus the pet's CURRENT status through the FK join.
+            petId: true,
+            petNameSnapshot: true,
+            petSpeciesSnapshot: true,
+            pet: { select: { status: true } },
           },
         },
         payments: {
@@ -2340,6 +2478,13 @@ export class PrismaSaleRepository implements ISaleRepository {
           // a free-form seller discount. Coerce undefined → null so the
           // wire contract is `string | null` (never undefined).
           promotionId: item.promotionId ?? null,
+          // customer-pets / T3 — `{id,name,species,status}` or null.
+          pet: toSaleLinePetView({
+            petId: item.petId,
+            petNameSnapshot: item.petNameSnapshot,
+            petSpeciesSnapshot: item.petSpeciesSnapshot,
+            petStatus: item.pet?.status ?? null,
+          }),
         };
       }),
       payments: sale.payments.map((payment) => {

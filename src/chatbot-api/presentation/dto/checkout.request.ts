@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
@@ -80,6 +80,21 @@ export class CheckoutSaleItemDto extends BotSaleItemDto {
   @IsOptional()
   @IsUUID()
   backorderId?: string | null;
+
+  /**
+   * customer-pets / T3 (contract §4.2) — the pet this line is for: an ACTIVE pet
+   * of the checkout customer (404 PET_NOT_FOUND / 422 PET_CUSTOMER_MISMATCH /
+   * 422 PET_ARCHIVED otherwise). Optional like `backorderId` and, like it, part
+   * of the request hash only when present; `null` means omitted. A UUID is
+   * lower-cased on the way in (ids are stored lower-case), so one pet is one
+   * value for the lookup and the hash.
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.toLowerCase() : value,
+  )
+  @IsUUID()
+  petId?: string | null;
 }
 
 export class CheckoutSaleDto {

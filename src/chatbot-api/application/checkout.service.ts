@@ -109,6 +109,8 @@ export function computeCheckoutRequestHash(input: CheckoutRequestDto): string {
             // restock-backorder / T3: joins the hash ONLY when present, so every
             // request without it hashes byte for byte as before (stored receipts replay).
             ...(item.backorderId ? { backorderId: item.backorderId } : {}),
+            // customer-pets / T3: same rule, appended after backorderId.
+            ...(item.petId ? { petId: item.petId } : {}),
           })),
           expectedTotalCents: input.sale.expectedTotalCents,
           // Legacy members hash exactly as before T7 (stored receipts replay).

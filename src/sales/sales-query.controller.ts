@@ -13,6 +13,7 @@ import {
   Post,
   Put,
   Query,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -22,6 +23,7 @@ import { RequirePermissions } from '../auth/authorization/decorators/require-per
 import { ParseCuidPipe } from '../shared/pipes/parse-cuid.pipe';
 import { SalesService } from './sales.service';
 import { ListSalesQueryDto } from './dto/list-sales-query.dto';
+import { CustomerPetErrorFilter } from './customer-pet-error.filter';
 import { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import { SettleRefundDto } from './dto/settle-refund.dto';
 import { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
@@ -32,6 +34,8 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 
 @Controller('sales')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
+// customer-pets / T3 — `GET /sales?customerId=&petId=` → 404 PET_NOT_FOUND.
+@UseFilters(CustomerPetErrorFilter)
 export class SalesQueryController {
   constructor(private readonly salesService: SalesService) {}
 

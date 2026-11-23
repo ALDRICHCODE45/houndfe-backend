@@ -36,6 +36,8 @@ function makeMockPrisma() {
       deleteMany: jest.fn(),
       createMany: jest.fn(),
       findMany: jest.fn(),
+      // customer-pets / T3 — persisted pet probe of draft writes (none by default).
+      findFirst: jest.fn().mockResolvedValue(null),
     },
     saleFolioCounter: {
       upsert: jest.fn(),
@@ -115,6 +117,7 @@ interface WritePathMocks {
     deleteMany: jest.Mock;
     createMany: jest.Mock;
     findMany: jest.Mock;
+    findFirst: jest.Mock;
   };
   salePromotionVeto: { deleteMany: jest.Mock; createMany: jest.Mock };
   salePromotionOptIn: { deleteMany: jest.Mock; createMany: jest.Mock };
@@ -2532,6 +2535,10 @@ describe('PrismaSaleRepository', () => {
             discountTitle: 'Projection promotion',
             discountedAt,
             promotionId: 'promotion-1',
+            // customer-pets / T3 — no pet on the line: the three columns stay null.
+            petId: null,
+            petNameSnapshot: null,
+            petSpeciesSnapshot: null,
             tenantId: 'tenant-1',
           },
         ],
@@ -2608,6 +2615,207 @@ describe('PrismaSaleRepository', () => {
           data: expect.objectContaining({ tenantId: 'tenant-1' }),
         }),
       );
+    });
+
+    describe('line pets (customer-pets / T3)', () => {
+      const petSale = () => {
+        const sale = Sale.create({ id: 'sale-pet', userId: 'user-1' });
+        sale.addItem({
+          id: 'item-pet',
+          saleId: 'sale-pet',
+          productId: 'prod-1',
+          variantId: null,
+          productName: 'Product 1',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+          petId: 'pet-1',
+          petNameSnapshot: 'Bruno',
+          petSpeciesSnapshot: 'DOG',
+        });
+        return sale;
+      };
+      const reloaded = (items: object[] = []) => ({
+        id: 'sale-pet',
+        userId: 'user-1',
+        status: 'DRAFT',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        items,
+      });
+
+      it('locks the pets FOR SHARE BEFORE rewriting the lines, then writes the pet columns', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([{ id: 'sale-pet' }]) // the sale lock
+          .mockResolvedValueOnce([{ id: 'pet-1' }]); // the pet lock
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(reloaded());
+
+        await repo.save(petSale());
+
+        const lock = prisma.$queryRaw.mock.calls[1][0] as {
+          sql: string;
+          values: unknown[];
+        };
+        expect(lock.sql).toContain('FROM customer_pets');
+        expect(lock.sql).toContain('FOR SHARE');
+        expect(lock.values).toEqual(['pet-1', 'tenant-1']);
+        expect(prisma.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+          prisma.saleItem.deleteMany.mock.invocationCallOrder[0],
+        );
+        expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
+          data: [
+            expect.objectContaining({
+              id: 'item-pet',
+              petId: 'pet-1',
+              petNameSnapshot: 'Bruno',
+              petSpeciesSnapshot: 'DOG',
+            }),
+          ],
+        });
+      });
+
+      it('a line whose pet row is gone is written without pet AND snapshot (erased in between)', async () => {
+        prisma.$queryRaw
+          .mockResolvedValueOnce([{ id: 'sale-pet' }])
+          .mockResolvedValueOnce([]); // the pet no longer exists
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(reloaded());
+
+        await repo.save(petSale());
+
+        expect(prisma.saleItem.createMany).toHaveBeenCalledWith({
+          data: [
+            expect.objectContaining({
+              id: 'item-pet',
+              petId: null,
+              petNameSnapshot: null,
+              petSpeciesSnapshot: null,
+            }),
+          ],
+        });
+      });
+
+      it('lines without a pet take no pet lock: only the sale lock is issued', async () => {
+        const sale = Sale.create({ id: 'sale-plain', userId: 'user-1' });
+        sale.addItem({
+          id: 'item-plain',
+          saleId: 'sale-plain',
+          productId: 'prod-1',
+          variantId: null,
+          productName: 'Product 1',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+        });
+        prisma.sale.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(reloaded());
+
+        await repo.save(sale);
+
+        expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      });
+
+      describe('draft write whose persisted lines had a pet (removeItem / clearItems)', () => {
+        const persistedDraft = () =>
+          Sale.fromPersistence({
+            id: 'sale-drop',
+            userId: 'user-1',
+            status: 'DRAFT',
+            items: [],
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        const lockSqls = () =>
+          prisma.$queryRaw.mock.calls.map((call) => {
+            const [first] = call as [{ sql?: string } | TemplateStringsArray];
+            return 'sql' in first && typeof first.sql === 'string'
+              ? first.sql
+              : (first as TemplateStringsArray).join('?');
+          });
+
+        it('takes the sales row FOR UPDATE before deleting the lines when a stored line has a pet', async () => {
+          prisma.sale.findUnique
+            .mockResolvedValueOnce({ id: 'sale-drop', status: 'DRAFT' })
+            .mockResolvedValueOnce(reloaded());
+          prisma.saleItem.findFirst.mockResolvedValueOnce({
+            id: 'old-pet-line',
+          });
+
+          await repo.saveDraftItems(persistedDraft());
+
+          expect(prisma.saleItem.findFirst).toHaveBeenCalledWith({
+            where: {
+              saleId: 'sale-drop',
+              tenantId: 'tenant-1',
+              petId: { not: null },
+            },
+            select: { id: true },
+          });
+          const sqls = lockSqls();
+          expect(sqls).toHaveLength(1);
+          expect(sqls[0]).toContain('FROM sales');
+          expect(sqls[0]).toContain('FOR UPDATE');
+          expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+            prisma.saleItem.deleteMany.mock.invocationCallOrder[0],
+          );
+        });
+
+        it('a draft that never had a pet stays lock-free (regression)', async () => {
+          prisma.sale.findUnique
+            .mockResolvedValueOnce({ id: 'sale-drop', status: 'DRAFT' })
+            .mockResolvedValueOnce(reloaded());
+
+          await repo.saveDraftItems(persistedDraft());
+
+          expect(prisma.saleItem.findFirst).toHaveBeenCalledTimes(1);
+          expect(prisma.$queryRaw).not.toHaveBeenCalled();
+          expect(prisma.saleItem.deleteMany).toHaveBeenCalledTimes(1);
+        });
+      });
+
+      it('findById joins the pet and the loaded line answers snapshot + CURRENT status', async () => {
+        prisma.sale.findUnique.mockResolvedValue(
+          reloaded([
+            {
+              id: 'item-pet',
+              saleId: 'sale-pet',
+              productId: 'prod-1',
+              variantId: null,
+              productName: 'Product 1',
+              variantName: null,
+              quantity: 1,
+              unitPriceCents: 1000,
+              unitPriceCurrency: 'MXN',
+              petId: 'pet-1',
+              petNameSnapshot: 'Bruno',
+              petSpeciesSnapshot: 'DOG',
+              pet: { status: 'ARCHIVED' },
+            },
+          ]),
+        );
+
+        const sale = await repo.findById('sale-pet');
+
+        expect(prisma.sale.findUnique).toHaveBeenCalledWith(
+          expect.objectContaining({
+            include: expect.objectContaining({
+              items: { include: { pet: { select: { status: true } } } },
+            }),
+          }),
+        );
+        expect(sale?.items[0].toResponse().pet).toEqual({
+          id: 'pet-1',
+          name: 'Bruno',
+          species: 'DOG',
+          status: 'ARCHIVED',
+        });
+      });
     });
 
     it('should create a new sale with items', async () => {
@@ -2719,6 +2927,9 @@ describe('PrismaSaleRepository', () => {
             discountTitle: null,
             discountedAt: null,
             promotionId: null,
+            petId: null,
+            petNameSnapshot: null,
+            petSpeciesSnapshot: null,
             tenantId: 'tenant-1',
           },
         ],
@@ -2845,6 +3056,9 @@ describe('PrismaSaleRepository', () => {
             discountTitle: null,
             discountedAt: null,
             promotionId: null,
+            petId: null,
+            petNameSnapshot: null,
+            petSpeciesSnapshot: null,
             tenantId: 'tenant-1',
           },
         ],

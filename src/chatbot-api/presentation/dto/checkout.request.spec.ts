@@ -362,3 +362,58 @@ describe('checkout line backorderId', () => {
     ).toBeGreaterThan(0);
   });
 });
+
+// customer-pets / T3 (contract §4.2) — optional `sale.items[i].petId`.
+describe('checkout line petId', () => {
+  const PET = '00000000-0000-4000-8000-0000000000c1';
+  const withItem = (item: object) => {
+    const base = input();
+    return { ...base, sale: { ...base.sale, items: [item] } };
+  };
+  const line = { ...input().sale.items[0] };
+
+  it('accepts a UUID petId on the checkout line', () => {
+    const { dto, errors } = check(withItem({ ...line, petId: PET }));
+    expect(errors).toEqual([]);
+    expect(dto.sale.items[0].petId).toBe(PET);
+  });
+
+  it('lower-cases an upper-cased UUID so lookups and the hash see one value', () => {
+    const { dto, errors } = check(
+      withItem({ ...line, petId: PET.toUpperCase() }),
+    );
+    expect(errors).toEqual([]);
+    expect(dto.sale.items[0].petId).toBe(PET);
+  });
+
+  it('accepts null (no pet) and keeps the member optional', () => {
+    expect(check(withItem({ ...line, petId: null })).errors).toEqual([]);
+    const { dto, errors } = check(withItem(line));
+    expect(errors).toEqual([]);
+    expect(dto.sale.items[0].petId).toBeUndefined();
+  });
+
+  it.each([['not-a-uuid'], [12], [''], [{}], [['x']]])(
+    'rejects petId %j',
+    (petId) => {
+      expect(check(withItem({ ...line, petId })).errors.length).toBeGreaterThan(
+        0,
+      );
+    },
+  );
+
+  it('is NOT accepted on the legacy POST /chatbot-api/sales', () => {
+    const dto = plainToInstance(RegisterBotSaleRequestDto, {
+      cashierUserId: id,
+      customerId: id,
+      items: [{ ...line, petId: PET }],
+    });
+    expect(
+      validateSync(dto, {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        forbidUnknownValues: true,
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+});

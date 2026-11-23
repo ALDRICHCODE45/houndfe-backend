@@ -192,3 +192,90 @@ describe('PrismaCustomerRepository tenant scoping', () => {
     ).resolves.toBeNull();
   });
 });
+
+describe('PrismaCustomerRepository.delete lock order (customer-pets / T3)', () => {
+  function deleteHarness() {
+    const calls: string[] = [];
+    const queryRaw = jest.fn((strings: TemplateStringsArray) => {
+      const sql = strings.join('?').replace(/\s+/g, ' ').trim();
+      calls.push(
+        sql.includes('FROM customers')
+          ? 'lock customer'
+          : sql.includes('FROM sales')
+            ? 'lock sales'
+            : sql.includes('FROM customer_pets')
+              ? 'lock pets'
+              : sql,
+      );
+      return Promise.resolve([]);
+    });
+    const client = {
+      $queryRaw: queryRaw,
+      backorder: {
+        findFirst: jest.fn(() => {
+          calls.push('backorder guard');
+          return Promise.resolve(null);
+        }),
+        deleteMany: jest.fn(() => {
+          calls.push('delete terminal backorders');
+          return Promise.resolve({ count: 0 });
+        }),
+      },
+      customer: {
+        delete: jest.fn(() => {
+          calls.push('delete customer');
+          return Promise.resolve();
+        }),
+      },
+    };
+    const tenantPrisma = {
+      getTenantId: () => 'tenant-1',
+      getClient: () => client,
+      runInTransaction: jest.fn((work: () => Promise<unknown>) => work()),
+    };
+    return {
+      calls,
+      client,
+      repo: new PrismaCustomerRepository(
+        tenantPrisma as unknown as TenantPrismaService,
+      ),
+    };
+  }
+
+  it('locks the customer, then its sale rows, then its pets (id order, tenant-qualified) before anything is deleted', async () => {
+    const { repo, calls, client } = deleteHarness();
+
+    await repo.delete('cust-1');
+
+    expect(calls).toEqual([
+      'lock customer',
+      'lock sales',
+      'lock pets',
+      'backorder guard',
+      'delete terminal backorders',
+      'delete customer',
+    ]);
+    const [sales, pets] = client.$queryRaw.mock.calls.slice(
+      1,
+    ) as unknown as Array<[TemplateStringsArray, ...unknown[]]>;
+    for (const [strings, ...values] of [sales, pets]) {
+      const sql = strings.join('?');
+      expect(sql).toContain('ORDER BY id');
+      expect(sql).toContain('FOR UPDATE');
+      expect(values).toEqual(['cust-1', 'tenant-1']);
+    }
+  });
+
+  it('keeps the backorder guard: an active backorder refuses the delete after the locks and deletes nothing', async () => {
+    const { repo, calls, client } = deleteHarness();
+    client.backorder.findFirst.mockImplementationOnce(() => {
+      calls.push('backorder guard');
+      return Promise.resolve({ id: 'bo-1' } as never);
+    });
+
+    await expect(repo.delete('cust-1')).rejects.toThrow();
+
+    expect(client.customer.delete).not.toHaveBeenCalled();
+    expect(client.backorder.deleteMany).not.toHaveBeenCalled();
+  });
+});

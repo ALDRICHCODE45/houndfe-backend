@@ -1,4 +1,13 @@
 import { InvalidArgumentError } from '../../shared/domain/domain-error';
+import {
+  toSaleLinePetView,
+  type SaleLinePetColumns,
+  type SaleLinePetSnapshot,
+} from '../../customer-pets/domain/customer-pet-sale-line';
+import type {
+  PetSpecies,
+  PetStatus,
+} from '../../customer-pets/domain/customer-pet.types';
 
 export interface SaleItemProps {
   id: string;
@@ -41,6 +50,19 @@ export interface SaleItemProps {
    * shapes on round-trip — see `fromPersistence` below.
    */
   rewardKind?: 'buy_x_get_y' | 'advanced' | null;
+  /**
+   * customer-pets / T3 (contract §4.1) — the pet this line is for and the
+   * snapshot copied when it was assigned. `petId` is null when the pet row is
+   * gone (erased: snapshot cleared too; customer deleted: snapshot kept).
+   */
+  petId?: string | null;
+  petNameSnapshot?: string | null;
+  petSpeciesSnapshot?: PetSpecies | null;
+  /**
+   * Read-only: the pet's CURRENT status from the join on load. Never written
+   * back; an in-memory assignment is always of an ACTIVE pet.
+   */
+  petStatus?: PetStatus | null;
 }
 
 export interface ApplySaleItemDiscountInput {
@@ -158,6 +180,12 @@ export class SaleItem {
    */
   private _rewardKind: 'buy_x_get_y' | 'advanced' | null = null;
 
+  /** customer-pets / T3 — see `SaleItemProps.petId` and friends. */
+  private _petId: string | null = null;
+  private _petNameSnapshot: string | null = null;
+  private _petSpeciesSnapshot: PetSpecies | null = null;
+  private _petStatus: PetStatus | null = null;
+
   private constructor(
     public readonly id: string,
     public readonly saleId: string,
@@ -201,7 +229,7 @@ export class SaleItem {
       throw new InvalidArgumentError('Unit price cannot be negative');
     }
 
-    return new SaleItem(
+    const item = new SaleItem(
       props.id,
       props.saleId,
       props.productId,
@@ -224,6 +252,8 @@ export class SaleItem {
       props.discountedAt ?? null,
       props.promotionId ?? null,
     );
+    item.hydratePet(props);
+    return item;
   }
 
   static fromPersistence(props: SaleItemProps): SaleItem {
@@ -256,7 +286,50 @@ export class SaleItem {
     // directly, so no enum coercion is needed here; the field is null on
     // non-reward rows.
     item._rewardKind = props.rewardKind ?? null;
+    item.hydratePet(props);
     return item;
+  }
+
+  private hydratePet(props: SaleLinePetColumns): void {
+    this._petId = props.petId ?? null;
+    this._petNameSnapshot = props.petNameSnapshot ?? null;
+    this._petSpeciesSnapshot = props.petSpeciesSnapshot ?? null;
+    this._petStatus = props.petStatus ?? null;
+  }
+
+  get petId(): string | null {
+    return this._petId;
+  }
+
+  get petNameSnapshot(): string | null {
+    return this._petNameSnapshot;
+  }
+
+  get petSpeciesSnapshot(): PetSpecies | null {
+    return this._petSpeciesSnapshot;
+  }
+
+  /** True when the line carries a pet or a leftover snapshot of one. */
+  hasPet(): boolean {
+    return this._petId !== null || this._petNameSnapshot !== null;
+  }
+
+  /**
+   * Assigns a validated ACTIVE pet (see `resolveSaleLinePet`): the snapshot is
+   * copied now and never follows later pet edits.
+   */
+  assignPet(snapshot: SaleLinePetSnapshot): void {
+    this._petId = snapshot.petId;
+    this._petNameSnapshot = snapshot.petNameSnapshot;
+    this._petSpeciesSnapshot = snapshot.petSpeciesSnapshot;
+    this._petStatus = 'ACTIVE';
+  }
+
+  clearPet(): void {
+    this._petId = null;
+    this._petNameSnapshot = null;
+    this._petSpeciesSnapshot = null;
+    this._petStatus = null;
   }
 
   get quantity(): number {
@@ -636,6 +709,13 @@ export class SaleItem {
       // `isBxgy` guard as `rewardKind`. Lets the frontend show "GRATIS" only
       // at 100%, otherwise the real percent.
       rewardDiscountPercent: isBxgy ? this._rewardDiscountPercent : null,
+      // customer-pets / T3 (contract §4.1) — `{id,name,species,status}` or null.
+      pet: toSaleLinePetView({
+        petId: this._petId,
+        petNameSnapshot: this._petNameSnapshot,
+        petSpeciesSnapshot: this._petSpeciesSnapshot,
+        petStatus: this._petStatus,
+      }),
     };
   }
 }

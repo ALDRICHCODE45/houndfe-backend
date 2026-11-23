@@ -4,6 +4,7 @@
  * Tests for POS sales use cases: openDraft, addItem, updateItemQuantity,
  * clearItems, deleteDraft, getUserDrafts.
  */
+import { HttpException } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { SalesService } from './sales.service';
 import type {
@@ -1663,7 +1664,9 @@ describe('SalesService', () => {
         shippingAddressId: draftResponse.shippingAddress.id,
       });
 
-      expect(result).toEqual(draftResponse);
+      // customer-pets / T3: the draft response now also says whether the
+      // customer change cleared line pets (nothing to clear here → false).
+      expect(result).toEqual({ ...draftResponse, petsCleared: false });
       expect(saleRepo.save).toHaveBeenCalledWith(sale);
       expect(eventEmitter.emit).toHaveBeenCalledWith(
         'sale.customer.assigned',
@@ -1721,6 +1724,203 @@ describe('SalesService', () => {
         'sale.customer.cleared',
         expect.anything(),
       );
+    });
+
+    describe('removeItem / clearItems lock order (customer-pets / T3)', () => {
+      const draftWith = (pet: boolean) => {
+        const sale = makeDraftSale({
+          customerId: 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26',
+        });
+        sale.addItem({
+          id: 'item-1',
+          saleId: sale.id,
+          productId: 'prod-1',
+          variantId: null,
+          productName: 'Croquetas',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+          ...(pet
+            ? {
+                petId: 'pet-1',
+                petNameSnapshot: 'Bruno',
+                petSpeciesSnapshot: 'DOG' as const,
+              }
+            : {}),
+        });
+        return sale;
+      };
+
+      it.each([
+        [
+          'removeItem',
+          (id: string, user: string) => service.removeItem(id, user, 'item-1'),
+        ],
+        [
+          'clearItems',
+          (id: string, user: string) => service.clearItems(id, user),
+        ],
+      ] as const)(
+        '%s of a pet line: row lock, then re-read under it, then save the re-read draft',
+        async (_label, run) => {
+          const loaded = draftWith(true);
+          const fresh = draftWith(true);
+          saleRepo.findById
+            .mockResolvedValueOnce(loaded)
+            .mockResolvedValueOnce(fresh);
+          const order: string[] = [];
+          saleRepo.runInTransaction = jest.fn(
+            async (work: () => Promise<unknown>) => {
+              order.push('begin');
+              return work();
+            },
+          ) as never;
+          saleRepo.lockSaleForUpdate = jest.fn(async () => {
+            order.push('lock');
+          }) as never;
+          saleRepo.saveDraftItems.mockImplementation(async (s: Sale) => {
+            order.push('save');
+            return s;
+          });
+
+          const result = await run(loaded.id, loaded.userId);
+
+          expect(order).toEqual(['begin', 'lock', 'save']);
+          expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(fresh);
+          expect(fresh.items).toHaveLength(0);
+          expect(result.items).toEqual([]);
+        },
+      );
+
+      it.each([
+        [
+          'removeItem',
+          (id: string, user: string) => service.removeItem(id, user, 'item-1'),
+        ],
+        [
+          'clearItems',
+          (id: string, user: string) => service.clearItems(id, user),
+        ],
+      ] as const)(
+        '%s of a draft without pets keeps the lock-free flow (regression)',
+        async (_label, run) => {
+          const loaded = draftWith(false);
+          saleRepo.findById.mockResolvedValue(loaded);
+          const runInTransaction = jest.spyOn(saleRepo, 'runInTransaction');
+
+          const result = await run(loaded.id, loaded.userId);
+
+          expect(runInTransaction).not.toHaveBeenCalled();
+          expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(loaded);
+          expect(result.items).toEqual([]);
+        },
+      );
+    });
+
+    describe('line pets (customer-pets / T3)', () => {
+      const CUSTOMER = 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26';
+      const OTHER = '2bd9bf5e-5d8f-40fc-b2d7-e99e8cf1ba2f';
+      const petDraft = (customerId: string | null = CUSTOMER) => {
+        const sale = makeDraftSale({ customerId });
+        sale.addItem({
+          id: 'item-pet',
+          saleId: sale.id,
+          productId: 'prod-1',
+          variantId: null,
+          productName: 'Croquetas',
+          variantName: null,
+          quantity: 1,
+          unitPriceCents: 1000,
+          unitPriceCurrency: 'MXN',
+          petId: 'pet-1',
+          petNameSnapshot: 'Bruno',
+          petSpeciesSnapshot: 'DOG',
+        });
+        return sale;
+      };
+      const stubAssign = () => {
+        tenantPrisma.getClient = jest.fn(
+          () =>
+            ({
+              customer: {
+                findUnique: jest.fn().mockResolvedValue({ id: OTHER }),
+              },
+              globalPriceList: {
+                findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+              },
+            }) as never,
+        );
+        saleRepo.findDraftResponseById.mockResolvedValue({
+          id: 'draft',
+        } as never);
+      };
+
+      it('a different customer clears the line pets and answers petsCleared: true', async () => {
+        const sale = petDraft();
+        saleRepo.findById.mockResolvedValue(sale);
+        stubAssign();
+
+        const result = await service.assignCustomer(sale.id, sale.userId, {
+          customerId: OTHER,
+        });
+
+        expect(result).toEqual({ id: 'draft', petsCleared: true });
+        expect(sale.items[0].petId).toBeNull();
+        expect(sale.items[0].petNameSnapshot).toBeNull();
+        expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      });
+
+      it('the same customer keeps the pets and answers petsCleared: false', async () => {
+        const sale = petDraft();
+        saleRepo.findById.mockResolvedValue(sale);
+        tenantPrisma.getClient = jest.fn(
+          () =>
+            ({
+              customer: {
+                findUnique: jest.fn().mockResolvedValue({ id: CUSTOMER }),
+              },
+              globalPriceList: {
+                findFirst: jest.fn().mockResolvedValue({ id: 'gpl-publico' }),
+              },
+            }) as never,
+        );
+        saleRepo.findDraftResponseById.mockResolvedValue({
+          id: 'draft',
+        } as never);
+
+        const result = await service.assignCustomer(sale.id, sale.userId, {
+          customerId: CUSTOMER,
+        });
+
+        expect(result).toEqual({ id: 'draft', petsCleared: false });
+        expect(sale.items[0].petId).toBe('pet-1');
+      });
+
+      it('removing the customer clears the line pets before saving', async () => {
+        const sale = petDraft();
+        saleRepo.findById.mockResolvedValue(sale);
+
+        await service.clearCustomer(sale.id, sale.userId);
+
+        expect(sale.items[0].petId).toBeNull();
+        expect(sale.items[0].petSpeciesSnapshot).toBeNull();
+        expect(saleRepo.save).toHaveBeenCalledWith(sale);
+      });
+
+      it('a draft whose customer was deleted drops the leftover pet snapshot on clear (and still saves nothing when there is none)', async () => {
+        const orphan = petDraft(null);
+        saleRepo.findById.mockResolvedValue(orphan);
+        await service.clearCustomer(orphan.id, orphan.userId);
+        expect(orphan.items[0].petNameSnapshot).toBeNull();
+        expect(saleRepo.save).toHaveBeenCalledWith(orphan);
+
+        saleRepo.save.mockClear();
+        const plain = makeDraftSale();
+        saleRepo.findById.mockResolvedValue(plain);
+        await service.clearCustomer(plain.id, plain.userId);
+        expect(saleRepo.save).not.toHaveBeenCalled();
+      });
     });
 
     it('requires customer before setting shipping address', async () => {
@@ -6704,6 +6904,33 @@ describe('SalesService', () => {
   });
 
   describe('addItem', () => {
+    it('without petId it persists exactly as before: no transaction, no pet lookup (customer-pets / T3 regression)', async () => {
+      const sale = Sale.create({ id: 'sale-nopet', userId: 'user-1' });
+      saleRepo.findById.mockResolvedValue(sale);
+      productsService.getProductInfoForSale.mockResolvedValue({
+        productId: 'prod-1',
+        productName: 'Aspirina',
+        variantId: null,
+        variantName: null,
+        unitPriceCents: 5000,
+      });
+      productsService.checkStockAvailability.mockResolvedValue({
+        available: true,
+        currentStock: 100,
+      });
+      const runInTransaction = jest.spyOn(saleRepo, 'runInTransaction');
+
+      const result = await service.addItem('sale-nopet', 'user-1', {
+        productId: 'prod-1',
+        variantId: null,
+        quantity: 2,
+      });
+
+      expect(runInTransaction).not.toHaveBeenCalled();
+      expect(saleRepo.saveDraftItems).toHaveBeenCalledWith(sale);
+      expect(result.items[0]).toMatchObject({ quantity: 2, pet: null });
+    });
+
     it('should add item to draft with price snapshot and emit event', async () => {
       const saleId = 'sale-1';
       const sale = Sale.create({ id: saleId, userId: 'user-1' });
@@ -7732,6 +7959,104 @@ describe('SalesService', () => {
       expect(saleRepo.countNotDeliveredConfirmed).toHaveBeenCalledWith(
         expect.objectContaining({}),
       );
+    });
+
+    describe('?petId= (customer-pets / T3, contract §5)', () => {
+      const CUSTOMER = 'f9d2f368-10be-4f4b-a3cc-0e67735f7f26';
+      const PET = '9f6a0d2c-6b3b-4d86-a1d4-0e3b2f6a7c11';
+      let findPet: jest.Mock;
+      beforeEach(() => {
+        findPet = jest.fn().mockResolvedValue({ id: PET });
+        tenantPrisma.getClient = jest.fn(
+          () => ({ customerPet: { findFirst: findPet } }) as never,
+        );
+        saleRepo.findManyConfirmed.mockResolvedValue([] as any);
+        saleRepo.aggregateSummaryConfirmed.mockResolvedValue({
+          salesCount: 0,
+          totalSoldCents: 0,
+          outstandingDebtCents: 0,
+        });
+        saleRepo.groupByPaymentStatusConfirmed.mockResolvedValue([] as any);
+        saleRepo.countNotDeliveredConfirmed.mockResolvedValue(0);
+        saleRepo.aggregateManyConfirmed.mockResolvedValue({
+          count: 0,
+          totalCents: 0,
+          debtCents: 0,
+        });
+      });
+
+      it('passes the pet to the list/aggregate filter only (KPI base filters stay the customer ones)', async () => {
+        await service.listSales({
+          customerId: [CUSTOMER],
+          petId: PET,
+        } as any);
+
+        expect(findPet).toHaveBeenCalledWith({
+          where: { id: PET, customerId: CUSTOMER, tenantId: 'tenant-1' },
+          select: { id: true },
+        });
+        expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+          expect.objectContaining({ petId: PET, customerId: [CUSTOMER] }),
+        );
+        expect(saleRepo.aggregateManyConfirmed).toHaveBeenCalledWith(
+          expect.objectContaining({ petId: PET }),
+        );
+        expect(
+          saleRepo.aggregateSummaryConfirmed.mock.calls[0][0],
+        ).not.toHaveProperty('petId');
+      });
+
+      it('a pet that is not of that customer (or unknown) is PET_NOT_FOUND and nothing is listed', async () => {
+        findPet.mockResolvedValue(null);
+
+        await expect(
+          service.listSales({ customerId: [CUSTOMER], petId: PET } as any),
+        ).rejects.toMatchObject({ code: 'PET_NOT_FOUND', status: 404 });
+        expect(saleRepo.findManyConfirmed).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['no customerId', undefined],
+        ['two customerIds', [CUSTOMER, 'c-2']],
+      ])('petId with %s is a 400', async (_label, customerId) => {
+        const error = await service
+          .listSales({ customerId, petId: PET } as any)
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(HttpException);
+        expect((error as HttpException).getStatus()).toBe(400);
+        expect((error as HttpException).getResponse()).toEqual({
+          statusCode: 400,
+          error: 'PET_FILTER_REQUIRES_CUSTOMER',
+          message: 'PET_FILTER_REQUIRES_CUSTOMER',
+        });
+        expect(findPet).not.toHaveBeenCalled();
+        expect(saleRepo.findManyConfirmed).not.toHaveBeenCalled();
+      });
+
+      it('an upper-cased petId is looked up and filtered in lower case', async () => {
+        await service.listSales({
+          customerId: [CUSTOMER],
+          petId: PET.toUpperCase(),
+        } as any);
+
+        expect(findPet).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ id: PET }),
+          }),
+        );
+        expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
+          expect.objectContaining({ petId: PET }),
+        );
+      });
+
+      it('without petId no pet is looked up and the filter carries none (regression)', async () => {
+        await service.listSales({ customerId: [CUSTOMER] } as any);
+
+        expect(findPet).not.toHaveBeenCalled();
+        expect(
+          saleRepo.findManyConfirmed.mock.calls[0][0].petId,
+        ).toBeUndefined();
+      });
     });
 
     it('keeps counts independent from tab filters', async () => {

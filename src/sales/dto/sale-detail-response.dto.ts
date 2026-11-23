@@ -1,3 +1,4 @@
+import type { SaleLinePetView } from '../../customer-pets/domain/customer-pet-sale-line';
 import type { SaleCancelReason } from '../domain/sale.entity';
 import type { SaleRefundMethod } from '../domain/sale.repository';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
@@ -91,6 +92,14 @@ export interface SaleDetailItemDto {
    * already selected by the mapper so we just surface it on the wire.
    */
   promotionId: string | null;
+  /**
+   * customer-pets / T3 (contract §4.1): the pet the line is for. `id`, `name`
+   * and `species` come from the snapshot copied at assignment, `status` is the
+   * pet's CURRENT status (null when the pet row is gone but the snapshot
+   * stays). `null` — never an object of nulls — for old lines, lines without
+   * a pet and erased pets.
+   */
+  pet: SaleLinePetView | null;
 }
 
 export interface SaleDetailPaymentDto {

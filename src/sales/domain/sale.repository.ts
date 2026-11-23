@@ -1,3 +1,4 @@
+import type { SaleLinePetView } from '../../customer-pets/domain/customer-pet-sale-line';
 import type { StaffSaleHoldView } from './sale-hold';
 import { Sale } from './sale.entity';
 import { SaleItem } from './sale-item.entity';
@@ -172,6 +173,14 @@ export interface ISaleRepository {
    * Find a sale by id and lock it for charge transaction.
    */
   findByIdForUpdate(id: string): Promise<Sale | null>;
+
+  /**
+   * Locks the sale row `FOR UPDATE` (tenant-qualified; no-op when it does not
+   * exist) WITHOUT reading it. First step of the lock order sales row → pets
+   * → sale_items rows for the draft writes that carry a pet (customer-pets /
+   * T3).
+   */
+  lockSaleForUpdate(id: string): Promise<void>;
 
   acquireChargeIdempotency(
     saleId: string,
@@ -623,6 +632,8 @@ export interface ISaleRepository {
        * the BXGY discriminator — we're just promoting it to the wire.
        */
       promotionId: string | null;
+      /** customer-pets / T3 (contract §4.1): the line's pet or null. */
+      pet: SaleLinePetView | null;
     }>;
     payments: Array<{
       paymentId: string;

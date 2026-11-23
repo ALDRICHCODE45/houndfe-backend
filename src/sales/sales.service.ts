@@ -7,6 +7,7 @@
 import { Prisma } from '@prisma/client';
 import {
   BadRequestException,
+  HttpException,
   Inject,
   Injectable,
   NotFoundException,
@@ -15,7 +16,13 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
-import type { SaleItemProps } from './domain/sale-item.entity';
+import type { SaleItem, SaleItemProps } from './domain/sale-item.entity';
+import { CustomerPetError } from '../customer-pets/domain/customer-pet-error';
+import {
+  resolveSaleLinePet,
+  type SaleLinePetFacts,
+  type SaleLinePetSnapshot,
+} from '../customer-pets/domain/customer-pet-sale-line';
 import type { BotBackorderCheckout } from './domain/backorder-checkout.port';
 import type { ShippingAddressSnapshot } from './domain/shipping-address-snapshot';
 import type { ISaleRepository } from './domain/sale.repository';
@@ -77,6 +84,7 @@ import {
 } from './dto/refund-settlement-response.dto';
 import type { SaleDetailResponseDto } from './dto/sale-detail-response.dto';
 import type { AssignCustomerDto } from './dto/assign-customer.dto';
+import type { SetItemPetDto } from './dto/set-item-pet.dto';
 import type { AssignSellerDto } from './dto/assign-seller.dto';
 import type { SetShippingAddressDto } from './dto/set-shipping-address.dto';
 import type { UpdateSaleDueDateDto } from './dto/update-sale-due-date.dto';
@@ -177,6 +185,9 @@ type ConfirmBotSaleInput = {
     // and the promotion engine. Needs `backorders`; only the atomic checkout
     // supplies both.
     backorderId?: string | null;
+    // customer-pets / T3 (contract §4.2) — the pet this line is for: ACTIVE,
+    // of `customerId`. Lines that stack (same product + variant) must agree.
+    petId?: string | null;
   }>;
   // restock-backorder / T3 — the checkout's handle on the backorders its lines
   // confirm (validation, locks, CONFIRMED). Required iff a line has `backorderId`.
@@ -613,6 +624,16 @@ function normalizeCollectionRequestPayments(dto: {
       paymentMethodId: dto.paymentMethodId,
     },
   ];
+}
+
+/** `SaleItemProps` members of a validated line pet (none without pet). */
+function linePetProps(
+  pet: SaleLinePetSnapshot | undefined,
+): Pick<
+  SaleItemProps,
+  'petId' | 'petNameSnapshot' | 'petSpeciesSnapshot' | 'petStatus'
+> {
+  return pet ? { ...pet, petStatus: 'ACTIVE' } : {};
 }
 
 @Injectable()
@@ -1376,25 +1397,54 @@ export class SalesService {
 
     // Add item to sale (stacks if same product+variant)
     const itemId = randomUUID();
-    sale.addItem({
-      id: itemId,
-      saleId,
-      productId: productInfo.productId,
-      variantId: productInfo.variantId,
-      productName: productInfo.productName,
-      variantName: productInfo.variantName,
-      imageUrl: productInfo.imageUrl,
-      quantity: dto.quantity,
-      unitPriceCents: productInfo.unitPriceCents,
-      unitPriceCurrency: 'MXN',
-    });
+    const addTo = (target: Sale) =>
+      target.addItem({
+        id: itemId,
+        saleId,
+        productId: productInfo.productId,
+        variantId: productInfo.variantId,
+        productName: productInfo.productName,
+        variantName: productInfo.variantName,
+        imageUrl: productInfo.imageUrl,
+        quantity: dto.quantity,
+        unitPriceCents: productInfo.unitPriceCents,
+        unitPriceCurrency: 'MXN',
+      });
 
     // Work Unit 4 — recompute POS promotions on the new item state BEFORE
     // persisting. Same-engine call (so charge totals will agree with the
     // draft preview once Unit 5 wires charge).
-    await this.recomputePricingAndPromotions(sale);
-
-    await this.saleRepo.saveDraftItems(sale);
+    let saved: Sale = sale;
+    if (dto.petId === undefined && !sale.hasLinePets()) {
+      // No pet involved anywhere: exactly the lock-free flow of before.
+      addTo(sale);
+      await this.recomputePricingAndPromotions(sale);
+      await this.saleRepo.saveDraftItems(sale);
+    } else {
+      // customer-pets / T3 — a pet is assigned or already on a line, so the
+      // write follows the single lock order sales row → pets (FOR SHARE) →
+      // sale_items rows, the one `save` and the charge use and the customer
+      // DELETE honors. The draft is re-read under the row lock (a customer
+      // delete may have detached it meanwhile), the line added to that copy,
+      // and an explicit `petId` (uuid or null) validated under the pet lock
+      // held until this transaction commits.
+      await this.saleRepo.runInTransaction(async () => {
+        await this.saleRepo.lockSaleForUpdate(saleId);
+        const fresh = await this.saleRepo.findById(saleId);
+        if (!fresh) throw new EntityNotFoundError('Sale', saleId);
+        fresh.ensureDraft();
+        addTo(fresh);
+        if (dto.petId !== undefined) {
+          const line = fresh.items.find((i) =>
+            i.matches(productInfo.productId, productInfo.variantId),
+          );
+          await this.applyLinePet(fresh, line!, dto.petId);
+        }
+        await this.recomputePricingAndPromotions(fresh);
+        await this.saleRepo.saveDraftItems(fresh);
+        saved = fresh;
+      });
+    }
 
     this.eventEmitter.emit(
       'sale.item.added',
@@ -1409,7 +1459,7 @@ export class SalesService {
     );
 
     return withStockWarning(
-      sale.toResponse(),
+      saved.toResponse(),
       existingItem?.id ?? itemId,
       stockWarning,
     );
@@ -1485,6 +1535,106 @@ export class SalesService {
   }
 
   /**
+   * customer-pets / T3 (contract §4.2) — assigns (uuid) or clears (null) the pet
+   * of one draft line. Everything runs in one transaction in the order sales
+   * row (FOR UPDATE) → pet (FOR SHARE) → sale_items rows, so a concurrent pet
+   * erase (pet `FOR UPDATE`, then scrubs `sale_items`) or customer DELETE
+   * either finished first (→ PET_NOT_FOUND / PET_CUSTOMER_MISMATCH) or waits
+   * for this commit and scrubs the new line.
+   */
+  async setItemPet(
+    saleId: string,
+    userId: string,
+    itemId: string,
+    dto: SetItemPetDto,
+  ) {
+    return this.saleRepo.runInTransaction(async () => {
+      // Lock order sales row → pets → sale_items rows (see `addItem`): the row
+      // lock first, the draft read under it.
+      await this.saleRepo.lockSaleForUpdate(saleId);
+      const sale = await this.saleRepo.findById(saleId);
+      if (!sale) {
+        throw new EntityNotFoundError('Sale', saleId);
+      }
+      if (sale.userId !== userId) {
+        throw new BusinessRuleViolationError(
+          `User ${userId} does not own this sale`,
+        );
+      }
+      sale.ensureDraft();
+      const item = sale.items.find((i) => i.id === itemId);
+      if (!item) {
+        throw new BusinessRuleViolationError(
+          'SALE_ITEM_NOT_FOUND',
+          'SALE_ITEM_NOT_FOUND',
+        );
+      }
+      await this.applyLinePet(sale, item, dto.petId);
+      const saved = await this.saleRepo.saveDraftItems(sale);
+      return saved.toResponse();
+    });
+  }
+
+  /** Applies `petId` (uuid: validated + snapshot; null: clear) to a draft line. */
+  private async applyLinePet(
+    sale: Sale,
+    item: SaleItem,
+    petId: string | null,
+  ): Promise<void> {
+    if (petId === null) {
+      item.clearPet();
+      return;
+    }
+    const id = petId.toLowerCase();
+    const snapshots = await this.lockAndResolveLinePets(sale.customerId, [id]);
+    item.assignPet(snapshots.get(id)!);
+  }
+
+  /**
+   * Reads the pets `FOR SHARE` (tenant-qualified, in id order) in the AMBIENT
+   * transaction and applies the three line rules to each, in the order given:
+   * unknown → PET_NOT_FOUND 404, another customer's (or no customer) →
+   * PET_CUSTOMER_MISMATCH 422, archived → PET_ARCHIVED 422. The shared locks
+   * stay until the caller's transaction ends. This takes ONLY the pet locks;
+   * the caller owns what comes before. The real orders:
+   *  - POS drafts: sales row FOR UPDATE → pets FOR SHARE (id order) →
+   *    sale_items rows.
+   *  - Bot checkout (`confirmBotSale`): phone advisory lock → customer FOR
+   *    UPDATE (taken by the checkout, a plain read here) → pets FOR SHARE →
+   *    products/lots/variants → backorder rows; the sale row does not exist yet.
+   *  - Customer DELETE: customer → its sale rows → its pets → cascades.
+   * Ids are matched in lower case (a UUID may arrive upper-cased).
+   */
+  private async lockAndResolveLinePets(
+    customerId: string | null,
+    petIds: readonly string[],
+  ): Promise<Map<string, SaleLinePetSnapshot>> {
+    const distinct = [...new Set(petIds.map((id) => id.toLowerCase()))];
+    const snapshots = new Map<string, SaleLinePetSnapshot>();
+    if (distinct.length === 0) return snapshots;
+    // A sale without customer refuses any pet without reading anything.
+    if (customerId === null) resolveSaleLinePet(distinct[0], null, null);
+    const tenantId = this.tenantPrisma.getTenantId();
+    const rows = await this.tenantPrisma.getClient().$queryRaw<
+      Array<{
+        id: string;
+        customerId: string;
+        name: string;
+        species: SaleLinePetFacts['species'];
+        status: SaleLinePetFacts['status'];
+      }>
+    >(Prisma.sql`SELECT id, "customerId", name, species::text AS species, status::text AS status FROM customer_pets WHERE id IN (${Prisma.join([...distinct].sort())}) AND "tenantId" = ${tenantId} ORDER BY id FOR SHARE`);
+    const found = new Map(rows.map((row) => [row.id, row]));
+    for (const petId of distinct) {
+      snapshots.set(
+        petId,
+        resolveSaleLinePet(petId, customerId, found.get(petId)),
+      );
+    }
+    return snapshots;
+  }
+
+  /**
    * Clear all items from a draft sale (idempotent).
    */
   async clearItems(saleId: string, userId: string) {
@@ -1502,17 +1652,19 @@ export class SalesService {
     }
     sale.ensureDraft();
 
-    const clearedItemCount = sale.items.length;
-    sale.clearItems();
-
-    await this.saleRepo.saveDraftItems(sale);
+    let clearedItemCount = 0;
+    const saved = await this.writeDraftInLockOrder(sale, async (draft) => {
+      clearedItemCount = draft.items.length;
+      draft.clearItems();
+      await this.saleRepo.saveDraftItems(draft);
+    });
 
     this.eventEmitter.emit(
       'sale.cleared',
       new SaleClearedEvent(saleId, clearedItemCount),
     );
 
-    return sale.toResponse();
+    return saved.toResponse();
   }
 
   async removeItem(saleId: string, actorId: string, itemId: string) {
@@ -1527,17 +1679,45 @@ export class SalesService {
     }
     sale.ensureDraft();
 
-    sale.removeItem(itemId);
-    // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
-    // removed item, and remaining items re-evaluate against the new state.
-    await this.recomputePricingAndPromotions(sale);
-    await this.saleRepo.saveDraftItems(sale);
+    const saved = await this.writeDraftInLockOrder(sale, async (draft) => {
+      draft.removeItem(itemId);
+      // Work Unit 4 — recompute so any ORDER_DISCOUNT no longer references the
+      // removed item, and remaining items re-evaluate against the new state.
+      await this.recomputePricingAndPromotions(draft);
+      await this.saleRepo.saveDraftItems(draft);
+    });
     this.eventEmitter.emit(
       'sale.item.removed',
       new SaleItemRemovedEvent(saleId, itemId, actorId, new Date()),
     );
 
-    return sale.toResponse();
+    return saved.toResponse();
+  }
+
+  /**
+   * customer-pets / T3 — runs a draft write. Without any pet line it is the
+   * plain lock-free flow on the loaded draft. With one, it follows the lock
+   * order sales row (FOR UPDATE) → pets → sale_items rows in one transaction
+   * and applies `write` to the draft RE-READ under the row lock: a customer
+   * DELETE that finished meanwhile detached it (customerId null, line pets
+   * nulled) and the write must not put the stale copy back.
+   */
+  private async writeDraftInLockOrder(
+    sale: Sale,
+    write: (draft: Sale) => Promise<void>,
+  ): Promise<Sale> {
+    if (!sale.hasLinePets()) {
+      await write(sale);
+      return sale;
+    }
+    return this.saleRepo.runInTransaction(async () => {
+      await this.saleRepo.lockSaleForUpdate(sale.id);
+      const fresh = await this.saleRepo.findById(sale.id);
+      if (!fresh) throw new EntityNotFoundError('Sale', sale.id);
+      fresh.ensureDraft();
+      await write(fresh);
+      return fresh;
+    });
   }
 
   /**
@@ -1749,6 +1929,7 @@ export class SalesService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
+    await this.assertHistoryPetOfCustomer(query);
     const extendedFilters = this.toSalesListExtendedFilter(query);
     const baseFilters: SalesListBaseFilter = {
       q: extendedFilters.q,
@@ -2028,6 +2209,38 @@ export class SalesService {
     });
   }
 
+  /**
+   * customer-pets / T3 (contract §5) — `?petId=` narrows ONE customer's history,
+   * so it needs exactly one `customerId` (else 400) and the pet must be of that
+   * customer in this tenant; a foreign or unknown pet is `404 PET_NOT_FOUND`
+   * (never an empty list).
+   */
+  private async assertHistoryPetOfCustomer(
+    query: ListSalesQueryDto,
+  ): Promise<void> {
+    if (query.petId === undefined) return;
+    if (query.customerId?.length !== 1) {
+      // Code-only envelope, like every pet error (contract §8).
+      throw new HttpException(
+        {
+          statusCode: 400,
+          error: 'PET_FILTER_REQUIRES_CUSTOMER',
+          message: 'PET_FILTER_REQUIRES_CUSTOMER',
+        },
+        400,
+      );
+    }
+    const pet = await this.tenantPrisma.getClient().customerPet.findFirst({
+      where: {
+        id: query.petId.toLowerCase(),
+        customerId: query.customerId[0],
+        tenantId: this.tenantPrisma.getTenantId(),
+      },
+      select: { id: true },
+    });
+    if (!pet) throw new CustomerPetError('PET_NOT_FOUND');
+  }
+
   private toSalesListExtendedFilter(
     query: ListSalesQueryDto,
   ): SalesListExtendedFilter {
@@ -2051,6 +2264,7 @@ export class SalesService {
       customerIncludeNull: query.customerIncludeNull,
       confirmedFrom: query.confirmedFrom,
       confirmedTo: query.confirmedTo,
+      petId: query.petId?.toLowerCase(),
     };
   }
 
@@ -2718,7 +2932,11 @@ export class SalesService {
 
     const previousCustomerId = sale.customerId;
     const previousShippingAddressId = sale.shippingAddressId;
+    // customer-pets / T3 (contract §4.2): a different customer clears every
+    // line pet; the response says so only when something was actually cleared.
+    const hadLinePets = sale.hasLinePets();
     sale.assignCustomer(dto.customerId, dto.shippingAddressId ?? null);
+    const petsCleared = hadLinePets && !sale.hasLinePets();
     sale.captureShippingAddress(shippingAddress);
     // Work Unit 4 — recompute (SPECIFIC / REGISTERED_ONLY promos only become
     // eligible after the eligible customer is assigned; removing the customer
@@ -2763,7 +2981,8 @@ export class SalesService {
       }
     }
 
-    return this.saleRepo.findDraftResponseById(sale.id);
+    const draft = await this.saleRepo.findDraftResponseById(sale.id);
+    return draft ? { ...draft, petsCleared } : draft;
   }
 
   async clearCustomer(saleId: string, userId: string): Promise<void> {
@@ -2781,9 +3000,15 @@ export class SalesService {
 
     if (!sale.customerId) {
       // A deleted customer nulls customerId and the address FK but keeps the
-      // draft's copy; clearing must still drop that copy.
-      if (sale.shippingAddressSnapshot) {
+      // draft's copy; clearing must still drop that copy. Its lines may keep
+      // the pet snapshot of the deleted customer's pets (contract §4.1): drop
+      // them too (customer-pets / T3).
+      const clearedPets = sale.clearLinePets();
+      const hadAddressCopy = Boolean(sale.shippingAddressSnapshot);
+      if (hadAddressCopy) {
         sale.setShippingAddress(null);
+      }
+      if (clearedPets || hadAddressCopy) {
         await this.saleRepo.save(sale);
       }
       return;
@@ -3857,7 +4082,11 @@ export class SalesService {
       // `fixedPriceCents` (restock-backorder / T3): a backorder line at its
       // frozen price, added after the promotion engine ran.
       items: Array<
-        ConfirmBotSaleInput['items'][number] & { fixedPriceCents?: number }
+        ConfirmBotSaleInput['items'][number] & {
+          fixedPriceCents?: number;
+          // customer-pets / T3 — the validated snapshot of `petId`.
+          pet?: SaleLinePetSnapshot;
+        }
       >;
       excludeRegisteredOnlyPromotions?: boolean;
     },
@@ -3885,6 +4114,7 @@ export class SalesService {
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
         unitPriceCurrency: 'MXN',
+        ...linePetProps(item.pet),
       });
     }
     // D5 — bind the customer's default price list BEFORE the engine runs, so
@@ -3923,6 +4153,7 @@ export class SalesService {
         quantity: item.quantity,
         unitPriceCents: item.fixedPriceCents!,
         unitPriceCurrency: 'MXN',
+        ...linePetProps(item.pet),
       });
     }
     return { sale, ...metadata };
@@ -4161,6 +4392,17 @@ export class SalesService {
         );
       }
 
+      // customer-pets / T3 (contract §4.2) — the lines' pets: ACTIVE, of this
+      // customer, read FOR SHARE right after the customer step and before any
+      // stock lock (order: phone → customer → pets → products/lots/variants →
+      // backorder rows), so a concurrent pet erase (pet FOR UPDATE, then
+      // scrubs sale_items) cannot race the insert below. Without a petId on
+      // any line nothing is read.
+      const linePets = await this.lockAndResolveLinePets(
+        customer.id,
+        input.items.flatMap((item) => (item.petId ? [item.petId] : [])),
+      );
+
       // O1 — an optional shipping address must exist in this tenant AND
       // belong to the selected customer. Mirrors the POS contracts in
       // `assignCustomer` (sales.service.ts:2081) and
@@ -4239,7 +4481,10 @@ export class SalesService {
           ...input,
           shippingAddressId,
           items: input.items.map((item) => {
-            if (!item.backorderId) return item;
+            const pet = item.petId
+              ? linePets.get(item.petId.toLowerCase())
+              : undefined;
+            if (!item.backorderId) return pet ? { ...item, pet } : item;
             const fixedPriceCents = frozenPrices.get(item.backorderId);
             if (fixedPriceCents === undefined) {
               throw new BusinessRuleViolationError(
@@ -4247,7 +4492,7 @@ export class SalesService {
                 'BACKORDER_NOT_FOUND',
               );
             }
-            return { ...item, fixedPriceCents };
+            return { ...item, fixedPriceCents, ...(pet ? { pet } : {}) };
           }),
         },
         customer.globalPriceListId ?? null,
