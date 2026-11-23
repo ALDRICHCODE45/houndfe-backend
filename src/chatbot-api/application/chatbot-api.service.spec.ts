@@ -51,6 +51,11 @@ type MockSaleRecord = {
     variantName: string | null;
     quantity: number;
     unitPriceCents: number;
+    // customer-pets / T2: pet columns of the line and the joined current status.
+    petId?: string | null;
+    petNameSnapshot?: string | null;
+    petSpeciesSnapshot?: 'DOG' | 'CAT' | 'OTHER' | null;
+    pet?: { status: 'ACTIVE' | 'ARCHIVED' } | null;
   }>;
   payments: Array<{
     method: string;
@@ -108,7 +113,14 @@ type MockTenantClient = {
   lot: {
     findMany: jest.Mock<Promise<MockLot[]>, [unknown?]>;
   };
+  // customer-pets / T2: ACTIVE pets of by-phone and the `?petId=` ownership check.
+  customerPet: {
+    findMany: jest.Mock<Promise<MockPetRow[]>, [unknown?]>;
+    findFirst: jest.Mock<Promise<{ id: string } | null>, [unknown?]>;
+  };
 };
+
+type MockPetRow = Record<string, unknown>;
 
 type MockLot = { productId: string; quantity: number; expirationDate: Date };
 
@@ -688,6 +700,10 @@ describe('ChatbotApiService', () => {
         findMany: jest
           .fn<Promise<MockLot[]>, [unknown?]>()
           .mockResolvedValue([]),
+      },
+      customerPet: {
+        findMany: jest.fn<Promise<MockPetRow[]>, [unknown?]>(),
+        findFirst: jest.fn<Promise<{ id: string } | null>, [unknown?]>(),
       },
     };
     tenantPrisma = {
@@ -2530,6 +2546,296 @@ describe('ChatbotApiService', () => {
         { reason: 'ORDER_ERROR' },
         { origin: 'bot' },
       );
+    });
+  });
+
+  // ── customer-pets / T2 (S6 by-phone pets, S8 order history by pet) ──────
+
+  describe('customer pets', () => {
+    const phoneInput = { phoneCountryCode: '52', phone: '5512345678' };
+
+    function petCustomer(): Customer {
+      return Customer.fromPersistence({
+        id: 'cust-1',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        phoneCountryCode: '52',
+        phone: '5512345678',
+        email: null,
+        globalPriceListId: null,
+        preferredPaymentMethod: null,
+        comments: null,
+        businessName: null,
+        fiscalZipCode: null,
+        rfc: null,
+        fiscalRegime: null,
+        billingStreet: null,
+        billingExteriorNumber: null,
+        billingInteriorNumber: null,
+        billingZipCode: null,
+        billingNeighborhood: null,
+        billingMunicipality: null,
+        billingCity: null,
+        billingState: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    function petRow(over: Record<string, unknown> = {}): MockPetRow {
+      return {
+        id: 'pet-1',
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        name: 'Bruno',
+        nameKey: 'bruno',
+        species: 'DOG',
+        speciesOther: null,
+        breed: 'Chihuahua',
+        size: 'SMALL',
+        birthDate: new Date('2026-01-01T00:00:00.000Z'),
+        birthDatePrecision: 'MONTH',
+        allergies: 'Pollo',
+        notes: null,
+        status: 'ACTIVE',
+        archivedAt: null,
+        archivedReason: null,
+        createdVia: 'CHATBOT',
+        version: 3,
+        createdAt: new Date('2026-02-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-03-01T00:00:00.000Z'),
+        ...over,
+      };
+    }
+
+    function saleRow(items: MockSaleRecord['items']): MockSaleRecord {
+      return {
+        id: 'sale-1',
+        folio: 'BOT-0001',
+        status: 'CONFIRMED',
+        paymentStatus: 'CREDIT',
+        deliveryStatus: 'PENDING',
+        channel: 'ONLINE',
+        totalCents: 1000,
+        paidCents: 0,
+        debtCents: 1000,
+        confirmedAt: new Date('2026-06-11T00:00:00.000Z'),
+        customerId: 'cust-1',
+        items,
+        payments: [],
+        shippingAddress: null,
+      };
+    }
+
+    const line = (over: Partial<MockSaleRecord['items'][number]> = {}) => ({
+      productId: 'prod-1',
+      variantId: null,
+      productName: 'Croquetas',
+      variantName: null,
+      quantity: 1,
+      unitPriceCents: 1000,
+      ...over,
+    });
+
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-11-23T18:00:00.000Z'));
+      customerRepository.findByPhone.mockResolvedValue(petCustomer());
+      tenantPrisma
+        .getClient()
+        .customerAddress.findFirst.mockResolvedValue(null);
+    });
+
+    afterEach(() => jest.useRealTimers());
+
+    describe('findCustomerByPhone', () => {
+      it('adds the ACTIVE pets with the full view and derived age when includePets is set', async () => {
+        const client = tenantPrisma.getClient();
+        client.customerPet.findMany.mockResolvedValue([petRow()]);
+
+        const result = await service.findCustomerByPhone(phoneInput, {
+          includePets: true,
+        });
+
+        expect(client.customerPet.findMany.mock.calls).toEqual([
+          [
+            {
+              where: {
+                tenantId: 'tenant-1',
+                customerId: 'cust-1',
+                status: 'ACTIVE',
+              },
+              orderBy: [
+                { nameKey: 'asc' },
+                { createdAt: 'asc' },
+                { id: 'asc' },
+              ],
+            },
+          ],
+        ]);
+        expect(result.customer?.pets).toEqual([
+          {
+            id: 'pet-1',
+            customerId: 'cust-1',
+            name: 'Bruno',
+            species: 'DOG',
+            speciesOther: null,
+            breed: 'Chihuahua',
+            size: 'SMALL',
+            birthDate: '2026-01-01',
+            birthDatePrecision: 'MONTH',
+            ageMonths: 10,
+            ageLabel: '~10 meses',
+            allergies: 'Pollo',
+            notes: null,
+            status: 'ACTIVE',
+            archivedAt: null,
+            archivedReason: null,
+            createdVia: 'CHATBOT',
+            version: 3,
+            createdAt: '2026-02-01T00:00:00.000Z',
+            updatedAt: '2026-03-01T00:00:00.000Z',
+          },
+        ]);
+      });
+
+      it('returns pets: [] (key present) for a customer without active pets', async () => {
+        tenantPrisma.getClient().customerPet.findMany.mockResolvedValue([]);
+
+        const result = await service.findCustomerByPhone(phoneInput, {
+          includePets: true,
+        });
+
+        expect(result.customer?.pets).toEqual([]);
+      });
+
+      it.each([[undefined], [{}], [{ includePets: false }]])(
+        'omits the pets key and never reads pets without includePets (%j)',
+        async (options) => {
+          const client = tenantPrisma.getClient();
+
+          const result = await service.findCustomerByPhone(phoneInput, options);
+
+          expect(result.found).toBe(true);
+          expect(result.customer).not.toHaveProperty('pets');
+          expect(Object.keys(result.customer ?? {})).toEqual([
+            'customerId',
+            'firstName',
+            'lastName',
+            'phoneCountryCode',
+            'phone',
+            'preferredPaymentMethod',
+            'address',
+          ]);
+          expect(client.customerPet.findMany).not.toHaveBeenCalled();
+        },
+      );
+    });
+
+    describe('getOrderHistoryByPhone', () => {
+      it('maps the pet of each line: snapshot + current status, null without snapshot, status null when the row is gone', async () => {
+        const client = tenantPrisma.getClient();
+        client.sale.findMany.mockResolvedValue([
+          saleRow([
+            line({
+              petId: 'pet-1',
+              petNameSnapshot: 'Bruno',
+              petSpeciesSnapshot: 'DOG',
+              pet: { status: 'ARCHIVED' },
+            }),
+            line({ productId: 'prod-2' }),
+            line({
+              productId: 'prod-3',
+              petId: null,
+              petNameSnapshot: 'Michi',
+              petSpeciesSnapshot: 'CAT',
+              pet: null,
+            }),
+          ]),
+        ]);
+
+        const result = await service.getOrderHistoryByPhone(phoneInput);
+
+        expect(result[0].items.map((item) => item.pet)).toEqual([
+          { id: 'pet-1', name: 'Bruno', species: 'DOG', status: 'ARCHIVED' },
+          null,
+          { id: null, name: 'Michi', species: 'CAT', status: null },
+        ]);
+        expect(client.customerPet.findFirst).not.toHaveBeenCalled();
+        const [query] = client.sale.findMany.mock.calls[0] as [
+          { where: Record<string, unknown> },
+        ];
+        expect(query.where).toEqual({
+          tenantId: 'tenant-1',
+          customerId: 'cust-1',
+          status: 'CONFIRMED',
+        });
+      });
+
+      it('filters by petId, keeps every line of the matching orders', async () => {
+        const client = tenantPrisma.getClient();
+        client.customerPet.findFirst.mockResolvedValue({ id: 'pet-1' });
+        client.sale.findMany.mockResolvedValue([
+          saleRow([
+            line({
+              petId: 'pet-1',
+              petNameSnapshot: 'Bruno',
+              petSpeciesSnapshot: 'DOG',
+              pet: { status: 'ACTIVE' },
+            }),
+            line({ productId: 'prod-2' }),
+          ]),
+        ]);
+
+        const result = await service.getOrderHistoryByPhone({
+          ...phoneInput,
+          petId: 'pet-1',
+        });
+
+        expect(client.customerPet.findFirst.mock.calls).toEqual([
+          [
+            {
+              where: {
+                id: 'pet-1',
+                customerId: 'cust-1',
+                tenantId: 'tenant-1',
+              },
+              select: { id: true },
+            },
+          ],
+        ]);
+        const [query] = client.sale.findMany.mock.calls[0] as [
+          { where: Record<string, unknown> },
+        ];
+        expect(query.where).toEqual({
+          tenantId: 'tenant-1',
+          customerId: 'cust-1',
+          status: 'CONFIRMED',
+          items: { some: { petId: 'pet-1' } },
+        });
+        expect(result).toHaveLength(1);
+        expect(result[0].items).toHaveLength(2);
+      });
+
+      it('rejects a petId that is not a pet of the customer with PET_NOT_FOUND, never an empty list', async () => {
+        const client = tenantPrisma.getClient();
+        client.customerPet.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.getOrderHistoryByPhone({ ...phoneInput, petId: 'foreign' }),
+        ).rejects.toMatchObject({ code: 'PET_NOT_FOUND', status: 404 });
+        expect(client.sale.findMany).not.toHaveBeenCalled();
+      });
+
+      it('rejects a petId with PET_NOT_FOUND when no customer matches the phone', async () => {
+        const client = tenantPrisma.getClient();
+        customerRepository.findByPhone.mockResolvedValue(null);
+
+        await expect(
+          service.getOrderHistoryByPhone({ ...phoneInput, petId: 'pet-1' }),
+        ).rejects.toMatchObject({ code: 'PET_NOT_FOUND' });
+        expect(client.customerPet.findFirst).not.toHaveBeenCalled();
+        expect(client.sale.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 

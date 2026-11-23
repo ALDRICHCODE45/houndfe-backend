@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import request from 'supertest';
 import { ClsService } from 'nestjs-cls';
 import { ChatbotApiController } from './chatbot-api.controller';
+import { CustomerPetError } from '../../customer-pets/domain/customer-pet-error';
 import { ChatbotApiService } from '../application/chatbot-api.service';
 import {
   IServiceCredentialRepository,
@@ -313,6 +314,31 @@ describe('ChatbotApiController', () => {
           );
         }
 
+        // customer-pets / T2: `pets:read` gates the additive `customer.pets`.
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_pets-read-key').digest('hex')
+        ) {
+          return Promise.resolve(
+            makeCredential(
+              ['customers:read', 'pets:read'],
+              'svc_pets-read-key',
+            ),
+          );
+        }
+
+        if (
+          hashedKey ===
+          createHash('sha256').update('svc_pets-write-key').digest('hex')
+        ) {
+          return Promise.resolve(
+            makeCredential(
+              ['customers:read', 'pets:write', 'pets:delete'],
+              'svc_pets-write-key',
+            ),
+          );
+        }
+
         return Promise.resolve(null);
       }),
       touchLastUsedAt: jest.fn(),
@@ -446,14 +472,39 @@ describe('ChatbotApiController', () => {
           found: boolean;
           customer: { customerId: string };
         };
-        expect(service.findCustomerByPhone).toHaveBeenCalledWith({
-          phoneCountryCode: '+52',
-          phone: '55 1234 5678',
-        });
+        expect(service.findCustomerByPhone).toHaveBeenCalledWith(
+          {
+            phoneCountryCode: '+52',
+            phone: '55 1234 5678',
+          },
+          { includePets: false },
+        );
         expect(response.found).toBe(true);
         expect(response.customer.customerId).toBe('cust-1');
       });
   });
+
+  // customer-pets / T2: only `pets:read` (with customers:read) asks for pets.
+  it.each([
+    ['svc_pets-read-key', true],
+    ['svc_pets-write-key', false],
+    ['svc_limited-key', false],
+  ])(
+    'GET /chatbot-api/customers/by-phone with %s passes includePets=%s',
+    async (token, includePets) => {
+      await request(httpServer())
+        .get('/chatbot-api/customers/by-phone')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ phoneCountryCode: '+52', phone: '55 1234 5678' })
+        .expect(200);
+
+      expect(service.findCustomerByPhone).toHaveBeenCalledTimes(1);
+      expect(service.findCustomerByPhone).toHaveBeenCalledWith(
+        { phoneCountryCode: '+52', phone: '55 1234 5678' },
+        { includePets },
+      );
+    },
+  );
 
   it('GET /chatbot-api/customers/by-phone returns 400 when the phone query is missing', async () => {
     await request(httpServer())
@@ -1401,6 +1452,66 @@ describe('ChatbotApiController', () => {
         expect(Array.isArray(body)).toBe(true);
         expect((body as unknown[]).length).toBeGreaterThan(0);
       });
+  });
+
+  describe('GET /chatbot-api/customers/by-phone/:phone/orders ?petId (customer-pets T2)', () => {
+    const route = '/chatbot-api/customers/by-phone/5512345678/orders';
+    const petId = '0b91e404-0000-4000-8000-000000000001';
+
+    it('without petId calls the service exactly as before (no petId member)', async () => {
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .query({ phoneCountryCode: '52' })
+        .expect(200);
+
+      expect(service.getOrderHistoryByPhone).toHaveBeenCalledWith({
+        phoneCountryCode: '52',
+        phone: '5512345678',
+      });
+    });
+
+    it('passes a valid petId through', async () => {
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .query({ phoneCountryCode: '52', petId })
+        .expect(200);
+
+      expect(service.getOrderHistoryByPhone).toHaveBeenCalledWith({
+        phoneCountryCode: '52',
+        phone: '5512345678',
+        petId,
+      });
+    });
+
+    it('answers 400 for an invalid uuid and does not call the service', async () => {
+      await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .query({ phoneCountryCode: '52', petId: 'not-a-uuid' })
+        .expect(400);
+
+      expect(service.getOrderHistoryByPhone).not.toHaveBeenCalled();
+    });
+
+    it("answers the code-only 404 PET_NOT_FOUND when the pet is not the customer's", async () => {
+      service.getOrderHistoryByPhone.mockRejectedValueOnce(
+        new CustomerPetError('PET_NOT_FOUND'),
+      );
+
+      const response = await request(httpServer())
+        .get(route)
+        .set('Authorization', 'Bearer svc_sales-key')
+        .query({ phoneCountryCode: '52', petId })
+        .expect(404);
+
+      expect(response.body as unknown).toEqual({
+        statusCode: 404,
+        error: 'PET_NOT_FOUND',
+        message: 'PET_NOT_FOUND',
+      });
+    });
   });
 
   // ── D.2.1 Bot cancel route ────────────────────────────────────────────────

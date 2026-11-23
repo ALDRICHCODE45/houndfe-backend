@@ -103,4 +103,91 @@ describe('BotAuditInterceptor', () => {
       },
     });
   });
+
+  // customer-pets / T2: every pet bot route is on the allowlist.
+  it.each([
+    [
+      'GET',
+      '/chatbot-api/customers/:customerId/pets',
+      'customer_pets.list',
+      'customer',
+      'customerId',
+      'c-1',
+    ],
+    [
+      'POST',
+      '/chatbot-api/customers/:customerId/pets',
+      'customer_pets.create',
+      'customer',
+      'customerId',
+      'c-1',
+    ],
+    [
+      'PATCH',
+      '/chatbot-api/customers/:customerId/pets/:petId',
+      'customer_pets.update',
+      'customer_pet',
+      'petId',
+      'p-1',
+    ],
+    [
+      'POST',
+      '/chatbot-api/customers/:customerId/pets/:petId/archive',
+      'customer_pets.archive',
+      'customer_pet',
+      'petId',
+      'p-1',
+    ],
+    [
+      'POST',
+      '/chatbot-api/customers/:customerId/pets/:petId/restore',
+      'customer_pets.restore',
+      'customer_pet',
+      'petId',
+      'p-1',
+    ],
+    [
+      'DELETE',
+      '/chatbot-api/customers/:customerId/pets/:petId',
+      'customer_pets.delete',
+      'customer_pet',
+      'petId',
+      'p-1',
+    ],
+  ])(
+    'audits %s %s as %s',
+    async (method, routePath, action, resourceType, idParam, resourceId) => {
+      const repository = { append: jest.fn().mockResolvedValue(undefined) };
+      const interceptor = new BotAuditInterceptor(repository);
+
+      await lastValueFrom(
+        interceptor.intercept(
+          makeContext({
+            method,
+            routePath,
+            params: { customerId: 'c-1', petId: 'p-1' },
+            statusCode: 200,
+          }),
+          { handle: () => of({}) } as CallHandler,
+        ),
+      );
+
+      expect(idParam).toBeDefined();
+      expect(repository.append).toHaveBeenCalledTimes(1);
+      expect(repository.append).toHaveBeenCalledWith({
+        tenantId: 'tenant-1',
+        credentialId: 'cred-1',
+        action,
+        resourceType,
+        resourceId,
+        metadata: {
+          branchId: 'tenant-1',
+          httpMethod: method,
+          routePath,
+          statusCode: 200,
+          outcome: 'success',
+        },
+      });
+    },
+  );
 });

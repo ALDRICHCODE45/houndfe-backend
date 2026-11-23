@@ -7,7 +7,13 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
-import type { Prisma } from '@prisma/client';
+import type { CustomerPet, Prisma } from '@prisma/client';
+import { CustomerPetError } from '../../customer-pets/domain/customer-pet-error';
+import { toPetView } from '../../customer-pets/domain/customer-pet-rules';
+import type {
+  PetRecord,
+  PetView,
+} from '../../customer-pets/domain/customer-pet.types';
 import { Customer } from '../../customers/domain/customer.entity';
 import {
   CUSTOMER_REPOSITORY,
@@ -41,6 +47,7 @@ import type {
   ChatbotStockState,
 } from '../presentation/dto/catalog-item.response';
 import type {
+  CustomerLookupProfile,
   CustomerLookupResponse,
   CustomerProfileResponse,
   CustomerUpsertResponse,
@@ -54,6 +61,7 @@ import type { PaymentDetailResponse } from '../presentation/dto/payment-detail.r
 import type {
   OrderHistoryItem,
   OrderHistoryPayment,
+  OrderHistoryPet,
   OrderHistoryResponse,
 } from '../presentation/dto/order-history.response';
 import { SalesService } from '../../sales/sales.service';
@@ -118,6 +126,12 @@ export type GetOrderHistoryInput = {
   phoneCountryCode: string;
   phone: string;
   limit?: number;
+  /**
+   * Only orders with at least one line of this pet (contract §4.1). The orders
+   * keep ALL their lines. A pet that is not one of the resolved customer's
+   * (or unknown) is `PET_NOT_FOUND`, never an empty list.
+   */
+  petId?: string;
 };
 
 type CatalogSearchInput = {
@@ -125,11 +139,14 @@ type CatalogSearchInput = {
   limit?: number;
 };
 
+/** Lines carry the pet's CURRENT status (join); the snapshot is on the line itself. */
+const ORDER_HISTORY_INCLUDE = {
+  items: { include: { pet: { select: { status: true } } } },
+  payments: true,
+} satisfies Prisma.SaleInclude;
+
 type OrderHistorySaleRecord = Prisma.SaleGetPayload<{
-  include: {
-    items: true;
-    payments: true;
-  };
+  include: typeof ORDER_HISTORY_INCLUDE;
 }>;
 
 type OrderHistorySaleItemRecord = OrderHistorySaleRecord['items'][number];
@@ -377,10 +394,18 @@ export class ChatbotApiService {
     };
   }
 
-  async findCustomerByPhone(input: {
-    phoneCountryCode: string;
-    phone: string;
-  }): Promise<CustomerLookupResponse> {
+  /**
+   * `options.includePets` adds `customer.pets` (ACTIVE pets, full view). The
+   * controller sets it only for a credential with `pets:read` (contract §7);
+   * without it the response is exactly the pre-pets shape.
+   */
+  async findCustomerByPhone(
+    input: {
+      phoneCountryCode: string;
+      phone: string;
+    },
+    options: { includePets?: boolean } = {},
+  ): Promise<CustomerLookupResponse> {
     const tenantId = this.tenantPrisma.getTenantId();
     const phoneCountryCode = normalizePhonePart(input.phoneCountryCode);
     const phone = normalizePhonePart(input.phone);
@@ -394,10 +419,30 @@ export class ChatbotApiService {
       return { found: false, customer: null };
     }
 
-    return {
-      found: true,
-      customer: await this.buildCustomerProfile(customer),
-    };
+    const profile: CustomerLookupProfile =
+      await this.buildCustomerProfile(customer);
+    if (options.includePets) {
+      profile.pets = await this.listActivePets(customer.id);
+    }
+    return { found: true, customer: profile };
+  }
+
+  /** ACTIVE pets of the customer, same order and view as `GET .../pets`. */
+  private async listActivePets(customerId: string): Promise<PetView[]> {
+    const rows = await this.tenantPrisma.getClient().customerPet.findMany({
+      where: {
+        tenantId: this.tenantPrisma.getTenantId(),
+        customerId,
+        status: 'ACTIVE',
+      },
+      orderBy: [{ nameKey: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const today = businessToday(
+      new Date(),
+      this.configService.get<string>('PROMOTIONS_BUSINESS_TIMEZONE') ??
+        'America/Mexico_City',
+    );
+    return rows.map((row) => toPetView(toPetRecord(row), today));
   }
 
   async upsertCustomerProfile(
@@ -933,6 +978,15 @@ export class ChatbotApiService {
       phoneCountryCode,
       phone,
     );
+    if (input.petId !== undefined) {
+      const pet = customer
+        ? await prisma.customerPet.findFirst({
+            where: { id: input.petId, customerId: customer.id, tenantId },
+            select: { id: true },
+          })
+        : null;
+      if (!pet) throw new CustomerPetError('PET_NOT_FOUND');
+    }
     if (!customer) {
       return [];
     }
@@ -942,11 +996,11 @@ export class ChatbotApiService {
         tenantId,
         customerId: customer.id,
         status: 'CONFIRMED',
+        ...(input.petId !== undefined
+          ? { items: { some: { petId: input.petId } } }
+          : {}),
       },
-      include: {
-        items: true,
-        payments: true,
-      },
+      include: ORDER_HISTORY_INCLUDE,
       orderBy: { confirmedAt: 'desc' },
       take: input.limit ?? 5,
     });
@@ -1213,6 +1267,30 @@ function toStockCheckResponse(
   };
 }
 
+/**
+ * `id`, `name` and `species` come from the line's snapshot (never updated by
+ * later pet edits); `status` is the pet's current status, `null` when the pet
+ * row is gone but the snapshot remains. No snapshot → `null`.
+ */
+function toOrderLinePet(
+  item: OrderHistorySaleItemRecord,
+): OrderHistoryPet | null {
+  if (!item.petNameSnapshot || !item.petSpeciesSnapshot) return null;
+  return {
+    id: item.petId ?? null,
+    name: item.petNameSnapshot,
+    species: item.petSpeciesSnapshot,
+    status: item.pet?.status ?? null,
+  };
+}
+
+function toPetRecord(row: CustomerPet): PetRecord {
+  return {
+    ...row,
+    birthDate: row.birthDate?.toISOString().slice(0, 10) ?? null,
+  };
+}
+
 function toOrderHistoryResponse(
   sale: OrderHistorySaleRecord,
 ): OrderHistoryResponse {
@@ -1234,6 +1312,7 @@ function toOrderHistoryResponse(
         variantName: item.variantName ?? null,
         quantity: item.quantity,
         unitPriceCents: item.unitPriceCents,
+        pet: toOrderLinePet(item),
       }),
     ),
     payments: (sale.payments ?? []).map(

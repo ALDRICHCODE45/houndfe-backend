@@ -22,6 +22,10 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { ChatbotApiService } from '../application/chatbot-api.service';
+import { CustomerPetError } from '../../customer-pets/domain/customer-pet-error';
+import { CUSTOMER_PET_SCOPES } from '../../customer-pets/domain/customer-pet-scopes';
+import { toPetHttpError } from '../../customer-pets/presentation/customer-pet-http-error';
+import type { ServiceCredential } from '../domain/service-credential.entity';
 import { RequiredScopes } from './decorators/required-scopes.decorator';
 import { IdempotencyKey } from './decorators/idempotency-key.decorator';
 import { CatalogSearchQueryDto } from './dto/catalog-search.query';
@@ -124,11 +128,21 @@ export class ChatbotApiController {
 
   @Get('customers/by-phone')
   @RequiredScopes('customers:read')
-  findCustomerByPhone(@Query() query: CustomerPhoneLookupQueryDto) {
-    return this.chatbotApiService.findCustomerByPhone({
-      phoneCountryCode: query.phoneCountryCode,
-      phone: query.phone,
-    });
+  findCustomerByPhone(
+    @Query() query: CustomerPhoneLookupQueryDto,
+    @Req() request: { serviceCredential?: ServiceCredential },
+  ) {
+    // Additive `customer.pets` (contract §7): only for a credential that also
+    // holds `pets:read`; every other credential gets the unchanged response.
+    const includePets =
+      request.serviceCredential?.hasScope(CUSTOMER_PET_SCOPES.read) === true;
+    return this.chatbotApiService.findCustomerByPhone(
+      {
+        phoneCountryCode: query.phoneCountryCode,
+        phone: query.phone,
+      },
+      { includePets },
+    );
   }
 
   @Put('customers/by-phone')
@@ -269,14 +283,24 @@ export class ChatbotApiController {
 
   @Get('customers/by-phone/:phone/orders')
   @RequiredScopes('customers:read')
-  getOrderHistoryByPhone(
+  async getOrderHistoryByPhone(
     @Param('phone') phone: string,
     @Query('phoneCountryCode') phoneCountryCode: string,
+    // Optional pet filter (contract §4.1): a malformed uuid is a 400.
+    @Query('petId', new ParseUUIDPipe({ optional: true })) petId?: string,
   ) {
-    return this.chatbotApiService.getOrderHistoryByPhone({
-      phoneCountryCode: phoneCountryCode ?? '',
-      phone,
-    });
+    try {
+      return await this.chatbotApiService.getOrderHistoryByPhone({
+        phoneCountryCode: phoneCountryCode ?? '',
+        phone,
+        ...(petId !== undefined ? { petId } : {}),
+      });
+    } catch (error) {
+      // Only the contract's pet error is re-shaped (`PET_NOT_FOUND`, 404);
+      // everything else keeps the route's previous behavior.
+      if (error instanceof CustomerPetError) throw toPetHttpError(error);
+      throw error;
+    }
   }
 
   /**

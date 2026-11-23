@@ -93,6 +93,37 @@ const ROUTE_AUDIT_MAP: Record<string, RouteAuditDefinition> = {
     resourceType: 'customer',
     resourceIdParam: 'phone',
   },
+  // customer-pets / T2 (contract §7): served by `CustomerPetsBotController`.
+  'GET customers/:customerId/pets': {
+    action: 'customer_pets.list',
+    resourceType: 'customer',
+    resourceIdParam: 'customerId',
+  },
+  'POST customers/:customerId/pets': {
+    action: 'customer_pets.create',
+    resourceType: 'customer',
+    resourceIdParam: 'customerId',
+  },
+  'PATCH customers/:customerId/pets/:petId': {
+    action: 'customer_pets.update',
+    resourceType: 'customer_pet',
+    resourceIdParam: 'petId',
+  },
+  'POST customers/:customerId/pets/:petId/archive': {
+    action: 'customer_pets.archive',
+    resourceType: 'customer_pet',
+    resourceIdParam: 'petId',
+  },
+  'POST customers/:customerId/pets/:petId/restore': {
+    action: 'customer_pets.restore',
+    resourceType: 'customer_pet',
+    resourceIdParam: 'petId',
+  },
+  'DELETE customers/:customerId/pets/:petId': {
+    action: 'customer_pets.delete',
+    resourceType: 'customer_pet',
+    resourceIdParam: 'petId',
+  },
 };
 
 @Injectable()
