@@ -469,6 +469,7 @@ model Tenant {
   outboxEvents              OutboxEvent[]
   customers                 Customer[]
   customerAddresses         CustomerAddress[]
+  customerPets              CustomerPet[]
   serviceCredentials        ServiceCredential[]
   botAuditLogs              BotAuditLog[]
   receiptEvidences          ReceiptEvidence[]
@@ -1640,6 +1641,12 @@ model SaleItem {
   // Promotion back-reference for audit (per-line). Nullable so existing rows
   // remain valid; SetNull preserves the sale row if the promotion is deleted.
   promotionId                 String?
+  // customer-pets / T1 (contract §4.1) — the pet this line is for. SetNull when
+  // the pet row disappears; the snapshot columns are copied on assignment and
+  // never follow later pet edits. Erasing a pet (§6) nulls all three.
+  petId                       String?
+  petNameSnapshot             String?
+  petSpeciesSnapshot          CustomerPetSpecies?
   tenantId                    String
   createdAt                   DateTime              @default(now())
   updatedAt                   DateTime              @updatedAt
@@ -1652,10 +1659,13 @@ model SaleItem {
   // Promotion back-reference (audit). SetNull preserves the sale row if the
   // promotion is later deleted. Nullable so existing rows remain valid.
   promotion Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+  // Pet this line is for (customer-pets / T1). SetNull keeps the line.
+  pet       CustomerPet? @relation(fields: [petId], references: [id], onDelete: SetNull)
 
   @@index([saleId])
   @@index([tenantId])
   @@index([promotionId])
+  @@index([petId])
   @@map("sale_items")
 }
 
@@ -2139,6 +2149,7 @@ model Customer {
   billingState          String?
 
   addresses          CustomerAddress[]
+  pets               CustomerPet[]
   promotionCustomers PromotionCustomer[]
   chatbotRequests    ChatbotRequest[]
   backorders         Backorder[]
@@ -2177,6 +2188,71 @@ model CustomerAddress {
 
   @@index([tenantId])
   @@map("customer_addresses")
+}
+
+// ============================================================================
+// CUSTOMER PETS (customer-pets / T1, contract §1)
+// ============================================================================
+
+enum CustomerPetSpecies {
+  DOG
+  CAT
+  OTHER
+}
+
+enum CustomerPetSize {
+  SMALL
+  MEDIUM
+  LARGE
+  GIANT
+}
+
+enum CustomerPetBirthDatePrecision {
+  EXACT
+  MONTH
+  YEAR
+}
+
+enum CustomerPetStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum CustomerPetCreatedVia {
+  POS
+  CHATBOT
+}
+
+model CustomerPet {
+  id                 String                         @id @default(uuid())
+  tenantId           String
+  customerId         String
+  name               String                         @db.VarChar(60)
+  // `name` folded for POS search and the duplicate warning (no uniqueness, D8).
+  nameKey            String                         @db.VarChar(60)
+  species            CustomerPetSpecies
+  speciesOther       String?                        @db.VarChar(40)
+  breed              String?                        @db.VarChar(80)
+  size               CustomerPetSize?
+  birthDate          DateTime?                      @db.Date
+  birthDatePrecision CustomerPetBirthDatePrecision?
+  allergies          String?                        @db.VarChar(500)
+  notes              String?                        @db.VarChar(500)
+  status             CustomerPetStatus              @default(ACTIVE)
+  archivedAt         DateTime?
+  archivedReason     String?                        @db.VarChar(280)
+  createdVia         CustomerPetCreatedVia
+  version            Int                            @default(1)
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer  Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  saleItems SaleItem[]
+
+  @@index([tenantId, customerId, status])
+  @@index([tenantId, nameKey])
+  @@map("customer_pets")
 }
 
 // ============================================================================

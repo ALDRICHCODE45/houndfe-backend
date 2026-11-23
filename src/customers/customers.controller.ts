@@ -7,6 +7,7 @@ import {
   Body,
   Param,
   ParseUUIDPipe,
+  Query,
   HttpCode,
   HttpStatus,
   UseGuards,
@@ -36,8 +37,8 @@ export class CustomersController {
 
   @Get()
   @RequirePermissions(['read', 'Customer'])
-  findAll() {
-    return this.customersService.findAll();
+  findAll(@Query('search') search?: string) {
+    return this.customersService.findAll(search);
   }
 
   @Get(':id')

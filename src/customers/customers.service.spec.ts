@@ -114,6 +114,7 @@ describe('CustomersService tenant-scoped reads', () => {
       ...makeCustomerRecord('cust-1'),
       globalPriceList: null,
       addresses: [],
+      _count: { pets: 0 },
     });
 
     await service.findOne('cust-1');
@@ -165,6 +166,7 @@ describe('CustomersService address coordinates', () => {
       ...makeCustomerRecord('cust-1'),
       globalPriceList: null,
       addresses: [{ id: 'addr-1', latitude: 0, longitude: 0 }],
+      _count: { pets: 0 },
     };
     tenantClient.customer.findMany.mockResolvedValue([row]);
     tenantClient.customer.findUnique.mockResolvedValue(row);
@@ -342,5 +344,143 @@ describe('CustomersService phone normalization', () => {
     expect(customerRepo.save).toHaveBeenLastCalledWith(
       expect.objectContaining({ phoneCountryCode: '52', phone: '5512345678' }),
     );
+  });
+});
+
+describe('CustomersService pets (customer-pets / T1)', () => {
+  const baseRow = (id: string, over: Record<string, unknown> = {}) => ({
+    ...makeCustomerRecord(id),
+    globalPriceList: null,
+    addresses: [],
+    ...over,
+  });
+
+  describe('findOne', () => {
+    it('adds activePetsCount (ACTIVE pets only) and keeps every existing field', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findUnique.mockResolvedValue(
+        baseRow('cust-1', { _count: { pets: 3 } }),
+      );
+
+      const result = await service.findOne('cust-1');
+
+      const [args] = tenantClient.customer.findUnique.mock.calls[0] as [
+        { include: Record<string, unknown> },
+      ];
+      expect(args.include._count).toEqual({
+        select: { pets: { where: { status: 'ACTIVE' } } },
+      });
+      expect(result).toMatchObject({
+        id: 'cust-1',
+        firstName: 'Ada',
+        globalPriceList: null,
+        addresses: [],
+        activePetsCount: 3,
+      });
+      expect(result).not.toHaveProperty('_count');
+    });
+
+    it('create and update responses keep their previous shape (no activePetsCount)', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findUnique.mockResolvedValue(baseRow('cust-1'));
+      const created = await service.create({ firstName: 'Ada' });
+      expect(created).not.toHaveProperty('activePetsCount');
+      const [args] = tenantClient.customer.findUnique.mock.calls[0] as [
+        { include: Record<string, unknown> },
+      ];
+      expect(args.include).not.toHaveProperty('_count');
+    });
+  });
+
+  describe('findAll', () => {
+    it('without search: no filter, newest first, same include, matchedPetName null', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findMany.mockResolvedValue([baseRow('cust-1')]);
+
+      const result = await service.findAll();
+
+      expect(tenantClient.customer.findMany).toHaveBeenCalledTimes(1);
+      expect(tenantClient.customer.findMany).toHaveBeenCalledWith({
+        orderBy: { createdAt: 'desc' },
+        include: {
+          globalPriceList: { select: { id: true, name: true } },
+          addresses: { orderBy: { createdAt: 'asc' } },
+        },
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'cust-1',
+        firstName: 'Ada',
+        globalPriceList: null,
+        addresses: [],
+        matchedPetName: null,
+      });
+    });
+
+    it.each([undefined, '', '   '])(
+      'search %j behaves as no search',
+      async (search) => {
+        const { service, tenantClient } = makeService();
+        tenantClient.customer.findMany.mockResolvedValue([baseRow('c')]);
+        const result = await service.findAll(search);
+        const [args] = tenantClient.customer.findMany.mock.calls[0] as [
+          Record<string, unknown>,
+        ];
+        expect(args).not.toHaveProperty('where');
+        expect(result[0].matchedPetName).toBeNull();
+      },
+    );
+
+    it('search matches the customer fields or an ACTIVE pet nameKey (accent-folded)', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findMany.mockResolvedValue([]);
+
+      await service.findAll('  Peña ');
+
+      const [args] = tenantClient.customer.findMany.mock.calls[0] as [
+        { where: { OR: unknown[] } },
+      ];
+      expect(args.where.OR).toHaveLength(2);
+      expect(args.where.OR[1]).toEqual({
+        pets: {
+          some: { status: 'ACTIVE', nameKey: { contains: 'pena' } },
+        },
+      });
+    });
+
+    it('escapes LIKE wildcards so % _ and \\ in the term match literally', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findMany.mockResolvedValue([]);
+
+      await service.findAll('50%_a\\b');
+
+      const [args] = tenantClient.customer.findMany.mock.calls[0] as [
+        { where: { OR: [unknown, { pets: { some: { nameKey: unknown } } }] } },
+      ];
+      expect(args.where.OR[1].pets.some.nameKey).toEqual({
+        contains: '50\\%\\_a\\\\b',
+      });
+    });
+
+    it('matchedPetName is the pet name when only a pet matched, null when the customer matched itself', async () => {
+      const { service, tenantClient } = makeService();
+      tenantClient.customer.findMany
+        .mockResolvedValueOnce([
+          baseRow('via-pet', { pets: [{ name: 'Bruno' }] }),
+          baseRow('via-own', { pets: [{ name: 'Bruno' }] }),
+          baseRow('no-pets', { pets: [] }),
+        ])
+        // second query: which of those match through their own fields
+        .mockResolvedValueOnce([{ id: 'via-own' }, { id: 'no-pets' }]);
+
+      const result = await service.findAll('bruno');
+
+      expect(result.map((r) => [r.id, r.matchedPetName])).toEqual([
+        ['via-pet', 'Bruno'],
+        ['via-own', null],
+        ['no-pets', null],
+      ]);
+      expect(result[0]).not.toHaveProperty('pets');
+    });
   });
 });

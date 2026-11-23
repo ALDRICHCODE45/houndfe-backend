@@ -13,6 +13,13 @@ import {
 import { PrismaService } from '../shared/prisma/prisma.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { Prisma } from '@prisma/client';
+import { petNameKey } from '../customer-pets/domain/customer-pet-rules';
+
+/**
+ * Prisma passes `contains` to `LIKE` as is, so `%`, `_` and `\` in a search
+ * term would act as wildcards; escape them to match literally.
+ */
+const escapeLike = (term: string) => term.replace(/[\\%_]/g, '\\$&');
 
 @Injectable()
 export class CustomersService {
@@ -81,49 +88,72 @@ export class CustomersService {
     return this.buildFullResponse(customerId);
   }
 
-  async findAll() {
+  /**
+   * Customer list, newest first. With `search` (customer-pets / T1, contract
+   * §5) a customer matches through its own fields (name, e-mail, phone,
+   * business name; every word must match) or through the name of one of its
+   * ACTIVE pets (`nameKey`, accent-insensitive). Every item carries
+   * `matchedPetName`: the pet's name when the match came only through a pet,
+   * `null` when the customer matched on its own fields or there is no search.
+   */
+  async findAll(search?: string) {
     const prisma = this.tenantPrisma.getClient();
+    const include = {
+      globalPriceList: { select: { id: true, name: true } },
+      addresses: { orderBy: { createdAt: 'asc' } },
+    } satisfies Prisma.CustomerInclude;
+
+    // `?search=a&search=b` arrives as an array: not a usable term.
+    const term = typeof search === 'string' ? search.trim().slice(0, 100) : '';
+    if (!term) {
+      const customers = await prisma.customer.findMany({
+        orderBy: { createdAt: 'desc' },
+        include,
+      });
+      return customers.map((c) => this.toListItem(c, null));
+    }
+
+    const ownWhere = this.ownFieldsWhere(term);
+    const petKey = petNameKey(term);
+    const petMatch: Prisma.CustomerPetWhereInput = {
+      status: 'ACTIVE',
+      nameKey: { contains: escapeLike(petKey) },
+    };
     const customers = await prisma.customer.findMany({
+      where: petKey
+        ? { OR: [ownWhere, { pets: { some: petMatch } }] }
+        : ownWhere,
       orderBy: { createdAt: 'desc' },
       include: {
-        globalPriceList: { select: { id: true, name: true } },
-        addresses: { orderBy: { createdAt: 'asc' } },
+        ...include,
+        pets: {
+          where: petMatch,
+          orderBy: [{ nameKey: 'asc' }, { createdAt: 'asc' }],
+          take: 1,
+          select: { name: true },
+        },
       },
     });
 
-    return customers.map((c) => ({
-      ...Customer.fromPersistence({
-        id: c.id,
-        firstName: c.firstName,
-        lastName: c.lastName,
-        phoneCountryCode: c.phoneCountryCode,
-        phone: c.phone,
-        email: c.email,
-        globalPriceListId: c.globalPriceListId,
-        comments: c.comments,
-        preferredPaymentMethod: c.preferredPaymentMethod,
-        businessName: c.businessName,
-        fiscalZipCode: c.fiscalZipCode,
-        rfc: c.rfc,
-        fiscalRegime: c.fiscalRegime,
-        billingStreet: c.billingStreet,
-        billingExteriorNumber: c.billingExteriorNumber,
-        billingInteriorNumber: c.billingInteriorNumber,
-        billingZipCode: c.billingZipCode,
-        billingNeighborhood: c.billingNeighborhood,
-        billingMunicipality: c.billingMunicipality,
-        billingCity: c.billingCity,
-        billingState: c.billingState,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-      }).toResponse(),
-      globalPriceList: c.globalPriceList ?? null,
-      addresses: c.addresses,
-    }));
+    const withPet = customers.filter((c) => c.pets.length > 0);
+    const ownIds = new Set<string>();
+    if (withPet.length > 0) {
+      const own = await prisma.customer.findMany({
+        where: { AND: [{ id: { in: withPet.map((c) => c.id) } }, ownWhere] },
+        select: { id: true },
+      });
+      for (const row of own) ownIds.add(row.id);
+    }
+
+    return customers.map((c) => {
+      const { pets, ...rest } = c;
+      const viaPetOnly = pets.length > 0 && !ownIds.has(c.id);
+      return this.toListItem(rest, viaPetOnly ? pets[0].name : null);
+    });
   }
 
   async findOne(id: string) {
-    return this.buildFullResponse(id);
+    return this.buildFullResponse(id, { withPetCount: true });
   }
 
   async update(id: string, dto: UpdateCustomerDto) {
@@ -275,13 +305,82 @@ export class CustomersService {
 
   // ==================== Helpers ====================
 
-  private async buildFullResponse(customerId: string) {
+  /** Every word of `term` must appear in one of the customer's own text fields. */
+  private ownFieldsWhere(term: string): Prisma.CustomerWhereInput {
+    const contains = (word: string) => ({
+      contains: escapeLike(word),
+      mode: 'insensitive' as const,
+    });
+    return {
+      AND: term
+        .split(/\s+/)
+        .slice(0, 6)
+        .map((word) => ({
+          OR: [
+            { firstName: contains(word) },
+            { lastName: contains(word) },
+            { email: contains(word) },
+            { phone: contains(word) },
+            { businessName: contains(word) },
+          ],
+        })),
+    };
+  }
+
+  private toListItem(
+    c: Prisma.CustomerGetPayload<{
+      include: {
+        globalPriceList: { select: { id: true; name: true } };
+        addresses: true;
+      };
+    }>,
+    matchedPetName: string | null,
+  ) {
+    return {
+      ...Customer.fromPersistence({
+        id: c.id,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        phoneCountryCode: c.phoneCountryCode,
+        phone: c.phone,
+        email: c.email,
+        globalPriceListId: c.globalPriceListId,
+        comments: c.comments,
+        preferredPaymentMethod: c.preferredPaymentMethod,
+        businessName: c.businessName,
+        fiscalZipCode: c.fiscalZipCode,
+        rfc: c.rfc,
+        fiscalRegime: c.fiscalRegime,
+        billingStreet: c.billingStreet,
+        billingExteriorNumber: c.billingExteriorNumber,
+        billingInteriorNumber: c.billingInteriorNumber,
+        billingZipCode: c.billingZipCode,
+        billingNeighborhood: c.billingNeighborhood,
+        billingMunicipality: c.billingMunicipality,
+        billingCity: c.billingCity,
+        billingState: c.billingState,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+      }).toResponse(),
+      globalPriceList: c.globalPriceList ?? null,
+      addresses: c.addresses,
+      matchedPetName,
+    };
+  }
+
+  private async buildFullResponse(
+    customerId: string,
+    options: { withPetCount?: boolean } = {},
+  ) {
     const prisma = this.tenantPrisma.getClient();
     const data = await prisma.customer.findUnique({
       where: { id: customerId },
       include: {
         globalPriceList: { select: { id: true, name: true } },
         addresses: { orderBy: { createdAt: 'asc' } },
+        ...(options.withPetCount
+          ? { _count: { select: { pets: { where: { status: 'ACTIVE' } } } } }
+          : {}),
       },
     });
 
@@ -317,6 +416,10 @@ export class CustomersService {
       ...customer.toResponse(),
       globalPriceList: data.globalPriceList ?? null,
       addresses: data.addresses,
+      // customer-pets / T1: only the detail read (`GET /customers/:id`) adds it.
+      ...(options.withPetCount
+        ? { activePetsCount: data._count?.pets ?? 0 }
+        : {}),
     };
   }
 }

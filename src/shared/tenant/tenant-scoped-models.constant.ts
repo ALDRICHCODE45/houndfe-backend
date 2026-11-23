@@ -40,6 +40,9 @@ export const TENANT_SCOPED_MODELS = new Set([
   'QuotationPromotionOptIn',
   'Customer',
   'CustomerAddress',
+  // customer-pets / T1 — same fail-open allowlist semantics: without this entry a
+  // pet read through TenantPrismaService would not inject `tenantId`.
+  'CustomerPet',
   'Promotion',
   'PromotionTargetItem',
   'PromotionCustomer',

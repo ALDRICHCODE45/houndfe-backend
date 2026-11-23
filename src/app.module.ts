@@ -25,6 +25,7 @@ import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { PriceListsModule } from './price-lists/price-lists.module';
 import { CustomersModule } from './customers/customers.module';
+import { CustomerPetsModule } from './customer-pets/customer-pets.module';
 import { PromotionsModule } from './promotions/promotions.module';
 import { SalesModule } from './sales/sales.module';
 import { FilesModule } from './files/files.module';
@@ -146,6 +147,7 @@ import { PurchaseOrdersModule } from './procurement/purchase-orders/purchase-ord
     AdminModule,
     PriceListsModule,
     CustomersModule,
+    CustomerPetsModule,
     PromotionsModule,
     SalesModule,
     FilesModule,
