@@ -1,6 +1,6 @@
 # Chatbot ↔ backend: customer pets («varias mascotas por cliente») — bot contract v1
 
-**Status:** v1 approved by the chatbot and the frontend on 2026-11-23 (owner answers Q1, Q2 and D8 given directly in the backend session). Built on branch `feat/customer-pets` (not merged, deploy pending): the model, the pet routes and `customer.pets` in `by-phone` (T1/T2), the pet on order history (T2), and `sale.items[i].petId` in checkout (T3). Task: `odd/tasks/customer-pets.md` (S1–S3, S5–S9). Design and decisions: `docs/proposals/customer-pets-contract.md`. The POS side is `docs/frontend-handoff/27-customer-pets.md`; nothing in it is called by the bot.
+**Status:** v1 approved by the chatbot and the frontend on 2026-11-23 (owner answers Q1, Q2 and D8 given directly in the backend session). Merged into local `main` (1e22fb90, 2026-11-23; push and deploy pending): the model, the pet routes and `customer.pets` in `by-phone` (T1/T2), the pet on order history (T2), and `sale.items[i].petId` in checkout (T3). Task: `odd/tasks/customer-pets.md` (S1–S3, S5–S9). Design and decisions: `docs/proposals/customer-pets-contract.md`. The POS side is `docs/frontend-handoff/27-customer-pets.md`; nothing in it is called by the bot.
 
 Shapes below come from the code, not only from the proposal. Where the code differs from the proposal, this document follows the code (see «Differences from the proposal» at the end).
 
