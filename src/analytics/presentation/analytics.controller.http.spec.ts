@@ -36,7 +36,11 @@ import type { BranchSalesTimeseriesQueryDto } from '../dto/branch-sales-timeseri
 import {
   SELLER_SALES_REPORT_CANCELED_ROW_KEYS,
   SELLER_SALES_REPORT_CONFIRMED_ROW_KEYS,
+  SELLER_SALES_REPORT_CUSTOMER_KEYS,
+  SELLER_SALES_REPORT_DAILY_TOTAL_KEYS,
+  SELLER_SALES_REPORT_PREVIOUS_PERIOD_KEYS,
   SELLER_SALES_REPORT_RESPONSE_KEYS,
+  SELLER_SALES_REPORT_TOP_PRODUCT_KEYS,
   type SellerSalesReportResponseDto,
 } from '../dto/seller-sales-report-response.dto';
 import {
@@ -202,6 +206,7 @@ const SELLER_REPORT_RESPONSE: SellerSalesReportResponseDto = {
         paidCents: 4_000,
         debtCents: 6_000,
         paymentStatus: 'PARTIAL',
+        customer: { id: 'cust-1', name: 'Ana López' },
       },
     ],
   },
@@ -215,8 +220,26 @@ const SELLER_REPORT_RESPONSE: SellerSalesReportResponseDto = {
         confirmedAt: '2026-01-02T10:00:00.000Z',
         canceledAt: '2026-01-03T10:00:00.000Z',
         totalCents: 5_000,
+        customer: null,
       },
     ],
+  },
+  topProducts: [
+    {
+      productId: 'prod-1',
+      variantId: 'var-1',
+      productName: 'Croquetas',
+      variantName: '2 kg',
+      quantity: 3,
+      netSalesCents: 9_000,
+    },
+  ],
+  dailyTotals: [{ date: RANGE.from, saleCount: 1, netSalesCents: 10_000 }],
+  previousPeriod: {
+    from: '2025-12-01',
+    to: RANGE.from,
+    saleCount: 2,
+    netSalesCents: 5_000,
   },
 };
 
@@ -571,15 +594,29 @@ describe('Analytics HTTP contract (bas-3b / OI-2 S4)', () => {
       expect(Object.keys(body).sort()).toEqual(
         [...SELLER_SALES_REPORT_RESPONSE_KEYS].sort(),
       );
-      expect(SELLER_SALES_REPORT_RESPONSE_KEYS).toHaveLength(12);
+      expect(SELLER_SALES_REPORT_RESPONSE_KEYS).toHaveLength(15);
       expect(Object.keys(body.confirmed.rows[0]).sort()).toEqual(
         [...SELLER_SALES_REPORT_CONFIRMED_ROW_KEYS].sort(),
       );
+      expect(SELLER_SALES_REPORT_CONFIRMED_ROW_KEYS).toHaveLength(8);
       expect(Object.keys(body.canceled.rows[0]).sort()).toEqual(
         [...SELLER_SALES_REPORT_CANCELED_ROW_KEYS].sort(),
       );
+      expect(SELLER_SALES_REPORT_CANCELED_ROW_KEYS).toHaveLength(6);
+      expect(Object.keys(body.confirmed.rows[0].customer!).sort()).toEqual(
+        [...SELLER_SALES_REPORT_CUSTOMER_KEYS].sort(),
+      );
+      expect(Object.keys(body.topProducts[0]).sort()).toEqual(
+        [...SELLER_SALES_REPORT_TOP_PRODUCT_KEYS].sort(),
+      );
+      expect(Object.keys(body.dailyTotals[0]).sort()).toEqual(
+        [...SELLER_SALES_REPORT_DAILY_TOTAL_KEYS].sort(),
+      );
+      expect(Object.keys(body.previousPeriod).sort()).toEqual(
+        [...SELLER_SALES_REPORT_PREVIOUS_PERIOD_KEYS].sort(),
+      );
       expect(JSON.stringify(body)).not.toMatch(
-        /customer|email|phone|address|currency|cashier|items|cancelReason/i,
+        /email|phone|address|currency|cashier|items|cancelReason/i,
       );
     });
 

@@ -10,7 +10,8 @@
  *
  * Palette (L5): Saldo in warning when > 0 and success when zero, ink for
  * everything else; danger only marks the cancellation date of a canceled sale.
- * The seller is always printed by name.
+ * The seller is always printed by name; every row prints its current customer
+ * («Público en general» without one). Payment labels match the POS (R10).
  */
 import { Document, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
@@ -44,24 +45,29 @@ export const SELLER_REPORT_LOGO_WIDTH = A4_LOGO_WIDTH;
 const BRAND_SUBTITLE = 'Reporte de ventas';
 const KICKER = 'Vendedor';
 const FOLIO_CHARS_PER_LINE = 20;
+/** Longer names are cut with «…» so the cell wraps to at most two lines. */
+const CUSTOMER_NAME_MAX_CHARS = 40;
+const NO_CUSTOMER_LABEL = 'Público en general';
 
 const STATUS_LABELS: Record<string, string> = {
   PAID: 'Pagada',
-  PARTIAL: 'Parcial',
-  CREDIT: 'A crédito',
+  PARTIAL: 'Impaga',
+  CREDIT: 'Deuda',
 };
 
 const CONFIRMED_COLUMNS: readonly LedgerColumn[] = [
-  { key: 'folio', label: 'Folio', flex: 1.7 },
-  { key: 'confirmedAt', label: 'Confirmada', flex: 1.8 },
+  { key: 'folio', label: 'Folio', flex: 1.5 },
+  { key: 'customer', label: 'Cliente', flex: 2.2 },
+  { key: 'confirmedAt', label: 'Confirmada', flex: 1.7 },
   { key: 'total', label: 'Total', flex: 1.1, align: 'right' },
   { key: 'paid', label: 'Pagado', flex: 1.1, align: 'right' },
   { key: 'debt', label: 'Saldo', flex: 1.1, align: 'right' },
-  { key: 'status', label: 'Estado', flex: 1, align: 'right' },
+  { key: 'status', label: 'Estado', flex: 0.9, align: 'right' },
 ];
 
 const CANCELED_COLUMNS: readonly LedgerColumn[] = [
-  { key: 'folio', label: 'Folio', flex: 1.7 },
+  { key: 'folio', label: 'Folio', flex: 1.5 },
+  { key: 'customer', label: 'Cliente', flex: 2.4 },
   { key: 'confirmedAt', label: 'Confirmada', flex: 1.8 },
   { key: 'canceledAt', label: 'Cancelada', flex: 1.8 },
   { key: 'total', label: 'Total', flex: 1.1, align: 'right' },
@@ -127,6 +133,7 @@ function confirmedRow(r: SellerSalesReportConfirmedRowDto): LedgerRowData {
     key: r.id,
     cells: {
       folio: formatFolio(r.folio),
+      customer: formatCustomer(r.customer),
       confirmedAt: formatA4DateTime(r.confirmedAt),
       total: formatA4Money(r.totalCents),
       paid: formatA4Money(r.paidCents),
@@ -148,6 +155,7 @@ function canceledRow(r: SellerSalesReportCanceledRowDto): LedgerRowData {
     key: r.id,
     cells: {
       folio: formatFolio(r.folio),
+      customer: formatCustomer(r.customer),
       confirmedAt: r.confirmedAt ? formatA4DateTime(r.confirmedAt) : '—',
       canceledAt: { text: formatA4DateTime(r.canceledAt), tone: 'danger' },
       total: formatA4Money(r.totalCents),
@@ -291,6 +299,16 @@ const styles = StyleSheet.create({
     marginTop: px(5),
   },
 });
+
+/** Customer cell: current name (cut with «…» when very long) or público en general. */
+function formatCustomer(customer: { name: string } | null): string {
+  if (customer === null) return NO_CUSTOMER_LABEL;
+  const name = customer.name.trim();
+  if (name.length === 0) return NO_CUSTOMER_LABEL;
+  return name.length > CUSTOMER_NAME_MAX_CHARS
+    ? `${name.slice(0, CUSTOMER_NAME_MAX_CHARS - 1).trimEnd()}…`
+    : name;
+}
 
 /** Split a folio into display lines that fit the folio column. */
 function formatFolio(folio: string | null): string {

@@ -53,6 +53,16 @@ export interface SellerSalesReportSeller {
   name: string;
 }
 
+/**
+ * Current customer of the sale (no name snapshot exists on the sale): `name` is
+ * `firstName lastName`, or `firstName` alone without a last name. `null` on the
+ * row means público en general (or a deleted customer, `SetNull`).
+ */
+export interface SellerSalesReportCustomer {
+  id: string;
+  name: string;
+}
+
 /** One CONFIRMED sale attributed by `confirmedAt`. */
 export interface SellerSalesReportConfirmedRow {
   id: string;
@@ -62,6 +72,9 @@ export interface SellerSalesReportConfirmedRow {
   paidCents: number;
   debtCents: number;
   paymentStatus: SellerReportPaymentStatus;
+  /** Business-timezone `YYYY-MM-DD` of `confirmedAt` (internal, for `dailyTotals`). */
+  localDate: string;
+  customer: SellerSalesReportCustomer | null;
 }
 
 /** One CANCELED sale attributed informationally by `canceledAt`. */
@@ -71,6 +84,30 @@ export interface SellerSalesReportCanceledRow {
   confirmedAt: Date | null;
   canceledAt: Date;
   totalCents: number;
+  customer: SellerSalesReportCustomer | null;
+}
+
+/**
+ * One `(productId, variantId)` group over the report's CONFIRMED lines. Names
+ * come from the most recent line in the period; `netSalesCents` is the sum of
+ * line totals after line discounts/promotions (order-level discounts are not
+ * distributed to lines).
+ */
+export interface SellerSalesReportTopProduct {
+  productId: string;
+  variantId: string | null;
+  productName: string;
+  variantName: string | null;
+  quantity: number;
+  netSalesCents: number;
+}
+
+/** Same-length CONFIRMED aggregate ending at the report's `from` (not capped). */
+export interface SellerSalesReportPreviousPeriod {
+  from: string;
+  to: string;
+  saleCount: number;
+  netSalesCents: number;
 }
 
 /** Full snapshot: seller identity, both sections, and the combined row count. */
@@ -80,6 +117,9 @@ export interface SellerSalesReportResult {
   confirmed: SellerSalesReportConfirmedRow[];
   canceled: SellerSalesReportCanceledRow[];
   rowCount: number;
+  /** At most `SELLER_SALES_REPORT_TOP_PRODUCTS_LIMIT`, already ordered. */
+  topProducts: SellerSalesReportTopProduct[];
+  previousPeriod: SellerSalesReportPreviousPeriod;
 }
 
 /** Read-only seller-report port. Tenant scope is implicit in the adapter. */

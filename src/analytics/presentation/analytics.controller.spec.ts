@@ -110,6 +110,7 @@ const sellerReportResponse: SellerSalesReportResponseDto = {
         paidCents: 4_000,
         debtCents: 6_000,
         paymentStatus: 'PARTIAL',
+        customer: null,
       },
     ],
   },
@@ -117,6 +118,14 @@ const sellerReportResponse: SellerSalesReportResponseDto = {
     dateBasis: 'canceledAt',
     saleCount: 0,
     rows: [],
+  },
+  topProducts: [],
+  dailyTotals: [],
+  previousPeriod: {
+    from: '2025-12-01',
+    to: '2026-01-01',
+    saleCount: 0,
+    netSalesCents: 0,
   },
 };
 /** Reads the handler function for a route method (metadata lives there). */

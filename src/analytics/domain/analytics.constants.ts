@@ -17,6 +17,9 @@ export const ANALYTICS_TIME_ZONE = 'America/Mexico_City';
 /** Combined confirmed+canceled row cap for one seller report. */
 export const SELLER_SALES_REPORT_ROW_LIMIT = 1000;
 
+/** Maximum `topProducts` entries in one seller report. */
+export const SELLER_SALES_REPORT_TOP_PRODUCTS_LIMIT = 5;
+
 /** Stable domain code for a combined row count above the report cap. */
 export const SELLER_REPORT_ROW_LIMIT_EXCEEDED =
   'SELLER_REPORT_ROW_LIMIT_EXCEEDED';

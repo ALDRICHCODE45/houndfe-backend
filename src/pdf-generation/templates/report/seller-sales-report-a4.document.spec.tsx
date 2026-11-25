@@ -48,6 +48,7 @@ function confirmedRow(
     paidCents: 4_000,
     debtCents: 6_000 + index,
     paymentStatus,
+    customer: { id: `cust-${index}`, name: `Cliente ${index}` },
   };
 }
 
@@ -58,6 +59,7 @@ function canceledRow(index: number): SellerSalesReportCanceledRowDto {
     confirmedAt: new Date(BASE_INSTANT + index * 60_000).toISOString(),
     canceledAt: new Date(BASE_INSTANT + (index + 10) * 60_000).toISOString(),
     totalCents: 5_000 + index,
+    customer: null,
   };
 }
 
@@ -91,6 +93,14 @@ function makeReport(
       dateBasis: 'canceledAt',
       saleCount: canceledRows.length,
       rows: canceledRows,
+    },
+    topProducts: [],
+    dailyTotals: [],
+    previousPeriod: {
+      from: '2025-12-01',
+      to: '2026-01-01',
+      saleCount: 0,
+      netSalesCents: 0,
     },
   };
 }
@@ -289,10 +299,55 @@ describe('SellerSalesReportA4Document', () => {
     ]) {
       expect(text).toContain(expected);
     }
-    expect(text).toMatch(/Pagada.*Parcial.*A crédito/s);
+    expect(text).toMatch(/Pagada.*Impaga.*Deuda/s);
+    expect(text).not.toMatch(/Parcial|A crédito/);
     expect(text).not.toMatch(
       /CURRENT_SELLER|CURRENT|confirmedAt|canceledAt|\[from, to\)/,
     );
+  });
+
+  it('prints a «Cliente» column in both tables, «Público en general» when null', () => {
+    const confirmedNoCustomer = confirmedRow(2, 'A-2');
+    confirmedNoCustomer.customer = null;
+    const canceledWithCustomer = canceledRow(2);
+    canceledWithCustomer.customer = { id: 'cust-x', name: 'Beto Ruiz' };
+    const report = makeReport(
+      [confirmedRow(1, 'A-1'), confirmedNoCustomer],
+      [canceledRow(1), canceledWithCustomer],
+    );
+    const tables = elementsOf(report).filter(
+      (el) => Array.isArray(el.props.columns) && Array.isArray(el.props.rows),
+    );
+    expect(tables).toHaveLength(2);
+    for (const table of tables) {
+      const columns = table.props.columns as { key: string; label: string }[];
+      expect(columns.map((c) => c.label)).toContain('Cliente');
+      // Cliente follows Folio in both ledgers.
+      expect(columns[1]).toMatchObject({ key: 'customer', label: 'Cliente' });
+    }
+    const [confirmedTable, canceledTable] = tables;
+    const cell = (table: AnyElement, i: number) =>
+      (table.props.rows as { cells: Record<string, unknown> }[])[i].cells
+        .customer;
+    expect(cell(confirmedTable, 0)).toBe('Cliente 1');
+    expect(cell(confirmedTable, 1)).toBe('Público en general');
+    expect(cell(canceledTable, 0)).toBe('Público en general');
+    expect(cell(canceledTable, 1)).toBe('Beto Ruiz');
+    expect(renderText(report)).toContain('Público en general');
+  });
+
+  it('truncates a very long customer name with an ellipsis', () => {
+    const row = confirmedRow(1, 'A-1');
+    row.customer = { id: 'cust-long', name: 'Nombre '.repeat(20).trim() };
+    const tables = elementsOf(makeReport([row])).filter((el) =>
+      Array.isArray(el.props.rows),
+    );
+    const printed = (
+      tables[0].props.rows as { cells: { customer: string } }[]
+    )[0].cells.customer;
+    expect(printed.length).toBeLessThanOrEqual(40);
+    expect(printed.endsWith('…')).toBe(true);
+    expect(printed.startsWith('Nombre Nombre')).toBe(true);
   });
 
   it('prints the seller by name and never a raw UUID', () => {

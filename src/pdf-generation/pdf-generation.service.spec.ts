@@ -23,7 +23,7 @@
  *     `yoga-layout` to a CJS stub — see `jest.config.js`).
  */
 import { Readable } from 'node:stream';
-import { isValidElement } from 'react';
+import { isValidElement, type ReactElement } from 'react';
 import { renderToBuffer, renderToStream } from '@react-pdf/renderer';
 import { Test } from '@nestjs/testing';
 import {
@@ -141,6 +141,7 @@ function makeSellerReport(): SellerSalesReportResponseDto {
           paidCents: 4000,
           debtCents: 6000,
           paymentStatus: 'PARTIAL',
+          customer: { id: 'cust-1', name: 'Ana López' },
         },
       ],
     },
@@ -154,8 +155,17 @@ function makeSellerReport(): SellerSalesReportResponseDto {
           confirmedAt: null,
           canceledAt: '2026-01-03T10:00:00.000Z',
           totalCents: 5000,
+          customer: null,
         },
       ],
+    },
+    topProducts: [],
+    dailyTotals: [],
+    previousPeriod: {
+      from: '2025-12-01',
+      to: '2026-01-01',
+      saleCount: 0,
+      netSalesCents: 0,
     },
   };
 }
@@ -977,6 +987,62 @@ describe('PdfGenerationService', () => {
       expect(
         (rendered.props as { report: SellerSalesReportResponseDto }).report,
       ).toBe(report);
+    });
+
+    it('renders the «Cliente» column and the POS payment labels', async () => {
+      const report = makeSellerReport();
+      report.confirmed.rows.push(
+        {
+          ...report.confirmed.rows[0],
+          id: 'sale-3',
+          paymentStatus: 'CREDIT',
+          customer: null,
+        },
+        {
+          ...report.confirmed.rows[0],
+          id: 'sale-4',
+          paymentStatus: 'PAID',
+        },
+      );
+      const renderToBufferMock = jest.mocked(renderToBuffer);
+      renderToBufferMock.mockResolvedValueOnce(Buffer.from('%PDF-1.4 report'));
+
+      await service.renderSellerSalesReportPdf(report);
+
+      const [rendered] = renderToBufferMock.mock.calls[0];
+      const documentTree = (rendered.type as (props: unknown) => ReactElement)(
+        rendered.props,
+      );
+      const tables: {
+        columns: { key: string; label: string }[];
+        rows: { cells: Record<string, unknown> }[];
+      }[] = [];
+      const visit = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(visit);
+        if (!isValidElement<Record<string, unknown>>(node)) return;
+        if (Array.isArray(node.props.columns)) {
+          tables.push(node.props as (typeof tables)[number]);
+        }
+        visit(node.props.children);
+      };
+      visit(documentTree);
+
+      expect(tables).toHaveLength(2);
+      for (const table of tables) {
+        expect(table.columns.map((c) => c.label)).toContain('Cliente');
+      }
+      const [confirmedTable, canceledTable] = tables;
+      expect(confirmedTable.rows.map((r) => r.cells.customer)).toEqual([
+        'Ana López',
+        'Público en general',
+        'Ana López',
+      ]);
+      expect(
+        confirmedTable.rows.map(
+          (r) => (r.cells.status as { text: string }).text,
+        ),
+      ).toEqual(['Impaga', 'Deuda', 'Pagada']);
+      expect(canceledTable.rows[0].cells.customer).toBe('Público en general');
     });
 
     it('wraps render failures in InternalServerErrorException (PDF_GENERATION_FAILED)', async () => {
