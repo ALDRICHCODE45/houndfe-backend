@@ -93,9 +93,9 @@ Plus a page filter `overdue=true` so the warning can open the list of those sale
 
 Pre-existing inconsistency, not changed here: the default `dueDate` (`confirmedAt + 15 days`) keeps the time of day and uses server-local time, and `setDueDate` validates against UTC. The overdue rule follows the displayed due day, so both kinds of stored values agree with what the POS shows.
 
-## 8. Customer statement PDF (R8) — deferred (owner Q2: «Después»)
+## 8. Customer statement PDF (R8) — follow-up task T4 (owner 2026-11-25)
 
-Not in this batch. Proposed scope for the later batch: `GET /customers/:customerId/statement/pdf?from=YYYY-MM-DD&to=YYYY-MM-DD` (A4, same visual system as the other A4 PDFs): customer data, period, every CONFIRMED sale of the period (folio, date, total, paid, open debt, due date, overdue mark), totals and current open debt. No payments ledger in v1. Estimated as its own task, after §1–§7.
+Deferred by owner Q2 («Después»), then started on 2026-11-25 («Sí, arrancá ahora») with two decisions: «Todas las del período + deuda abierta» and «Sí, con los pagos del período» (this replaces the earlier «no payments ledger in v1»). Scope: `GET /customers/:customerId/statement/pdf?from=YYYY-MM-DD&to=YYYY-MM-DD` (A4, same visual system as the seller report PDF): customer data, period, every CONFIRMED sale of the period (folio, date, total, paid, open debt, due day, overdue mark with the §7 rule), period totals, the customer's current open debt across all sales (also older than the period) with its overdue part, and every payment received in the period (date, method, amount, sale folio). Refund obligations and settlements are not listed or subtracted, and the PDF says so. Final details: frontend handoff 29.
 
 ## 9. «Cobrar todo» (R9) — separate proposal later (owner Q3)
 
