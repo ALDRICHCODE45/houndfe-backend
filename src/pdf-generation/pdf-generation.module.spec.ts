@@ -21,12 +21,14 @@
  * `QuotationsModule`'s `send()` flow can render the PDF in-memory
  * without a circular import.
  */
-import { MODULE_METADATA } from '@nestjs/common/constants';
+import { MODULE_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PdfGenerationModule } from './pdf-generation.module';
 import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
+import { SalesCustomerStatementController } from '../sales/sales-customer-statement.controller';
+import { CustomerStatementService } from '../sales/customer-statement.service';
 
 describe('PdfGenerationModule', () => {
   it('registers PdfGenerationService as a provider', () => {
@@ -80,5 +82,55 @@ describe('PdfGenerationModule', () => {
     // (PdfGenerationController) still resolves via DI without
     // touching the export list.
     expect(exports ?? []).toContain(PdfGenerationService);
+  });
+
+  // sales-history-redesign S11 — GET /customers/:customerId/statement/pdf.
+  // PdfGenerationModule already imports SalesModule, so the statement route
+  // is registered HERE (one place) and SalesModule never imports this module.
+  describe('customer statement PDF route (S11)', () => {
+    const controllersOf = (module: object) =>
+      (Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, module) ??
+        []) as unknown[];
+
+    it('maps the statement controller exactly once, here and not in SalesModule', () => {
+      const all = [
+        ...controllersOf(PdfGenerationModule),
+        ...controllersOf(SalesModule),
+      ];
+
+      expect(
+        all.filter((c) => c === SalesCustomerStatementController),
+      ).toHaveLength(1);
+      expect(controllersOf(PdfGenerationModule)).toContain(
+        SalesCustomerStatementController,
+      );
+      expect(controllersOf(SalesModule)).not.toContain(
+        SalesCustomerStatementController,
+      );
+      expect(
+        Reflect.getMetadata(PATH_METADATA, SalesCustomerStatementController),
+      ).toBe('customers/:customerId/statement/pdf');
+    });
+
+    it('SalesModule exports the statement service and never imports PdfGenerationModule (no forwardRef cycle)', () => {
+      const salesImports = (Reflect.getMetadata(
+        MODULE_METADATA.IMPORTS,
+        SalesModule,
+      ) ?? []) as unknown[];
+      const salesExports = (Reflect.getMetadata(
+        MODULE_METADATA.EXPORTS,
+        SalesModule,
+      ) ?? []) as unknown[];
+
+      expect(salesImports).not.toContain(PdfGenerationModule);
+      for (const entry of salesImports) {
+        // forwardRef(() => X) entries are objects with a `forwardRef` thunk.
+        expect(entry).toBeDefined();
+        expect(
+          typeof entry === 'object' && entry !== null && 'forwardRef' in entry,
+        ).toBe(false);
+      }
+      expect(salesExports).toContain(CustomerStatementService);
+    });
   });
 });

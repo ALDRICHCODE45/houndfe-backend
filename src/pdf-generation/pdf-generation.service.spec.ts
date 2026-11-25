@@ -33,6 +33,8 @@ import {
 } from '@nestjs/common';
 import type { SaleDetailResponseDto } from '../sales/dto/sale-detail-response.dto';
 import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
+import type { CustomerStatementDto } from '../sales/dto/customer-statement.dto';
+import { CustomerStatementA4Document } from './templates/report/customer-statement-a4.document';
 import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesService } from '../sales/sales.service';
@@ -1069,4 +1071,77 @@ describe('PdfGenerationService', () => {
       }
     });
   });
+
+  // sales-history-redesign S11 — customer statement PDF.
+  describe('renderCustomerStatementPdf', () => {
+    const statement = makeCustomerStatement();
+
+    it('renders the exact statement with the statement template into a buffer', async () => {
+      const renderToBufferMock = jest.mocked(renderToBuffer);
+      renderToBufferMock.mockResolvedValueOnce(
+        Buffer.from('%PDF-1.4 statement'),
+      );
+
+      const buffer = await service.renderCustomerStatementPdf(statement);
+
+      expect(buffer.subarray(0, 4).toString()).toBe('%PDF');
+      expect(renderToBufferMock).toHaveBeenCalledTimes(1);
+      const [rendered] = renderToBufferMock.mock.calls[0];
+      expect(rendered.type).toBe(CustomerStatementA4Document);
+      expect(
+        (rendered.props as { statement: CustomerStatementDto }).statement,
+      ).toBe(statement);
+    });
+
+    it('maps render failures to 500 PDF_GENERATION_FAILED', async () => {
+      jest
+        .mocked(renderToBuffer)
+        .mockRejectedValueOnce(new Error('yoga-layout blew up'));
+
+      const error = await service
+        .renderCustomerStatementPdf(statement)
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InternalServerErrorException);
+      expect((error as InternalServerErrorException).message).toBe(
+        'PDF_GENERATION_FAILED',
+      );
+    });
+  });
 });
+
+function makeCustomerStatement(): CustomerStatementDto {
+  return {
+    timeZone: 'America/Mexico_City',
+    from: '2026-11-01',
+    to: '2026-12-01',
+    today: '2026-11-25',
+    generatedAt: '2026-11-25T18:00:00.000Z',
+    branchName: 'Sucursal Centro',
+    customer: {
+      id: 'cust-1',
+      name: 'Rosa Pérez',
+      phone: null,
+      email: null,
+      rfc: null,
+      businessName: null,
+    },
+    sales: [],
+    periodTotals: {
+      saleCount: 0,
+      totalCents: 0,
+      paidCents: 0,
+      openDebtCents: 0,
+      overdueSaleCount: 0,
+      overdueDebtCents: 0,
+    },
+    currentDebt: {
+      saleCount: 0,
+      openDebtCents: 0,
+      overdueSaleCount: 0,
+      overdueDebtCents: 0,
+    },
+    payments: [],
+    paymentsTotalCents: 0,
+  };
+}

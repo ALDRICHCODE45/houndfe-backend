@@ -74,6 +74,8 @@ import {
 import type { QuotationResponseDto } from '../quotations/dto/quotation-response.dto';
 import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
 import { SellerSalesReportA4Document } from './templates/report/seller-sales-report-a4.document';
+import type { CustomerStatementDto } from '../sales/dto/customer-statement.dto';
+import { CustomerStatementA4Document } from './templates/report/customer-statement-a4.document';
 
 /** Printed when the quotation's seller has no human name. */
 const UNNAMED_SELLER = 'Vendedor sin nombre';
@@ -473,6 +475,30 @@ export class PdfGenerationService implements OnModuleInit {
     } catch (err) {
       this.logger.error(
         `PDF buffer render failed for seller report ${report.seller.id}: ${(err as Error).message}`,
+      );
+      throw new InternalServerErrorException('PDF_GENERATION_FAILED');
+    }
+  }
+
+  /**
+   * sales-history-redesign S11 — render the customer statement snapshot to a
+   * Buffer (same contract as the seller report: callers render before any
+   * response header; failures surface as 500 PDF_GENERATION_FAILED).
+   */
+  async renderCustomerStatementPdf(
+    statement: CustomerStatementDto,
+  ): Promise<Buffer> {
+    try {
+      const { renderToBuffer } = await import('@react-pdf/renderer');
+      // SAFETY: same nominal element-type gap as the seller report path.
+      return await renderToBuffer(
+        createElement(CustomerStatementA4Document, {
+          statement,
+        }) as unknown as Parameters<typeof renderToBuffer>[0],
+      );
+    } catch (err) {
+      this.logger.error(
+        `PDF buffer render failed for customer statement ${statement.customer.id}: ${(err as Error).message}`,
       );
       throw new InternalServerErrorException('PDF_GENERATION_FAILED');
     }

@@ -25,6 +25,9 @@ import { AuthModule } from '../auth/auth.module';
 import { SaleEventListener } from './listeners/sale-event.listener';
 import { SalesQueryController } from './sales-query.controller';
 import { SalesCustomerMonthlyController } from './sales-customer-monthly.controller';
+import { CustomerStatementService } from './customer-statement.service';
+import { CUSTOMER_STATEMENT_READER } from './domain/customer-statement.reader';
+import { PrismaCustomerStatementReader } from './infrastructure/prisma-customer-statement.reader';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
@@ -79,6 +82,14 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     SalesService,
     // sales-history-redesign — overdue cut-off / current month clock.
     { provide: SALES_CLOCK, useValue: () => new Date() },
+    // sales-history-redesign S11 — customer statement data. The PDF route
+    // (`SalesCustomerStatementController`) is registered in
+    // PdfGenerationModule, which already imports this module.
+    CustomerStatementService,
+    {
+      provide: CUSTOMER_STATEMENT_READER,
+      useClass: PrismaCustomerStatementReader,
+    },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
     SaleHoldSweepStore,
@@ -101,6 +112,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     SALE_REPOSITORY,
     ReceiptReviewService,
     SaleHoldService,
+    CustomerStatementService,
   ],
 })
 export class SalesModule {}
