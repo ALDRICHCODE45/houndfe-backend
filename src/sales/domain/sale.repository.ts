@@ -14,6 +14,13 @@ import type {
 } from '../dto/sales-list-filter.types';
 import type { Prisma } from '@prisma/client';
 
+/** sales-history-redesign S1 — one line of a `GET /sales` row preview. */
+export type SaleListItemPreview = {
+  productName: string;
+  variantName: string | null;
+  quantity: number;
+};
+
 export type PersistedChargePayment = {
   method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
   amountCents: number;
@@ -491,6 +498,14 @@ export interface ISaleRepository {
       shippingAddress: SaleShippingAddressView | null;
       /** pay-in-store-pickup / T1 — null without a payment intent. Absent on older repository mocks. */
       hold?: StaffSaleHoldView | null;
+      /**
+       * sales-history-redesign S1 (contract §1) — first 3 lines (`createdAt`,
+       * then `id`) from the line snapshot; `[]` without lines. One extra query
+       * per page, never per row.
+       */
+      itemsPreview: SaleListItemPreview[];
+      /** Number of lines of the sale (not units). */
+      itemsCount: number;
     }>
   >;
 
@@ -538,6 +553,31 @@ export interface ISaleRepository {
   >;
 
   countNotDeliveredConfirmed(input: SalesListBaseFilter): Promise<number>;
+
+  /**
+   * sales-history-redesign S3 (contract §7) — overdue sales under the BASE
+   * filters: CONFIRMED (base default), `openDebtCents > 0`, `dueDate <
+   * overdueBefore` (00:00Z of the local today: the due day is the UTC date of
+   * `dueDate`). `debtCents` sums the open debt, `oldestDueDate` is the
+   * minimum `dueDate` (null when none). Null sums are normalized to 0.
+   */
+  aggregateOverdueConfirmed(
+    input: SalesListBaseFilter,
+    overdueBefore: Date,
+  ): Promise<{ count: number; debtCents: number; oldestDueDate: Date | null }>;
+
+  /**
+   * sales-history-redesign S4 (contract §5.2) — CONFIRMED sales of one
+   * customer grouped by local month of `confirmedAt` in `timeZone`, over the
+   * local dates `[from, to)` (`YYYY-MM-DD`). Sparse: months without sales are
+   * absent (the service fills them). Tenant-scoped.
+   */
+  findMonthlyConfirmedByCustomer(input: {
+    customerId: string;
+    from: string;
+    to: string;
+    timeZone: string;
+  }): Promise<Array<{ month: string; saleCount: number; totalCents: number }>>;
 
   /**
    * pending-refund-obligations / prf-2 — tenant-scoped page of PENDING

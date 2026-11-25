@@ -14,7 +14,7 @@ import { ChatbotRequestWrapperModule } from '../chatbot-requests/chatbot-request
 import { CashRegisterModule } from '../cash-register/cash-register.module';
 import { SalesController } from './sales.controller';
 import { SalesCatalogController } from './sales-catalog.controller';
-import { SalesService } from './sales.service';
+import { SALES_CLOCK, SalesService } from './sales.service';
 import { PrismaSaleRepository } from './infrastructure/prisma-sale.repository';
 import { SALE_REPOSITORY } from './domain/sale.repository';
 import { ProductsModule } from '../products/products.module';
@@ -24,6 +24,7 @@ import { SaleStockService } from './sale-stock.service';
 import { AuthModule } from '../auth/auth.module';
 import { SaleEventListener } from './listeners/sale-event.listener';
 import { SalesQueryController } from './sales-query.controller';
+import { SalesCustomerMonthlyController } from './sales-customer-monthly.controller';
 import { SalesPaymentsController } from './sales-payments.controller';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
@@ -71,9 +72,13 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     // pay-in-store-pickup / T1 — PATCH /sales/:id/hold.
     SaleHoldController,
     ReceiptReviewController,
+    // sales-history-redesign S4 — GET /customers/:customerId/sales-monthly.
+    SalesCustomerMonthlyController,
   ],
   providers: [
     SalesService,
+    // sales-history-redesign — overdue cut-off / current month clock.
+    { provide: SALES_CLOCK, useValue: () => new Date() },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
     SaleHoldSweepStore,

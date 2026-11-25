@@ -1,5 +1,6 @@
 import type { StaffSaleHoldView } from '../domain/sale-hold';
 import type { SaleCancelReason } from '../domain/sale.entity';
+import type { SaleListItemPreview } from '../domain/sale.repository';
 import type { SaleShippingAddressDto } from './sale-shipping-address.dto';
 
 export interface SaleListRowDto {
@@ -34,6 +35,13 @@ export interface SaleListRowDto {
    * declared IN_STORE. Always present on the wire (optional only for typing).
    */
   hold?: StaffSaleHoldView | null;
+  /**
+   * sales-history-redesign S1 (contract §1) — at most 3 lines in creation
+   * order (`createdAt`, then `id`), names from the line snapshot.
+   */
+  itemsPreview: SaleListItemPreview[];
+  /** Number of lines of the sale (not units). */
+  itemsCount: number;
 }
 
 export interface SaleListResponseDto {
@@ -60,6 +68,13 @@ export interface SaleListResponseDto {
     all: number;
     pendingPayments: number;
     notDelivered: number;
+    /**
+     * sales-history-redesign S3 (contract §7) — overdue sales: CONFIRMED,
+     * open debt > 0, due day (the UTC calendar date of `dueDate`, as the POS
+     * renders it) before today's local date in the business timezone. Base
+     * filters only, like the other counts.
+     */
+    overdue: number;
   };
   /**
    * Customer sales history — WU backend summary block. Confirmed-only
@@ -79,6 +94,12 @@ export interface SaleListResponseDto {
     salesCount: number;
     totalSoldCents: number;
     outstandingDebtCents: number;
+    /** S2 — `round(totalSoldCents / salesCount)` (half up), 0 when no sale. */
+    averageTicketCents: number;
+    /** S3 — open debt of the overdue sales (`counts.overdue`). */
+    overdueDebtCents: number;
+    /** S3 — UTC calendar date (`YYYY-MM-DD`) of the oldest overdue `dueDate`, or null. */
+    oldestOverdueDueDate: string | null;
   };
   /**
    * Totals over EVERY row matching the same filters as `data` (base +

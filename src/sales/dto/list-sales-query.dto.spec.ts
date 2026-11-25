@@ -529,6 +529,29 @@ describe('ListSalesQueryDto', () => {
     });
   });
 
+  // sales-history-redesign S3 (contract §7) — `overdue=true` page filter.
+  describe('overdue page filter', () => {
+    it('defaults to false (no filter) when absent', async () => {
+      const dto = makeDto({});
+      expect(await validate(dto)).toHaveLength(0);
+      expect(dto.overdue).toBe(false);
+    });
+
+    it.each([
+      ['true', true],
+      ['false', false],
+    ])('parses overdue=%s', async (raw, parsed) => {
+      const dto = makeDto({ overdue: raw });
+      expect(await validate(dto)).toHaveLength(0);
+      expect(dto.overdue).toBe(parsed);
+    });
+
+    it.each(['', 'yes', '1'])('rejects overdue=%j', async (raw) => {
+      const errors = await validate(makeDto({ overdue: raw }));
+      expect(errors.map((e) => e.property)).toEqual(['overdue']);
+    });
+  });
+
   describe('deprecated from/to aliases', () => {
     let warnSpy: jest.SpyInstance;
 

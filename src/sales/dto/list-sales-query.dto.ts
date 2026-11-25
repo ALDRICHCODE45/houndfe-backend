@@ -155,6 +155,18 @@ export class ListSalesQueryDto {
   @IsBoolean()
   paymentMethodIncludeNull: boolean = false;
 
+  /**
+   * sales-history-redesign S3 (contract §7): `true` lists only overdue sales
+   * (CONFIRMED, open debt > 0, due day — the UTC date of `dueDate` — before
+   * today's local date in the business timezone).
+   * A page filter: narrows `data`/`pagination`/`filterSummary`, never
+   * `summary`/`counts`. `false` or absent = no filter.
+   */
+  @IsOptional()
+  @Transform(({ value }) => toBoolean(value))
+  @IsBoolean()
+  overdue: boolean = false;
+
   @IsOptional()
   @Transform(({ value }) => toBoolean(value))
   @IsBoolean()

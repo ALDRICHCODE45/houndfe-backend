@@ -81,6 +81,8 @@ function fixture(kind: Kind) {
       findFirst: jest.fn().mockResolvedValue(row),
       findMany: jest.fn().mockResolvedValue([row]),
     },
+    // sales-history-redesign S1 — the page's one items-preview query.
+    $queryRaw: jest.fn().mockResolvedValue([]),
   };
   const tenant = {
     getClient: () => client,
@@ -129,6 +131,7 @@ describe('GET /sales shipping address source status', () => {
       sortOrder: 'desc',
     });
     expect(client.sale.findMany).toHaveBeenCalledTimes(1);
+    expect(client.$queryRaw).toHaveBeenCalledTimes(1);
     expect(client.sale.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         include: expect.objectContaining(

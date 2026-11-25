@@ -15,6 +15,7 @@ import type {
   PersistedSaleRefundRecord,
   PersistedSalePaymentRecord,
   RefundSettlementResult,
+  SaleListItemPreview,
   SaleRefundMethod,
   SettleRefundInput,
 } from '../domain/sale.repository';
@@ -1918,6 +1919,18 @@ export class PrismaSaleRepository implements ISaleRepository {
       andClauses.push({ dueDate: null });
     }
 
+    if (input.overdueBefore) {
+      // sales-history-redesign S3 (contract §7) — overdue: CONFIRMED (also
+      // when an explicit status filter dropped the base default), open debt
+      // > 0, due day (UTC date of `dueDate`) before the local today, i.e.
+      // `dueDate` before 00:00Z of the local today (service cut-off).
+      andClauses.push({
+        status: 'CONFIRMED',
+        openDebtCents: { gt: 0 },
+        dueDate: { lt: input.overdueBefore },
+      });
+    }
+
     if (input.petId) {
       // customer-pets / T3 — at least one line for the pet (EXISTS, so a sale
       // with two lines for it is one row and the count/aggregate stay exact).
@@ -1979,6 +1992,10 @@ export class PrismaSaleRepository implements ISaleRepository {
       skip: (input.page - 1) * input.limit,
       take: input.limit,
     });
+    const previews = await this.findItemsPreview(
+      tenantId,
+      rows.map((row) => row.id),
+    );
 
     return rows.map((row) => ({
       id: row.id,
@@ -2008,7 +2025,62 @@ export class PrismaSaleRepository implements ISaleRepository {
       // pay-in-store-pickup / T1 — null unless the bot declared IN_STORE.
       // T6 (S10) — kept on a CANCELED sale, plus `expiredAt`.
       hold: toStaffSaleHoldView(row),
+      itemsPreview: previews.get(row.id)?.items ?? [],
+      itemsCount: previews.get(row.id)?.count ?? 0,
     }));
+  }
+
+  /**
+   * sales-history-redesign S1 (contract §1) — ONE query for the whole page:
+   * the first 3 lines of each sale (`createdAt`, then `id`) plus its line
+   * count, via window functions over the page's sale ids (≤ 100). Raw SQL
+   * bypasses the CLS tenant extension, so `"tenantId"` scopes explicitly.
+   * An empty page runs no query.
+   */
+  private async findItemsPreview(
+    tenantId: string,
+    saleIds: string[],
+  ): Promise<Map<string, { items: SaleListItemPreview[]; count: number }>> {
+    const bySale = new Map<
+      string,
+      { items: SaleListItemPreview[]; count: number }
+    >();
+    if (saleIds.length === 0) return bySale;
+    const rows = await this.tenantPrisma.getClient().$queryRaw<
+      Array<{
+        saleId: string;
+        productName: string;
+        variantName: string | null;
+        quantity: number;
+        itemsCount: number;
+      }>
+    >(Prisma.sql`
+      SELECT "saleId", "productName", "variantName", "quantity", "itemsCount"
+      FROM (
+        SELECT
+          "saleId", "productName", "variantName", "quantity",
+          ROW_NUMBER() OVER (PARTITION BY "saleId" ORDER BY "createdAt", "id") AS "rn",
+          COUNT(*) OVER (PARTITION BY "saleId")::int AS "itemsCount"
+        FROM "sale_items"
+        WHERE "tenantId" = ${tenantId}
+          AND "saleId" IN (${Prisma.join(saleIds)})
+      ) AS "ranked"
+      WHERE "rn" <= 3
+      ORDER BY "saleId", "rn"
+    `);
+    for (const row of rows) {
+      const entry = bySale.get(row.saleId) ?? {
+        items: [],
+        count: Number(row.itemsCount),
+      };
+      entry.items.push({
+        productName: row.productName,
+        variantName: row.variantName,
+        quantity: row.quantity,
+      });
+      bySale.set(row.saleId, entry);
+    }
+    return bySale;
   }
 
   /**
@@ -2112,6 +2184,72 @@ export class PrismaSaleRepository implements ISaleRepository {
         NOT: { deliveryStatus: 'DELIVERED' },
       },
     });
+  }
+
+  /**
+   * sales-history-redesign S3 (contract §7) — one aggregate over the base
+   * filters (CONFIRMED by default) narrowed to the overdue predicate; see the
+   * port doc. `openDebtCents` is the generated open-debt column (read only).
+   */
+  async aggregateOverdueConfirmed(
+    input: SalesListBaseFilter,
+    overdueBefore: Date,
+  ): Promise<{ count: number; debtCents: number; oldestDueDate: Date | null }> {
+    const prisma = this.tenantPrisma.getClient();
+    const result = await prisma.sale.aggregate({
+      where: {
+        AND: [
+          this.buildBaseWhere(input),
+          { openDebtCents: { gt: 0 }, dueDate: { lt: overdueBefore } },
+        ],
+      },
+      _count: { _all: true },
+      _sum: { openDebtCents: true },
+      _min: { dueDate: true },
+    });
+    return {
+      count: result._count._all,
+      debtCents: result._sum.openDebtCents ?? 0,
+      oldestDueDate: result._min.dueDate ?? null,
+    };
+  }
+
+  /**
+   * sales-history-redesign S4 (contract §5.2) — see the port doc. Same
+   * clock normalization as the analytics daily series: the stored
+   * `timestamp(3)` is the UTC wall clock, so buckets use `"confirmedAt" AT
+   * TIME ZONE 'UTC' AT TIME ZONE <zone>` and bounds `(<day>::timestamp AT
+   * TIME ZONE <zone>) AT TIME ZONE 'UTC'`. Raw SQL: explicit tenant predicate.
+   */
+  async findMonthlyConfirmedByCustomer(input: {
+    customerId: string;
+    from: string;
+    to: string;
+    timeZone: string;
+  }): Promise<Array<{ month: string; saleCount: number; totalCents: number }>> {
+    const tenantId = this.requireTenantId();
+    const rows = await this.tenantPrisma.getClient().$queryRaw<
+      Array<{ month: string; saleCount: number; totalCents: bigint }>
+    >(Prisma.sql`
+      SELECT
+        to_char(("confirmedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${input.timeZone}), 'YYYY-MM') AS "month",
+        COUNT(*)::int AS "saleCount",
+        COALESCE(SUM("totalCents"), 0)::bigint AS "totalCents"
+      FROM "sales"
+      WHERE "tenantId" = ${tenantId}
+        AND "customerId" = ${input.customerId}
+        AND "status" = 'CONFIRMED'
+        AND "confirmedAt" IS NOT NULL
+        AND "confirmedAt" >= ((${input.from}::date::timestamp AT TIME ZONE ${input.timeZone}) AT TIME ZONE 'UTC')
+        AND "confirmedAt" < ((${input.to}::date::timestamp AT TIME ZONE ${input.timeZone}) AT TIME ZONE 'UTC')
+      GROUP BY 1
+      ORDER BY 1
+    `);
+    return rows.map((row) => ({
+      month: row.month,
+      saleCount: Number(row.saleCount),
+      totalCents: Number(row.totalCents),
+    }));
   }
 
   /**

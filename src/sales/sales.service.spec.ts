@@ -92,6 +92,12 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     aggregateSummaryConfirmed: jest.fn(),
     groupByPaymentStatusConfirmed: jest.fn(),
     countNotDeliveredConfirmed: jest.fn(),
+    aggregateOverdueConfirmed: jest.fn().mockResolvedValue({
+      count: 0,
+      debtCents: 0,
+      oldestDueDate: null,
+    }),
+    findMonthlyConfirmedByCustomer: jest.fn().mockResolvedValue([]),
     findManyPendingRefunds: jest.fn(),
     countPendingRefunds: jest.fn(),
     findDraftResponseById: jest.fn(),
@@ -7941,11 +7947,15 @@ describe('SalesService', () => {
         all: 7,
         pendingPayments: 3,
         notDelivered: 3,
+        overdue: 0,
       });
       expect(result.summary).toEqual({
         salesCount: 7,
         totalSoldCents: 10500,
         outstandingDebtCents: 0,
+        averageTicketCents: 1500,
+        overdueDebtCents: 0,
+        oldestOverdueDueDate: null,
       });
       expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
         expect.objectContaining({ paymentStatus: 'PAID', page: 2, limit: 1 }),
@@ -8138,6 +8148,10 @@ describe('SalesService', () => {
         salesCount: 7,
         totalSoldCents: 12345,
         outstandingDebtCents: 678,
+        // 12345 / 7 = 1763.57… → 1764 (half up).
+        averageTicketCents: 1764,
+        overdueDebtCents: 0,
+        oldestOverdueDueDate: null,
       });
       expect(result.summary.salesCount).toBe(result.pagination.total);
       expect(result.summary.salesCount).toBe(result.counts.all);
@@ -8205,6 +8219,9 @@ describe('SalesService', () => {
         salesCount: 0,
         totalSoldCents: 0,
         outstandingDebtCents: 0,
+        averageTicketCents: 0,
+        overdueDebtCents: 0,
+        oldestOverdueDueDate: null,
       });
       expect(result.pagination.total).toBe(0);
       expect(result.pagination.totalPages).toBe(0);
@@ -8219,6 +8236,13 @@ describe('SalesService', () => {
         salesCount: 62,
         totalSoldCents: 990000,
         outstandingDebtCents: 1500,
+      };
+      // sales-history-redesign S2/S3 — derived/overdue keys of the same block.
+      const KPI_SUMMARY_WIRE = {
+        ...KPI_SUMMARY,
+        averageTicketCents: 15968, // 990000 / 62 = 15967.7… → 15968
+        overdueDebtCents: 0,
+        oldestOverdueDueDate: null,
       };
 
       beforeEach(() => {
@@ -8298,8 +8322,9 @@ describe('SalesService', () => {
             all: 62,
             pendingPayments: 2,
             notDelivered: 5,
+            overdue: 0,
           });
-          expect(result.summary).toEqual(KPI_SUMMARY);
+          expect(result.summary).toEqual(KPI_SUMMARY_WIRE);
         },
       );
 
@@ -8343,7 +8368,7 @@ describe('SalesService', () => {
           debtCents: 9123,
         });
         expect(result.filterSummary.count).toBe(result.pagination.total);
-        expect(result.summary).toEqual(KPI_SUMMARY);
+        expect(result.summary).toEqual(KPI_SUMMARY_WIRE);
         expect(saleRepo.findManyConfirmed).toHaveBeenCalledWith(
           expect.objectContaining({ sortBy: 'debtCents', sortOrder: 'desc' }),
         );

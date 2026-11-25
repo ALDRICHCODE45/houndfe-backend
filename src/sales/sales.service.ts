@@ -13,11 +13,13 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'crypto';
 import { Sale, type SaleCancelReason } from './domain/sale.entity';
 import type { SaleItem, SaleItemProps } from './domain/sale-item.entity';
 import { CustomerPetError } from '../customer-pets/domain/customer-pet-error';
+import { businessToday } from '../inventory/domain/fefo-allocator';
 import {
   resolveSaleLinePet,
   type SaleLinePetFacts,
@@ -75,6 +77,7 @@ import type {
   SalesListExtendedFilter,
 } from './dto/sales-list-filter.types';
 import type { SaleListResponseDto } from './dto/sale-list-response.dto';
+import type { CustomerSalesMonthlyResponseDto } from './dto/customer-sales-monthly.dto';
 import type { ListPendingRefundsQueryDto } from './dto/list-pending-refunds-query.dto';
 import type { PendingRefundListResponseDto } from './dto/pending-refund-response.dto';
 import type { SettleRefundDto } from './dto/settle-refund.dto';
@@ -125,6 +128,20 @@ import {
   withoutQuotedDiscount,
   type KeptQuotedPromotionLine,
 } from './domain/quotation-opening-promotions';
+
+/**
+ * sales-history-redesign — business timezone of the overdue cut-off and the
+ * customer monthly buckets (`PROMOTIONS_BUSINESS_TIMEZONE`, the one stock,
+ * promotions and customer pets use).
+ */
+const DEFAULT_BUSINESS_TIMEZONE = 'America/Mexico_City';
+
+/**
+ * sales-history-redesign — clock seam of the overdue cut-off and the current
+ * month (`() => Date`). Bound to the system clock in `SalesModule`; tests
+ * inject a fixed one. Absent → system clock.
+ */
+export const SALES_CLOCK = Symbol('SALES_CLOCK');
 
 /**
  * S8 — upper bound on veto rounds when opening a sale from a quotation.
@@ -684,7 +701,26 @@ export class SalesService {
     // stock paths fail closed when it is not wired.
     @Optional()
     private readonly saleStock?: SaleStockService,
+    // sales-history-redesign — business timezone source. Optional so the
+    // existing constructors keep working; absent → America/Mexico_City.
+    @Optional()
+    private readonly config?: ConfigService,
+    @Optional()
+    @Inject(SALES_CLOCK)
+    private readonly clock?: () => Date,
   ) {}
+
+  private now(): Date {
+    return this.clock ? this.clock() : new Date();
+  }
+
+  /** Business timezone (`PROMOTIONS_BUSINESS_TIMEZONE`, default Mexico City). */
+  private businessTimeZone(): string {
+    return (
+      this.config?.get<string>('PROMOTIONS_BUSINESS_TIMEZONE') ??
+      DEFAULT_BUSINESS_TIMEZONE
+    );
+  }
 
   private requireSaleStock(): SaleStockService {
     if (!this.saleStock) {
@@ -1930,7 +1966,18 @@ export class SalesService {
     const limit = query.limit ?? 20;
 
     await this.assertHistoryPetOfCustomer(query);
+    // sales-history-redesign S3 (contract §7) — the due day of a sale is the
+    // UTC calendar date of `dueDate` (user-picked dates are stored at 00:00Z
+    // of the picked day and the POS renders the UTC date), and a sale is
+    // overdue when that day is before today's LOCAL date in the business
+    // timezone. So the one shared cut-off (counts, summary and the
+    // `overdue=true` filter) is 00:00Z of the local today: `dueDate < cutoff`.
+    const timeZone = this.businessTimeZone();
+    const overdueBefore = new Date(
+      `${businessToday(this.now(), timeZone)}T00:00:00.000Z`,
+    );
     const extendedFilters = this.toSalesListExtendedFilter(query);
+    if (query.overdue === true) extendedFilters.overdueBefore = overdueBefore;
     const baseFilters: SalesListBaseFilter = {
       q: extendedFilters.q,
       cashierUserId: extendedFilters.cashierUserId,
@@ -1950,20 +1997,30 @@ export class SalesService {
     // with the exact filters that drove the page (`aggregateManyConfirmed`),
     // so `?status=CANCELED&folio=…` reports the matching rows instead of
     // the base total.
-    const [data, filterSummary, summary, groupedPaymentStatus, notDelivered] =
-      await Promise.all([
-        this.saleRepo.findManyConfirmed({
-          page,
-          limit,
-          sortBy: query.sortBy ?? 'confirmedAt',
-          sortOrder: query.sortOrder ?? 'desc',
-          ...extendedFilters,
-        }),
-        this.saleRepo.aggregateManyConfirmed(extendedFilters),
-        this.saleRepo.aggregateSummaryConfirmed(baseFilters),
-        this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
-        this.saleRepo.countNotDeliveredConfirmed(baseFilters),
-      ]);
+    // sales-history-redesign: `findManyConfirmed` adds one items-preview query
+    // per non-empty page (S1) and `aggregateOverdueConfirmed` one aggregate
+    // (S3; Prisma cannot fold a conditional sum into the summary aggregate).
+    const [
+      data,
+      filterSummary,
+      summary,
+      groupedPaymentStatus,
+      notDelivered,
+      overdue,
+    ] = await Promise.all([
+      this.saleRepo.findManyConfirmed({
+        page,
+        limit,
+        sortBy: query.sortBy ?? 'confirmedAt',
+        sortOrder: query.sortOrder ?? 'desc',
+        ...extendedFilters,
+      }),
+      this.saleRepo.aggregateManyConfirmed(extendedFilters),
+      this.saleRepo.aggregateSummaryConfirmed(baseFilters),
+      this.saleRepo.groupByPaymentStatusConfirmed(baseFilters),
+      this.saleRepo.countNotDeliveredConfirmed(baseFilters),
+      this.saleRepo.aggregateOverdueConfirmed(baseFilters, overdueBefore),
+    ]);
 
     const total = filterSummary.count;
     const kpiTotal = summary.salesCount;
@@ -1980,17 +2037,85 @@ export class SalesService {
         all: kpiTotal,
         pendingPayments,
         notDelivered,
+        overdue: overdue.count,
       },
       summary: {
         salesCount: summary.salesCount,
         totalSoldCents: summary.totalSoldCents,
         outstandingDebtCents: summary.outstandingDebtCents,
+        // S2 (contract §3) — half up, like the seller report.
+        averageTicketCents:
+          summary.salesCount === 0
+            ? 0
+            : Math.round(summary.totalSoldCents / summary.salesCount),
+        overdueDebtCents: overdue.debtCents,
+        // The UTC calendar date, exactly as the row's `dueDate` renders.
+        oldestOverdueDueDate: overdue.oldestDueDate
+          ? overdue.oldestDueDate.toISOString().slice(0, 10)
+          : null,
       },
       filterSummary: {
         count: filterSummary.count,
         totalCents: filterSummary.totalCents,
         debtCents: filterSummary.debtCents,
       },
+    };
+  }
+
+  /**
+   * sales-history-redesign S4 (contract §5.2) — `GET /customers/:customerId/
+   * sales-monthly`: one entry per local month, the last `months` months
+   * ending with the current one in the business timezone, zero months
+   * included; CONFIRMED sales by `confirmedAt`. A customer that is not in
+   * this tenant is `404 CUSTOMER_NOT_FOUND`.
+   */
+  async getCustomerSalesMonthly(
+    customerId: string,
+    months: number,
+  ): Promise<CustomerSalesMonthlyResponseDto> {
+    const customer = await this.tenantPrisma.getClient().customer.findFirst({
+      where: { id: customerId, tenantId: this.tenantPrisma.getTenantId() },
+      select: { id: true },
+    });
+    if (!customer) {
+      // Code-only envelope, the one `GET /customers/:customerId/pets` answers.
+      throw new HttpException(
+        {
+          statusCode: 404,
+          error: 'CUSTOMER_NOT_FOUND',
+          message: 'CUSTOMER_NOT_FOUND',
+        },
+        404,
+      );
+    }
+
+    const timeZone = this.businessTimeZone();
+    const [year, month] = businessToday(this.now(), timeZone)
+      .split('-')
+      .map(Number);
+    // `YYYY-MM` of the month `offset` months after the current local one.
+    const monthKey = (offset: number) =>
+      new Date(Date.UTC(year, month - 1 + offset, 1))
+        .toISOString()
+        .slice(0, 7);
+    const keys = Array.from({ length: months }, (_, i) =>
+      monthKey(i - months + 1),
+    );
+    const rows = await this.saleRepo.findMonthlyConfirmedByCustomer({
+      customerId,
+      from: `${keys[0]}-01`,
+      to: `${monthKey(1)}-01`,
+      timeZone,
+    });
+    const byMonth = new Map(rows.map((row) => [row.month, row]));
+    return {
+      customerId,
+      timeZone,
+      months: keys.map((key) => ({
+        month: key,
+        saleCount: byMonth.get(key)?.saleCount ?? 0,
+        totalCents: byMonth.get(key)?.totalCents ?? 0,
+      })),
     };
   }
 
