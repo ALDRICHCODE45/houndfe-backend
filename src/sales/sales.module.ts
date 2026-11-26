@@ -33,6 +33,10 @@ import { CustomerCollectionsController } from './customer-collections.controller
 import { CustomerCollectionService } from './customer-collection.service';
 import { CUSTOMER_COLLECTION_REPOSITORY } from './domain/customer-collection.repository';
 import { PrismaCustomerCollectionRepository } from './infrastructure/prisma-customer-collection.repository';
+import { CollectionsController } from './collections.controller';
+import { CollectionReadService } from './collection-read.service';
+import { COLLECTION_READER } from './domain/collection-reader';
+import { PrismaCollectionReader } from './infrastructure/prisma-collection.reader';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
 import { SaleHoldExpireService } from './sale-hold-expire.service';
@@ -83,6 +87,9 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     SalesCustomerMonthlyController,
     // customer-collection / T2 — POST /customers/:customerId/collections(/preview).
     CustomerCollectionsController,
+    // customer-collection / T3 — GET /collections/:collectionId. The receipt
+    // PDF route is registered in PdfGenerationModule (imports this module).
+    CollectionsController,
   ],
   providers: [
     SalesService,
@@ -102,6 +109,9 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
       provide: CUSTOMER_COLLECTION_REPOSITORY,
       useClass: PrismaCustomerCollectionRepository,
     },
+    // customer-collection / T3 — collection read + receipt data.
+    CollectionReadService,
+    { provide: COLLECTION_READER, useClass: PrismaCollectionReader },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
     SaleHoldSweepStore,
@@ -125,6 +135,7 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     ReceiptReviewService,
     SaleHoldService,
     CustomerStatementService,
+    CollectionReadService,
   ],
 })
 export class SalesModule {}

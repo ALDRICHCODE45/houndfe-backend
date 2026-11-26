@@ -31,9 +31,12 @@ export function resolveTicketBrandName(
 export function TicketHeader({
   brandName,
   folio,
+  docKind = 'RECIBO',
 }: {
   brandName: string;
   folio: string;
+  /** Document kind over the folio (default «RECIBO»). */
+  docKind?: string;
 }) {
   return (
     <View style={TICKET_STYLES.header}>
@@ -41,7 +44,7 @@ export function TicketHeader({
         <Text style={TICKET_STYLES.wordmark}>{brandName}</Text>
       </View>
       <View style={TICKET_STYLES.docBox}>
-        <Text style={TICKET_STYLES.docKind}>RECIBO</Text>
+        <Text style={TICKET_STYLES.docKind}>{docKind}</Text>
         <Text style={TICKET_STYLES.docFolio}>{`FOLIO #${folio}`}</Text>
       </View>
     </View>
@@ -176,16 +179,26 @@ export function TicketSummaryRow({
 }
 
 /** Outstanding balance, framed (2 px border, no fill) so it cannot be missed. */
-export function TicketDebtBox({ debtCents }: { debtCents: number }) {
+export function TicketDebtBox({
+  debtCents,
+  label = 'Deuda',
+  note = TICKET_DEBT_NOTE,
+}: {
+  debtCents: number;
+  /** Left label (default «Deuda»). */
+  label?: string;
+  /** Centered copy under the amount (default «Saldo pendiente de pago»). */
+  note?: string;
+}) {
   return (
     <View style={TICKET_STYLES.debtBox} wrap={false}>
       <View style={TICKET_STYLES.debtRow}>
-        <Text style={TICKET_STYLES.debtText}>Deuda</Text>
+        <Text style={TICKET_STYLES.debtText}>{label}</Text>
         <Text style={[TICKET_STYLES.debtText, TICKET_STYLES.debtValue]}>
           {formatA4Money(debtCents)}
         </Text>
       </View>
-      <Text style={TICKET_STYLES.debtNote}>{TICKET_DEBT_NOTE}</Text>
+      <Text style={TICKET_STYLES.debtNote}>{note}</Text>
     </View>
   );
 }
@@ -246,10 +259,15 @@ export function TicketPayment({
   );
 }
 
-export function TicketFooter() {
+export function TicketFooter({
+  thanks = 'Gracias por su compra.',
+}: {
+  /** Bold closing line (default «Gracias por su compra.»). */
+  thanks?: string;
+} = {}) {
   return (
     <View style={TICKET_STYLES.end} wrap={false}>
-      <Text style={TICKET_STYLES.endThanks}>Gracias por su compra.</Text>
+      <Text style={TICKET_STYLES.endThanks}>{thanks}</Text>
       <Text style={TICKET_STYLES.endNote}>
         Este comprobante no constituye una factura fiscal.
       </Text>

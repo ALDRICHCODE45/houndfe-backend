@@ -14,6 +14,11 @@ import { CustomerCollectionsController } from './customer-collections.controller
 import { CustomerCollectionService } from './customer-collection.service';
 import { CUSTOMER_COLLECTION_REPOSITORY } from './domain/customer-collection.repository';
 import { PrismaCustomerCollectionRepository } from './infrastructure/prisma-customer-collection.repository';
+import { CollectionsController } from './collections.controller';
+import { CollectionReceiptPdfController } from './collection-receipt-pdf.controller';
+import { CollectionReadService } from './collection-read.service';
+import { COLLECTION_READER } from './domain/collection-reader';
+import { PrismaCollectionReader } from './infrastructure/prisma-collection.reader';
 import { TENANT_SCOPED_MODELS } from '../shared/tenant/tenant-scoped-models.constant';
 
 describe('SalesModule receipt review registration', () => {
@@ -120,5 +125,31 @@ describe('SalesModule customer collection registration (customer-collection / T2
 
   it('registers SaleCollection as a tenant-scoped model', () => {
     expect(TENANT_SCOPED_MODELS.has('SaleCollection')).toBe(true);
+  });
+});
+
+describe('SalesModule collection read registration (customer-collection / T3)', () => {
+  it('registers GET /collections/:id, the read service (exported) and the Prisma reader binding', () => {
+    const controllers = Reflect.getMetadata(
+      MODULE_METADATA.CONTROLLERS,
+      SalesModule,
+    ) as unknown[];
+    const providers = Reflect.getMetadata(
+      MODULE_METADATA.PROVIDERS,
+      SalesModule,
+    ) as unknown[];
+    const exports = Reflect.getMetadata(
+      MODULE_METADATA.EXPORTS,
+      SalesModule,
+    ) as unknown[];
+
+    expect(controllers).toContain(CollectionsController);
+    expect(controllers).not.toContain(CollectionReceiptPdfController);
+    expect(providers).toContain(CollectionReadService);
+    expect(providers).toContainEqual({
+      provide: COLLECTION_READER,
+      useClass: PrismaCollectionReader,
+    });
+    expect(exports).toContain(CollectionReadService);
   });
 });

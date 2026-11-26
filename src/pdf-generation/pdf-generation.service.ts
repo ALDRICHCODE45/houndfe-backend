@@ -76,6 +76,13 @@ import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales
 import { SellerSalesReportA4Document } from './templates/report/seller-sales-report-a4.document';
 import type { CustomerStatementDto } from '../sales/dto/customer-statement.dto';
 import { CustomerStatementA4Document } from './templates/report/customer-statement-a4.document';
+import type { CollectionReceiptDto } from '../sales/dto/customer-collection.dto';
+import { buildCollectionReceiptProps } from './templates/collection/collection-receipt.props';
+import { CollectionReceiptTicketDocument } from './templates/collection/collection-receipt-ticket.document';
+import { CollectionReceiptA4Document } from './templates/collection/collection-receipt-a4.document';
+
+/** customer-collection / T3 (S5) — formats of `GET /collections/:id/pdf`. */
+export type CollectionReceiptFormat = 'ticket' | 'a4';
 
 /** Printed when the quotation's seller has no human name. */
 const UNNAMED_SELLER = 'Vendedor sin nombre';
@@ -499,6 +506,37 @@ export class PdfGenerationService implements OnModuleInit {
     } catch (err) {
       this.logger.error(
         `PDF buffer render failed for customer statement ${statement.customer.id}: ${(err as Error).message}`,
+      );
+      throw new InternalServerErrorException('PDF_GENERATION_FAILED');
+    }
+  }
+
+  /**
+   * customer-collection / T3 (S5) — render the «Comprobante de cobro» of one
+   * «Cobrar todo» to a Buffer, thermal ticket or A4 (same contract as the
+   * statement: callers render before any response header; failures surface
+   * as 500 PDF_GENERATION_FAILED).
+   */
+  async renderCollectionReceiptPdf(
+    receipt: CollectionReceiptDto,
+    format: CollectionReceiptFormat,
+  ): Promise<Buffer> {
+    const props = buildCollectionReceiptProps(receipt, COMPANY_NAME);
+    const Template =
+      format === 'a4'
+        ? CollectionReceiptA4Document
+        : CollectionReceiptTicketDocument;
+    try {
+      const { renderToBuffer } = await import('@react-pdf/renderer');
+      // SAFETY: same nominal element-type gap as the seller report path.
+      return await renderToBuffer(
+        createElement(Template, props) as unknown as Parameters<
+          typeof renderToBuffer
+        >[0],
+      );
+    } catch (err) {
+      this.logger.error(
+        `PDF buffer render failed for collection ${receipt.collection.collectionId} (format=${format}): ${(err as Error).message}`,
       );
       throw new InternalServerErrorException('PDF_GENERATION_FAILED');
     }

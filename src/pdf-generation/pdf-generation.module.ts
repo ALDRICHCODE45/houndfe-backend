@@ -45,6 +45,7 @@ import { TenantsModule } from '../tenants/tenants.module';
 import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesCustomerStatementController } from '../sales/sales-customer-statement.controller';
+import { CollectionReceiptPdfController } from '../sales/collection-receipt-pdf.controller';
 
 @Module({
   imports: [AuthModule, SalesModule, TenantsModule, CashRegisterModule],
@@ -52,10 +53,13 @@ import { SalesCustomerStatementController } from '../sales/sales-customer-statem
   // sales-history-redesign S11 — `GET /customers/:customerId/statement/pdf`
   // lives in src/sales but is registered here: this module already imports
   // SalesModule (which exports CustomerStatementService), so no module cycle.
+  // customer-collection / T3 — `GET /collections/:collectionId/pdf`, same
+  // pattern (SalesModule exports CollectionReadService).
   controllers: [
     PdfGenerationController,
     CashClosingPdfController,
     SalesCustomerStatementController,
+    CollectionReceiptPdfController,
   ],
   exports: [PdfGenerationService],
 })

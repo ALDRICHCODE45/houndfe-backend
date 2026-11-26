@@ -8,9 +8,11 @@
  * `PrismaCustomerCollectionRepository`, the cash ledger
  * (`PrismaCashRegisterApplication`), the stock journal and the outbox writer.
  * Routes: the collection preview/apply, the single-sale payment, the sale
- * cancellation and the customer DELETE.
+ * cancellation and the customer DELETE; T3 adds `GET /collections/:id` and
+ * its receipt PDF (real `PrismaCollectionReader`, real render method of
+ * `PdfGenerationService` without `onModuleInit`).
  */
-import type { INestApplication } from '@nestjs/common';
+import { Logger, type INestApplication } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { createMongoAbility } from '@casl/ability';
 import { randomUUID } from 'node:crypto';
@@ -30,10 +32,15 @@ import {
   type ZoneWorld,
 } from '../../delivery-zones/test-support/delivery-zone-world';
 import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
+import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
 import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
 import { PrismaStockAlertStateRepository } from '../../stock-alerts/infrastructure/prisma-stock-alert-state.repository';
+import { CollectionReadService } from '../collection-read.service';
+import { CollectionReceiptPdfController } from '../collection-receipt-pdf.controller';
+import { CollectionsController } from '../collections.controller';
+import { PrismaCollectionReader } from '../infrastructure/prisma-collection.reader';
 import { CustomerCollectionService } from '../customer-collection.service';
 import { CustomerCollectionsController } from '../customer-collections.controller';
 import { PrismaCustomerCollectionRepository } from '../infrastructure/prisma-customer-collection.repository';
@@ -47,14 +54,28 @@ import { SalesService } from '../sales.service';
 export const COLLECTION_NOW = new Date('2026-11-25T18:00:00.000Z');
 
 export async function createCollectionTestApp(): Promise<INestApplication> {
+  // Real render method without `onModuleInit` (no font CDN preflight).
+  const pdf = Object.create(
+    PdfGenerationService.prototype,
+  ) as PdfGenerationService;
+  Object.assign(pdf, { logger: new Logger('CollectionReceiptSpec') });
   return createZoneTestApp({
     controllers: [
       CustomerCollectionsController,
+      CollectionsController,
+      CollectionReceiptPdfController,
       SalesPaymentsController,
       SalesQueryController,
       CustomersController,
     ],
     providers: [
+      { provide: PdfGenerationService, useValue: pdf },
+      {
+        provide: CollectionReadService,
+        inject: [TenantPrismaService],
+        useFactory: (tenantPrisma: TenantPrismaService) =>
+          new CollectionReadService(new PrismaCollectionReader(tenantPrisma)),
+      },
       CustomersService,
       { provide: CUSTOMER_REPOSITORY, useClass: PrismaCustomerRepository },
       {
@@ -291,6 +312,18 @@ export function routes(app: () => INestApplication) {
         .send({ reason: 'CUSTOMER_REQUEST' }),
     deleteCustomer: (m: SeededMember, customerId: string) =>
       request(server()).delete(`/customers/${customerId}`).set(auth(m)),
+    read: (m: SeededMember, collectionId: string) =>
+      request(server()).get(`/collections/${collectionId}`).set(auth(m)),
+    receiptPdf: (m: SeededMember, collectionId: string, query = '') =>
+      request(server())
+        .get(`/collections/${collectionId}/pdf${query}`)
+        .set(auth(m))
+        .buffer(true)
+        .parse((res, done) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => done(null, Buffer.concat(chunks)));
+        }),
   };
 }
 

@@ -155,3 +155,41 @@ export interface CollectionResponseDto {
   sales: Array<CollectionSaleResponseDto & { paymentIds: string[] }>;
   remainingCustomerDebtCents: number;
 }
+
+/**
+ * customer-collection / T3 (S5) — one sale of `GET /collections/:id`: the
+ * POST sale plus the sale's CURRENT status (`CANCELED` when it was cancelled
+ * after the collection). Every other field describes the collection moment
+ * (see `CollectionReadService`).
+ */
+export interface CollectionReadSaleDto extends CollectionSaleResponseDto {
+  paymentIds: string[];
+  saleStatus: 'CONFIRMED' | 'CANCELED';
+}
+
+/**
+ * customer-collection / T3 (S5) — `GET /collections/:id`: the POST shape,
+ * plus `saleStatus` per sale; `customer` is null once the customer was
+ * deleted, and then `remainingCustomerDebtCents` is null too (the customer's
+ * other sales can no longer be identified).
+ */
+export interface CollectionReadResponseDto {
+  collectionId: string;
+  customer: { id: string; name: string } | null;
+  createdAt: string;
+  tenderedCents: number;
+  appliedCents: number;
+  changeDueCents: number;
+  payments: CollectionTenderResponseDto[];
+  sales: CollectionReadSaleDto[];
+  remainingCustomerDebtCents: number | null;
+}
+
+/** customer-collection / T3 (S5) — what the «Comprobante de cobro» prints. */
+export interface CollectionReceiptDto {
+  collection: CollectionReadResponseDto;
+  /** Tenant (branch) name. */
+  branchName: string;
+  /** Name of the cashier who collected (null when the user is gone). */
+  cashierName: string | null;
+}

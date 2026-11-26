@@ -35,6 +35,10 @@ import type { SaleDetailResponseDto } from '../sales/dto/sale-detail-response.dt
 import type { SellerSalesReportResponseDto } from '../analytics/dto/seller-sales-report-response.dto';
 import type { CustomerStatementDto } from '../sales/dto/customer-statement.dto';
 import { CustomerStatementA4Document } from './templates/report/customer-statement-a4.document';
+import type { CollectionReceiptDto } from '../sales/dto/customer-collection.dto';
+import { CollectionReceiptTicketDocument } from './templates/collection/collection-receipt-ticket.document';
+import { CollectionReceiptA4Document } from './templates/collection/collection-receipt-a4.document';
+import type { CollectionReceiptProps } from './templates/collection/collection-receipt.types';
 import type { QuotationDocumentProps } from './templates/quotation/quotation-a4.document';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesService } from '../sales/sales.service';
@@ -1100,6 +1104,66 @@ describe('PdfGenerationService', () => {
 
       const error = await service
         .renderCustomerStatementPdf(statement)
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InternalServerErrorException);
+      expect((error as InternalServerErrorException).message).toBe(
+        'PDF_GENERATION_FAILED',
+      );
+    });
+  });
+
+  // customer-collection / T3 (S5) — «Comprobante de cobro».
+  describe('renderCollectionReceiptPdf', () => {
+    const receipt: CollectionReceiptDto = {
+      branchName: 'Sucursal Centro',
+      cashierName: 'Cajera Uno',
+      collection: {
+        collectionId: '1a2b3c4d-0000-4000-8000-000000000001',
+        customer: { id: 'cus-1', name: 'Ana López' },
+        createdAt: '2026-11-25T18:05:00.000Z',
+        tenderedCents: 1000,
+        appliedCents: 1000,
+        changeDueCents: 0,
+        payments: [{ method: 'cash', amountCents: 1000, catalog: null }],
+        sales: [],
+        remainingCustomerDebtCents: 0,
+      },
+    };
+
+    it.each([
+      ['ticket', CollectionReceiptTicketDocument],
+      ['a4', CollectionReceiptA4Document],
+    ] as const)(
+      'renders the %s template with the company brand into a buffer',
+      async (format, Template) => {
+        const renderToBufferMock = jest.mocked(renderToBuffer);
+        renderToBufferMock.mockResolvedValueOnce(
+          Buffer.from('%PDF-1.4 collection'),
+        );
+
+        const buffer = await service.renderCollectionReceiptPdf(
+          receipt,
+          format,
+        );
+
+        expect(buffer.subarray(0, 4).toString()).toBe('%PDF');
+        const [rendered] = renderToBufferMock.mock.calls[0];
+        expect(rendered.type).toBe(Template);
+        const props = rendered.props as CollectionReceiptProps;
+        expect(props.brandName).toBe('HoundFe');
+        expect(props.folio).toBe('COB-1A2B3C4D');
+        expect(props.branchName).toBe('Sucursal Centro');
+      },
+    );
+
+    it('maps render failures to 500 PDF_GENERATION_FAILED', async () => {
+      jest
+        .mocked(renderToBuffer)
+        .mockRejectedValueOnce(new Error('yoga-layout blew up'));
+
+      const error = await service
+        .renderCollectionReceiptPdf(receipt, 'ticket')
         .catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(InternalServerErrorException);

@@ -29,6 +29,7 @@ import { SalesModule } from '../sales/sales.module';
 import { TenantsModule } from '../tenants/tenants.module';
 import { SalesCustomerStatementController } from '../sales/sales-customer-statement.controller';
 import { CustomerStatementService } from '../sales/customer-statement.service';
+import { CollectionReceiptPdfController } from '../sales/collection-receipt-pdf.controller';
 
 describe('PdfGenerationModule', () => {
   it('registers PdfGenerationService as a provider', () => {
@@ -132,5 +133,22 @@ describe('PdfGenerationModule', () => {
       }
       expect(salesExports).toContain(CustomerStatementService);
     });
+  });
+
+  // customer-collection / T3 (S5) — GET /collections/:collectionId/pdf.
+  it('maps the collection receipt PDF controller here and not in SalesModule', () => {
+    const controllersOf = (module: object) =>
+      (Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, module) ??
+        []) as unknown[];
+
+    expect(controllersOf(PdfGenerationModule)).toContain(
+      CollectionReceiptPdfController,
+    );
+    expect(controllersOf(SalesModule)).not.toContain(
+      CollectionReceiptPdfController,
+    );
+    expect(
+      Reflect.getMetadata(PATH_METADATA, CollectionReceiptPdfController),
+    ).toBe('collections/:collectionId/pdf');
   });
 });
