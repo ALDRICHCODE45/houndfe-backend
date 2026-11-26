@@ -1,5 +1,5 @@
 /**
- * customers-listing / T1 — SQL of `GET /customers/listing`
+ * customers-listing — SQL of `GET /customers/listing`
  * (`docs/proposals/customers-list-contract.md` §12.2).
  *
  * Every table carries an explicit `"tenantId" = ${tenantId}`: raw queries are
@@ -24,7 +24,10 @@ import type {
   CustomerListingFilters,
   CustomersListingReadInput,
 } from './customer-listing.types';
-import { METRIC_SORT_KEYS } from './customers-listing.permissions';
+import {
+  METRIC_FILTER_PARAMS,
+  METRIC_SORT_KEYS,
+} from './customers-listing.permissions';
 
 /** Contract §4.6 / `GET /customers`: trimmed, cut to 100 characters. */
 export function normalizeSearch(search: unknown): string {
@@ -64,9 +67,191 @@ function activePetMatch(
   return Prisma.sql`p."tenantId" = ${tenantId} AND p."customerId" = ${customerId} AND p."status" = 'ACTIVE' AND p."nameKey" LIKE ${pattern}`;
 }
 
+/** A `timestamp(3)` column holds the UTC wall clock: bind instants as such. */
+function utcWall(instant: Date): Prisma.Sql {
+  return Prisma.sql`(${instant.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;
+}
+
+/** Non-empty CSV list, or `undefined` (an empty list is no filter). */
+function list(values: string[] | undefined): string[] | undefined {
+  return values && values.length > 0 ? values : undefined;
+}
+
+/** «set» for a free-text column: not null and not blank. */
+function isSet(column: string): Prisma.Sql {
+  return Prisma.raw(`(${column} IS NOT NULL AND btrim(${column}) <> '')`);
+}
+
+function presence(column: string, wanted: boolean): Prisma.Sql {
+  return wanted ? isSet(column) : Prisma.sql`NOT ${isSet(column)}`;
+}
+
+/** Trimmed, case-insensitive exact match against any of `values` (§4.4). */
+function textIn(column: string, values: string[]): Prisma.Sql {
+  return Prisma.sql`lower(btrim(${Prisma.raw(column)})) = ANY (SELECT lower(btrim(v)) FROM unnest(${values}::text[]) AS v)`;
+}
+
+/** The §4.4 address columns, by filter key. */
+const LOCATION_COLUMNS = {
+  neighborhood: 'neighborhood',
+  municipality: 'municipality',
+  city: 'city',
+  zipCode: 'zipCode',
+} as const;
+
+/** True when a §4.4 location filter is active (→ `matchedAddressId`). */
+export function hasLocationFilters(filters: CustomerListingFilters): boolean {
+  return (
+    Object.keys(LOCATION_COLUMNS).some(
+      (key) =>
+        list(filters[key as keyof typeof LOCATION_COLUMNS]) !== undefined,
+    ) ||
+    list(filters.deliveryZoneType) !== undefined ||
+    filters.deliveryZoneNone === true
+  );
+}
+
 /**
- * Customer-level WHERE conditions (on alias `c`). T3 appends the §4.3–§4.5
- * filters and `createdFrom/To` here.
+ * §4.4 conditions over ONE address (alias `a`). Every active location filter
+ * must hold on the same address, so `matchedAddressId` always names an
+ * address that explains the row. `deliveryZoneType` and `deliveryZoneNone`
+ * are one zone filter: the address's zone category (an active zone's type, or
+ * «sin zona») is one of the selected ones.
+ */
+function addressConditions(
+  tenantId: string,
+  filters: CustomerListingFilters,
+): Prisma.Sql[] {
+  const conditions: Prisma.Sql[] = [];
+  for (const [key, column] of Object.entries(LOCATION_COLUMNS)) {
+    const values = list(filters[key as keyof typeof LOCATION_COLUMNS]);
+    if (values) conditions.push(textIn(`a."${column}"`, values));
+  }
+  // ZIP codes are free text: trimmed equality with the 5-char zone code (§13).
+  const activeZone = Prisma.sql`SELECT 1 FROM "delivery_zones" z
+    WHERE z."tenantId" = ${tenantId} AND z."isActive" = true
+      AND z."zipCode" = btrim(a."zipCode")`;
+  const zone: Prisma.Sql[] = [];
+  const types = list(filters.deliveryZoneType);
+  if (types) {
+    zone.push(
+      Prisma.sql`EXISTS (${activeZone} AND z."type"::text = ANY (${types}::text[]))`,
+    );
+  }
+  if (filters.deliveryZoneNone === true) {
+    zone.push(
+      Prisma.sql`(btrim(a."zipCode") <> '' AND NOT EXISTS (${activeZone}))`,
+    );
+  }
+  if (zone.length > 0)
+    conditions.push(Prisma.sql`(${Prisma.join(zone, ' OR ')})`);
+  return conditions;
+}
+
+/** The customer's addresses matching every active §4.4 filter (alias `a`). */
+function matchingAddressesWhere(
+  tenantId: string,
+  customerId: Prisma.Sql,
+  filters: CustomerListingFilters,
+): Prisma.Sql {
+  return Prisma.join(
+    [
+      Prisma.sql`a."tenantId" = ${tenantId} AND a."customerId" = ${customerId}`,
+      ...addressConditions(tenantId, filters),
+    ],
+    ' AND ',
+  );
+}
+
+/** §4.3 — ACTIVE pets of the customer (alias `p`). */
+function activePets(tenantId: string): Prisma.Sql {
+  return Prisma.sql`p."tenantId" = ${tenantId} AND p."customerId" = c."id" AND p."status" = 'ACTIVE'`;
+}
+
+function petConditions(
+  tenantId: string,
+  filters: CustomerListingFilters,
+): Prisma.Sql[] {
+  const conditions: Prisma.Sql[] = [];
+  const species = list(filters.petSpecies);
+  const sizes = list(filters.petSize);
+  if (species || sizes) {
+    // The SAME pet must match both (frontend Q7); a pet without a size never
+    // matches `petSize` (`NULL = ANY(...)` is not true).
+    const parts = [activePets(tenantId)];
+    if (species) {
+      parts.push(Prisma.sql`p."species"::text = ANY (${species}::text[])`);
+    }
+    if (sizes) parts.push(Prisma.sql`p."size"::text = ANY (${sizes}::text[])`);
+    conditions.push(
+      Prisma.sql`EXISTS (SELECT 1 FROM "customer_pets" p WHERE ${Prisma.join(parts, ' AND ')})`,
+    );
+  }
+  if (
+    filters.activePetsMin !== undefined ||
+    filters.activePetsMax !== undefined
+  ) {
+    const count = Prisma.sql`(SELECT COUNT(*) FROM "customer_pets" p WHERE ${activePets(tenantId)})`;
+    if (filters.activePetsMin !== undefined) {
+      conditions.push(Prisma.sql`${count} >= ${filters.activePetsMin}`);
+    }
+    if (filters.activePetsMax !== undefined) {
+      conditions.push(Prisma.sql`${count} <= ${filters.activePetsMax}`);
+    }
+  }
+  if (filters.hasPets !== undefined) {
+    const exists = Prisma.sql`EXISTS (SELECT 1 FROM "customer_pets" p WHERE ${activePets(tenantId)})`;
+    conditions.push(filters.hasPets ? exists : Prisma.sql`NOT ${exists}`);
+  }
+  return conditions;
+}
+
+function commercialConditions(
+  tenantId: string,
+  filters: CustomerListingFilters,
+): Prisma.Sql[] {
+  const conditions: Prisma.Sql[] = [];
+  const priceLists = list(filters.priceListId);
+  const includeNull = filters.priceListIncludeNull === true;
+  if (priceLists || includeNull) {
+    const parts: Prisma.Sql[] = [];
+    if (priceLists) {
+      parts.push(
+        Prisma.sql`c."globalPriceListId" = ANY (${priceLists}::text[])`,
+      );
+    }
+    if (includeNull) parts.push(Prisma.sql`c."globalPriceListId" IS NULL`);
+    conditions.push(Prisma.sql`(${Prisma.join(parts, ' OR ')})`);
+  }
+  if (filters.isTrusted !== undefined) {
+    conditions.push(Prisma.sql`c."isTrusted" = ${filters.isTrusted}`);
+  }
+  if (filters.hasRfc !== undefined) {
+    conditions.push(presence('c."rfc"', filters.hasRfc));
+  }
+  const regimes = list(filters.fiscalRegime);
+  if (regimes) {
+    conditions.push(Prisma.sql`c."fiscalRegime" = ANY (${regimes}::text[])`);
+  }
+  if (filters.hasEmail !== undefined) {
+    conditions.push(presence('c."email"', filters.hasEmail));
+  }
+  if (filters.hasPhone !== undefined) {
+    conditions.push(presence('c."phone"', filters.hasPhone));
+  }
+  if (filters.hasChatbotRequests !== undefined) {
+    // Any status (frontend Q9).
+    const exists = Prisma.sql`EXISTS (SELECT 1 FROM "chatbot_requests" cr WHERE cr."tenantId" = ${tenantId} AND cr."customerId" = c."id")`;
+    conditions.push(
+      filters.hasChatbotRequests ? exists : Prisma.sql`NOT ${exists}`,
+    );
+  }
+  return conditions;
+}
+
+/**
+ * Customer-level WHERE conditions (on alias `c`): tenant, `search` (§4.6),
+ * `createdFrom/To` (§4.2), pets (§4.3), location (§4.4), commercial (§4.5).
  */
 export function customerFilterConditions(
   tenantId: string,
@@ -82,25 +267,112 @@ export function customerFilterConditions(
         : Prisma.sql`(${own})`,
     );
   }
+  if (filters.createdFrom) {
+    conditions.push(
+      Prisma.sql`c."createdAt" >= ${utcWall(filters.createdFrom)}`,
+    );
+  }
+  if (filters.createdTo) {
+    conditions.push(Prisma.sql`c."createdAt" <= ${utcWall(filters.createdTo)}`);
+  }
+  conditions.push(...petConditions(tenantId, filters));
+  if (hasLocationFilters(filters)) {
+    // Any address of the customer (frontend Q8).
+    conditions.push(
+      Prisma.sql`EXISTS (SELECT 1 FROM "customer_addresses" a WHERE ${matchingAddressesWhere(tenantId, Prisma.sql`c."id"`, filters)})`,
+    );
+  }
+  conditions.push(...commercialConditions(tenantId, filters));
   return conditions;
 }
 
+const DAY_MS = 86_400_000;
+
 /**
  * Metric WHERE conditions over the metric columns of `alias` (§4.1, §4.2).
- * T1: none yet — T3 implements them here.
+ * `metrics` carries the request's cut-off (00:00Z of the local today) and
+ * timezone; `null` (no `read:Sale`) never reaches here with metric filters
+ * (§10.1 rejects them first), so it yields no condition.
  */
 export function metricFilterConditions(
   filters: CustomerListingFilters,
   alias: string,
+  metrics: CustomersListingReadInput['metrics'],
 ): Prisma.Sql[] {
-  void filters;
-  void alias;
-  return [];
+  if (!metrics) return [];
+  const col = (name: string) => Prisma.raw(`${alias}."${name}"`);
+  const conditions: Prisma.Sql[] = [];
+  const range = (column: string, min?: number, max?: number) => {
+    if (min !== undefined)
+      conditions.push(Prisma.sql`${col(column)} >= ${min}`);
+    if (max !== undefined)
+      conditions.push(Prisma.sql`${col(column)} <= ${max}`);
+  };
+  const instants = (column: string, from?: Date, to?: Date) => {
+    if (from) conditions.push(Prisma.sql`${col(column)} >= ${utcWall(from)}`);
+    if (to) conditions.push(Prisma.sql`${col(column)} <= ${utcWall(to)}`);
+  };
+
+  if (filters.hasDebt !== undefined) {
+    conditions.push(
+      filters.hasDebt
+        ? Prisma.sql`${col('openDebtCents')} > 0`
+        : Prisma.sql`${col('openDebtCents')} = 0`,
+    );
+  }
+  range('openDebtCents', filters.openDebtMin, filters.openDebtMax);
+  if (filters.hasOverdue !== undefined) {
+    conditions.push(
+      filters.hasOverdue
+        ? Prisma.sql`${col('overdueCount')} > 0`
+        : Prisma.sql`${col('overdueCount')} = 0`,
+    );
+  }
+  if (filters.overdueMoreThanDays !== undefined) {
+    // Strict (frontend Q6): the oldest overdue due DAY is before
+    // localToday − N. `overdueBefore` is 00:00Z of the local today, and the
+    // due day is the UTC date of `dueDate`, so N = 30 on 26/11 → due on 26/10
+    // or earlier.
+    const bound = new Date(
+      metrics.overdueBefore.getTime() - filters.overdueMoreThanDays * DAY_MS,
+    );
+    conditions.push(
+      Prisma.sql`${col('oldestOverdueDueDate')} < ${utcWall(bound)}`,
+    );
+  }
+  instants(
+    'oldestOverdueDueDate',
+    filters.oldestOverdueFrom,
+    filters.oldestOverdueTo,
+  );
+  range('totalSoldCents', filters.totalSoldMin, filters.totalSoldMax);
+  range('salesCount', filters.salesCountMin, filters.salesCountMax);
+  // `averageTicketCents` is NULL without sales: never inside a range.
+  range(
+    'averageTicketCents',
+    filters.averageTicketMin,
+    filters.averageTicketMax,
+  );
+  instants('lastPurchaseAt', filters.lastPurchaseFrom, filters.lastPurchaseTo);
+  if (filters.noPurchaseMoreThanDays !== undefined) {
+    // Never bought, or the LOCAL date of the last purchase is before
+    // localToday − N: the instant is before that local day's midnight.
+    const day = new Date(
+      metrics.overdueBefore.getTime() - filters.noPurchaseMoreThanDays * DAY_MS,
+    )
+      .toISOString()
+      .slice(0, 10);
+    const localMidnightUtc = Prisma.sql`((${day}::date::timestamp AT TIME ZONE ${metrics.timeZone}) AT TIME ZONE 'UTC')`;
+    conditions.push(
+      Prisma.sql`(${col('lastPurchaseAt')} IS NULL OR ${col('lastPurchaseAt')} < ${localMidnightUtc})`,
+    );
+  }
+  return conditions;
 }
 
-/** True when a metric filter forces computing metrics before paging (T3). */
+/** True when a metric filter forces computing metrics before paging. */
 export function hasMetricFilters(filters: CustomerListingFilters): boolean {
-  return metricFilterConditions(filters, 'r').length > 0;
+  return METRIC_FILTER_PARAMS.some((key) => filters[key] !== undefined);
 }
 
 /** `true` when the customer matched through a pet only (→ `matchedPetName`). */
@@ -199,7 +471,7 @@ export function buildListingPageSql(
           SELECT c.*, m.* FROM c
           LEFT JOIN LATERAL (${customerSalesMetricsSql({ tenantId, customerId: Prisma.sql`c."id"`, overdueBefore: metrics.overdueBefore })}) m ON true
         ) r
-        ${whereClause(metricFilterConditions(input.filters, 'r'))}
+        ${whereClause(metricFilterConditions(input.filters, 'r', metrics))}
         ${orderBy(input, 'r')}
         LIMIT ${input.limit} OFFSET ${offset}
       )`
@@ -233,6 +505,20 @@ export function buildListingPageSql(
       ) END`
     : Prisma.sql`NULL::text`;
 
+  // §4.4: the oldest address matching every active location filter.
+  const location = hasLocationFilters(input.filters);
+  const matchedAddressSelect = location
+    ? Prisma.sql`, ma."id" AS "matchedAddressId"`
+    : Prisma.empty;
+  const matchedAddressJoin = location
+    ? Prisma.sql`LEFT JOIN LATERAL (
+        SELECT a."id" FROM "customer_addresses" a
+        WHERE ${matchingAddressesWhere(tenantId, Prisma.sql`pg."id"`, input.filters)}
+        ORDER BY a."createdAt" ASC, a."id" ASC
+        LIMIT 1
+      ) ma ON true`
+    : Prisma.empty;
+
   const customerSelect = Prisma.raw(
     CUSTOMER_COLUMNS.map((column) => `pg."${column}"`).join(', '),
   );
@@ -251,6 +537,7 @@ export function buildListingPageSql(
       pt."activePetsCount",
       pt."petSpecies",
       ${matchedPetName} AS "matchedPetName"
+      ${matchedAddressSelect}
       ${metricsSelect}
     FROM pg
     ${metricsJoin}
@@ -268,6 +555,7 @@ export function buildListingPageSql(
       WHERE p."tenantId" = ${tenantId} AND p."customerId" = pg."id" AND p."status" = 'ACTIVE'
     ) pt ON true
     LEFT JOIN "global_price_lists" gpl ON gpl."id" = pg."globalPriceListId"
+    ${matchedAddressJoin}
     ${orderBy(input, 'pg')}`;
 }
 
@@ -293,5 +581,5 @@ export function buildListingSummarySql(
       SELECT c."id", m.* FROM c
       LEFT JOIN LATERAL (${customerSalesMetricsSql({ tenantId, customerId: Prisma.sql`c."id"`, overdueBefore: input.metrics.overdueBefore })}) m ON true
     ) r
-    ${whereClause(metricFilterConditions(input.filters, 'r'))}`;
+    ${whereClause(metricFilterConditions(input.filters, 'r', input.metrics))}`;
 }

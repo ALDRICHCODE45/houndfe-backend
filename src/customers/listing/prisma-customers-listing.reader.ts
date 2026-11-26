@@ -7,13 +7,17 @@ import {
 } from './customer-sales-metrics.sql';
 import type {
   CustomerListingRow,
+  CustomersListingOption,
+  CustomersListingOptionsInput,
   CustomersListingReadInput,
   CustomersListingReader,
   CustomersListingSummary,
 } from './customer-listing.types';
+import { buildListingOptionsSql } from './customers-listing-options.sql';
 import {
   buildListingPageSql,
   buildListingSummarySql,
+  hasLocationFilters,
 } from './customers-listing.sql';
 
 interface PageRecord extends Partial<CustomerSalesMetricsRecord> {
@@ -40,11 +44,12 @@ interface PageRecord extends Partial<CustomerSalesMetricsRecord> {
   activePetsCount: number;
   petSpecies: string[];
   matchedPetName: string | null;
+  matchedAddressId?: string | null;
 }
 
 /**
- * customers-listing / T1 — raw SQL reader of `GET /customers/listing`
- * (contract §12.2). The tenant id is read from the request context and passed
+ * customers-listing — raw SQL reader of `GET /customers/listing` (contract
+ * §12.2) and of its selector values (§5). The tenant id is read from the request context and passed
  * explicitly into every statement.
  */
 @Injectable()
@@ -70,7 +75,22 @@ export class PrismaCustomersListingReader implements CustomersListingReader {
       .$queryRaw<
         PageRecord[]
       >(buildListingPageSql(this.requireTenantId(), input));
-    return rows.map((row) => toRow(row, input.metrics !== null));
+    const location = hasLocationFilters(input.filters);
+    return rows.map((row) => toRow(row, input.metrics !== null, location));
+  }
+
+  async listOptions(
+    input: CustomersListingOptionsInput,
+  ): Promise<CustomersListingOption[]> {
+    const rows = await this.tenantPrisma
+      .getClient()
+      .$queryRaw<
+        Array<{ value: string; customersCount: number }>
+      >(buildListingOptionsSql(this.requireTenantId(), input));
+    return rows.map((row) => ({
+      value: row.value,
+      customersCount: Number(row.customersCount),
+    }));
   }
 
   async summarize(
@@ -93,7 +113,11 @@ export class PrismaCustomersListingReader implements CustomersListingReader {
   }
 }
 
-function toRow(row: PageRecord, withMetrics: boolean): CustomerListingRow {
+function toRow(
+  row: PageRecord,
+  withMetrics: boolean,
+  withMatchedAddress: boolean,
+): CustomerListingRow {
   return {
     id: row.id,
     firstName: row.firstName,
@@ -124,6 +148,11 @@ function toRow(row: PageRecord, withMetrics: boolean): CustomerListingRow {
     activePetsCount: Number(row.activePetsCount),
     petSpecies: row.petSpecies,
     matchedPetName: row.matchedPetName,
+    // §4.4: only when a location filter is active; every listed row then
+    // has a matching address (the filter is an EXISTS over the same ones).
+    ...(withMatchedAddress && row.matchedAddressId
+      ? { matchedAddressId: row.matchedAddressId }
+      : {}),
     // Contract §10.1: the key is absent (not null) without read:Sale.
     ...(withMetrics
       ? { metrics: toCustomerSalesMetrics(row as CustomerSalesMetricsRecord) }

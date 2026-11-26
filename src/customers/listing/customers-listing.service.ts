@@ -6,10 +6,14 @@ import {
 } from './customer-sales-metrics.sql';
 import {
   CUSTOMERS_LISTING_READER,
+  CUSTOMER_LISTING_FILTER_KEYS,
+  type CustomerListingFilters,
+  type CustomersListingOptionsResponse,
   type CustomersListingReadInput,
   type CustomersListingReader,
   type CustomersListingResponse,
 } from './customer-listing.types';
+import type { CustomersListingOptionsQueryDto } from './customers-listing-options-query.dto';
 import type { CustomersListingQueryDto } from './customers-listing-query.dto';
 import { assertListingParamsPermitted } from './customers-listing.permissions';
 
@@ -50,14 +54,17 @@ export class CustomersListingService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 50;
     const input: CustomersListingReadInput = {
-      filters: { search: query.search },
+      filters: toFilters(query),
       sortBy: query.sortBy ?? 'createdAt',
       sortOrder: query.sortOrder ?? 'desc',
       page,
       limit,
       // §2.1: the cut-off is computed once per request, as GET /sales does.
       metrics: canReadSale
-        ? { overdueBefore: overdueCutoff(this.now(), this.timeZone()) }
+        ? {
+            overdueBefore: overdueCutoff(this.now(), this.timeZone()),
+            timeZone: this.timeZone(),
+          }
         : null,
     };
 
@@ -79,6 +86,22 @@ export class CustomersListingService {
     };
   }
 
+  /**
+   * Contract §5 — distinct values with counts for a selector. `read:Customer`
+   * (route guard) is enough: no sales data is read.
+   */
+  async options(
+    query: CustomersListingOptionsQueryDto,
+  ): Promise<CustomersListingOptionsResponse> {
+    const q = typeof query.q === 'string' ? query.q.trim() : '';
+    const data = await this.reader.listOptions({
+      field: query.field,
+      q: q === '' ? undefined : q,
+      limit: query.limit ?? 50,
+    });
+    return { field: query.field, data };
+  }
+
   private now(): Date {
     return this.clock ? this.clock() : new Date();
   }
@@ -90,4 +113,20 @@ export class CustomersListingService {
       DEFAULT_BUSINESS_TIMEZONE
     );
   }
+}
+
+/**
+ * The defined §4 params of the query, typed for the reader. Empty CSV lists
+ * (`?city=`) are no filter and are dropped.
+ */
+function toFilters(query: CustomersListingQueryDto): CustomerListingFilters {
+  const source = query as unknown as Record<string, unknown>;
+  const filters: Record<string, unknown> = {};
+  for (const key of CUSTOMER_LISTING_FILTER_KEYS) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    filters[key] = value;
+  }
+  return filters as CustomerListingFilters;
 }

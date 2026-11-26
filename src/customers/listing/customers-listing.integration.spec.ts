@@ -830,4 +830,742 @@ describeIfDb('GET /customers/listing (PostgreSQL)', () => {
       expect(res.body[1].addresses).toHaveLength(1);
     });
   });
+
+  // ═════════════════════════ T3 / S2: filters (§4.1–§4.5) ═════════════════════════
+
+  async function addr(
+    b: Branch,
+    customerId: string,
+    over: Partial<Prisma.CustomerAddressUncheckedCreateInput> & {
+      createdAt: Date;
+    },
+  ): Promise<string> {
+    const id = over.id ?? randomUUID();
+    await prisma.customerAddress.create({
+      data: {
+        tenantId: b.tenantId,
+        customerId,
+        street: 'Calle 1',
+        ...over,
+        id,
+      },
+    });
+    return id;
+  }
+
+  async function zone(
+    tenantId: string,
+    zipCode: string,
+    type: 'FREE' | 'SURCHARGE' | 'CARRIER_ONLY' | 'DENIED',
+    isActive = true,
+  ) {
+    await prisma.deliveryZone.create({
+      data: {
+        tenantId,
+        zipCode,
+        type,
+        isActive,
+        // `delivery_zones_type_shape`: FREE/SURCHARGE need an ETA, SURCHARGE
+        // a surcharge.
+        etaDays: type === 'FREE' || type === 'SURCHARGE' ? 1 : null,
+        surchargeCents: type === 'SURCHARGE' ? 5000 : null,
+        approvedById: randomUUID(),
+        approvedByDisplayName: 'Gerente',
+        approvedAt: new Date(),
+      },
+    });
+  }
+
+  let folio = 0;
+  async function chatbotRequest(
+    tenantId: string,
+    customerId: string | null,
+    status: 'NEW' | 'RESOLVED' = 'NEW',
+  ) {
+    const closed = status === 'RESOLVED' ? new Date() : null;
+    await prisma.chatbotRequest.create({
+      data: {
+        tenantId,
+        folio: ++folio,
+        kind: 'CLARIFICATION',
+        subtype: 'UNKNOWN_QUESTION',
+        status,
+        summary: 'Pregunta',
+        customerId,
+        customerKey: `unknown:${randomUUID()}`,
+        source: 'chatbot',
+        sourceRequestId: randomUUID(),
+        resolvedAt: closed,
+        closedAt: closed,
+      },
+    });
+  }
+
+  const ids = (res: request.Response) =>
+    (res.body.data as Array<{ id: string }>).map((r) => r.id).sort();
+  const sorted = (...values: string[]) => [...values].sort();
+
+  /** Every case: [query, expected ids]; checks data AND pagination.total. */
+  async function expectMatches(
+    m: SeededMember,
+    cases: Array<[Record<string, string>, string[]]>,
+  ) {
+    for (const [query, expected] of cases) {
+      const res = await listing(m, query).expect(200);
+      expect([query, ids(res)]).toEqual([query, sorted(...expected)]);
+      expect([query, res.body.pagination.total]).toEqual([
+        query,
+        expected.length,
+      ]);
+      expect(res.body.filterSummary.count).toBe(expected.length);
+    }
+  }
+
+  describe('§4.1 Deuda', () => {
+    it('hasDebt, open debt range, hasOverdue, strict overdueMoreThanDays (day 30 vs 31), oldestOverdue range; filterSummary under filters', async () => {
+      const b = await branch('Deuda');
+      // Local today = 26/11 (LATE_26).
+      const d31 = await customer(b, 'Dia31');
+      await sale(b, d31, { debtCents: 1000, dueDate: day('2026-10-26') });
+      const d30 = await customer(b, 'Dia30');
+      await sale(b, d30, { debtCents: 2000, dueDate: day('2026-10-27') });
+      const noDue = await customer(b, 'SinVencer');
+      await sale(b, noDue, { debtCents: 500, dueDate: null });
+      const paid = await customer(b, 'Pagado');
+      await sale(b, paid, { totalCents: 4000 });
+      const never = await customer(b, 'Nunca');
+      // A canceled overdue sale never counts.
+      await sale(b, never, {
+        status: 'CANCELED',
+        debtCents: 900,
+        dueDate: day('2026-01-01'),
+      });
+
+      await expectMatches(b.member, [
+        [{ hasDebt: 'true' }, [d31, d30, noDue]],
+        [{ hasDebt: 'false' }, [paid, never]],
+        [{ openDebtMin: '1000', openDebtMax: '2000' }, [d31, d30]],
+        [{ openDebtMax: '0' }, [paid, never]],
+        [{ hasOverdue: 'true' }, [d31, d30]],
+        [{ hasOverdue: 'false' }, [noDue, paid, never]],
+        [{ overdueMoreThanDays: '30' }, [d31]],
+        [{ overdueMoreThanDays: '29' }, [d31, d30]],
+        [{ overdueMoreThanDays: '31' }, []],
+        [
+          {
+            oldestOverdueFrom: '2026-10-27T00:00:00.000Z',
+            oldestOverdueTo: '2026-10-27T00:00:00.000Z',
+          },
+          [d30],
+        ],
+        [{ oldestOverdueTo: '2026-10-26T23:59:59.999Z' }, [d31]],
+        // Contradictory filters are not errors: they match nothing.
+        [{ hasDebt: 'false', openDebtMin: '100' }, []],
+      ]);
+
+      const summary = await listing(b.member, {
+        hasDebt: 'true',
+        limit: '1',
+        sortBy: 'name',
+        sortOrder: 'asc',
+      }).expect(200);
+      expect(names(summary)).toEqual(['Dia30']);
+      expect(summary.body.pagination).toEqual({
+        page: 1,
+        limit: 1,
+        total: 3,
+        totalPages: 3,
+      });
+      expect(summary.body.filterSummary).toEqual({
+        count: 3,
+        openDebtCents: 3500,
+        overdueDebtCents: 3000,
+      });
+      const overdue = await listing(b.member, {
+        overdueMoreThanDays: '30',
+      }).expect(200);
+      expect(overdue.body.filterSummary).toEqual({
+        count: 1,
+        openDebtCents: 1000,
+        overdueDebtCents: 1000,
+      });
+
+      // At local midnight the 27/10 sale is 31 days overdue too.
+      clockNow = MIDNIGHT_27;
+      await expectMatches(b.member, [
+        [{ overdueMoreThanDays: '30' }, [d31, d30]],
+      ]);
+    });
+  });
+
+  describe('§4.2 Compras', () => {
+    it('totalSold / salesCount / averageTicket / lastPurchase ranges; noPurchaseMoreThanDays includes never-bought, local-day boundary; createdFrom/To', async () => {
+      const b = await branch('Compras');
+      // N = 30 on local 26/11 → bound = local 27/10 00:00 = 2026-10-27T06:00Z.
+      const before = await customer(b, 'Antes', {
+        createdAt: new Date('2025-06-01T00:00:00.000Z'),
+      });
+      await sale(b, before, {
+        totalCents: 1000,
+        confirmedAt: new Date('2026-09-01T00:00:00.000Z'),
+      });
+      await sale(b, before, {
+        totalCents: 3000,
+        confirmedAt: new Date('2026-10-27T05:59:00.000Z'), // local 26/10 23:59
+      });
+      const onBound = await customer(b, 'EnBorde', {
+        createdAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      await sale(b, onBound, {
+        totalCents: 9000,
+        confirmedAt: new Date('2026-10-27T06:00:00.000Z'), // local 27/10 00:00
+      });
+      const never = await customer(b, 'Nunca', {
+        createdAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      const canceledOnly = await customer(b, 'Cancelado', {
+        createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      });
+      await sale(b, canceledOnly, {
+        status: 'CANCELED',
+        totalCents: 7000,
+        confirmedAt: new Date('2026-11-20T00:00:00.000Z'),
+      });
+
+      await expectMatches(b.member, [
+        [{ noPurchaseMoreThanDays: '30' }, [before, never, canceledOnly]],
+        [
+          { noPurchaseMoreThanDays: '29' },
+          [before, onBound, never, canceledOnly],
+        ],
+        [{ noPurchaseMoreThanDays: '3650' }, [never, canceledOnly]],
+        [{ totalSoldMin: '4000', totalSoldMax: '4000' }, [before]],
+        [{ totalSoldMax: '0' }, [never, canceledOnly]],
+        [{ salesCountMin: '2' }, [before]],
+        [{ salesCountMin: '1', salesCountMax: '1' }, [onBound]],
+        [{ averageTicketMin: '2000', averageTicketMax: '2000' }, [before]],
+        // Without sales the average is null: never inside a range.
+        [{ averageTicketMin: '0' }, [before, onBound]],
+        [
+          {
+            lastPurchaseFrom: '2026-10-27T06:00:00.000Z',
+            lastPurchaseTo: '2026-10-27T06:00:00.000Z',
+          },
+          [onBound],
+        ],
+        [{ lastPurchaseTo: '2026-10-27T05:59:59.999Z' }, [before]],
+        [
+          {
+            createdFrom: '2026-02-01T00:00:00.000Z',
+            createdTo: '2026-03-01T00:00:00.000Z',
+          },
+          [onBound, never],
+        ],
+        [{ createdTo: '2025-12-31T00:00:00.000Z' }, [before]],
+      ]);
+    });
+  });
+
+  describe('§4.3 Mascotas (ACTIVE pets)', () => {
+    it('species + size on the SAME active pet; species/size alone; archived pets never count; activePets range; hasPets', async () => {
+      const b = await branch('Mascotas');
+      const bigDog = await customer(b, 'PerroGrande');
+      await pet(b, bigDog, 'Rex', { species: 'DOG', size: 'LARGE' });
+      const split = await customer(b, 'Separados');
+      await pet(b, split, 'Chico', { species: 'DOG', size: 'SMALL' });
+      await pet(b, split, 'Gata', { species: 'CAT', size: 'LARGE' });
+      const archived = await customer(b, 'Archivado');
+      await pet(b, archived, 'Viejo', {
+        species: 'DOG',
+        size: 'LARGE',
+        status: 'ARCHIVED',
+        archivedAt: new Date(),
+      });
+      const noSize = await customer(b, 'SinTalla');
+      await pet(b, noSize, 'Firulais', { species: 'DOG', size: null });
+      const none = await customer(b, 'SinMascota');
+
+      await expectMatches(b.member, [
+        [{ petSpecies: 'DOG', petSize: 'LARGE' }, [bigDog]],
+        [{ petSpecies: 'DOG' }, [bigDog, split, noSize]],
+        [{ petSize: 'LARGE' }, [bigDog, split]],
+        [{ petSpecies: 'CAT,OTHER', petSize: 'LARGE,GIANT' }, [split]],
+        [{ petSize: 'SMALL,MEDIUM,LARGE,GIANT' }, [bigDog, split]],
+        [{ activePetsMin: '2' }, [split]],
+        [{ activePetsMin: '1', activePetsMax: '1' }, [bigDog, noSize]],
+        [{ activePetsMax: '0' }, [archived, none]],
+        [{ hasPets: 'true' }, [bigDog, split, noSize]],
+        [{ hasPets: 'false' }, [archived, none]],
+      ]);
+    });
+  });
+
+  describe('§4.4 Ubicación (any address)', () => {
+    it('trimmed case-insensitive match on ANY address, multi-value, matchedAddressId = oldest matching address; key only with a location filter', async () => {
+      const b = await branch('Ubicacion');
+      const t = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s));
+      const two = await customer(b, 'DosDirecciones');
+      const primary = await addr(b, two, {
+        createdAt: t(1),
+        neighborhood: 'Narvarte',
+        municipality: 'Benito Juárez',
+        city: 'Ciudad de México',
+        zipCode: '03020',
+      });
+      const second = await addr(b, two, {
+        createdAt: t(2),
+        neighborhood: '  del VALLE ',
+        municipality: 'Benito Juárez',
+        city: 'Ciudad de México',
+        zipCode: ' 03100 ',
+      });
+      const third = await addr(b, two, {
+        createdAt: t(3),
+        neighborhood: 'Del Valle',
+        city: 'Ciudad de México',
+        zipCode: '03100',
+      });
+      const roma = await customer(b, 'Roma');
+      const romaAddr = await addr(b, roma, {
+        createdAt: t(4),
+        neighborhood: 'Roma Norte',
+        municipality: 'Cuauhtémoc',
+        city: 'Ciudad de México',
+        zipCode: '06700',
+      });
+      const homeless = await customer(b, 'SinDireccion');
+
+      await expectMatches(b.member, [
+        [{ neighborhood: 'Del Valle' }, [two]],
+        [{ neighborhood: 'del valle, ROMA NORTE' }, [two, roma]],
+        [{ neighborhood: 'Valle' }, []], // exact, not contains
+        [{ municipality: 'benito juárez' }, [two]],
+        [{ city: 'Ciudad de México' }, [two, roma]],
+        [{ zipCode: '03100' }, [two]],
+        [{ zipCode: '06700,03020' }, [two, roma]],
+        // Every location filter holds on the SAME address.
+        [{ neighborhood: 'Narvarte', zipCode: '03100' }, []],
+        [{ neighborhood: 'Narvarte', zipCode: '03020' }, [two]],
+      ]);
+
+      const res = await listing(b.member, { neighborhood: 'Del Valle' }).expect(
+        200,
+      );
+      const row = rowOf(res, two);
+      expect(row.primaryAddress.id).toBe(primary);
+      expect(row.matchedAddressId).toBe(second);
+      expect(Object.keys(row)).toEqual([
+        ...ROW_KEYS.slice(0, ROW_KEYS.indexOf('metrics')),
+        'matchedAddressId',
+        'metrics',
+      ]);
+      const byCity = await listing(b.member, {
+        city: 'Ciudad de México',
+      }).expect(200);
+      expect(rowOf(byCity, two).matchedAddressId).toBe(primary);
+      expect(rowOf(byCity, roma).matchedAddressId).toBe(romaAddr);
+      expect(third).toBeDefined();
+
+      // Without a location filter the key is absent.
+      const plain = await listing(b.member).expect(200);
+      expect(rowOf(plain, two)).not.toHaveProperty('matchedAddressId');
+      expect(rowOf(plain, homeless)).not.toHaveProperty('matchedAddressId');
+
+      // Without read:Sale the location filters work too, without metrics.
+      const noSale = await listing(b.noSale, { zipCode: '03100' }).expect(200);
+      expect(ids(noSale)).toEqual([two]);
+      expect(rowOf(noSale, two).matchedAddressId).toBe(second);
+      expect(rowOf(noSale, two)).not.toHaveProperty('metrics');
+      expect(noSale.body.filterSummary).toEqual({ count: 1 });
+    });
+
+    it('deliveryZoneType by ACTIVE zone type of the address ZIP (trimmed); deliveryZoneNone = non-empty ZIP without active zone; tenant zones only', async () => {
+      const b = await branch('Zonas');
+      const other = await branch('Zonas B');
+      await zone(b.tenantId, '03100', 'FREE');
+      await zone(b.tenantId, '03020', 'DENIED');
+      await zone(b.tenantId, '06700', 'SURCHARGE', false); // inactive
+      await zone(other.tenantId, '06700', 'FREE'); // another tenant's
+      await zone(other.tenantId, '11000', 'CARRIER_ONLY');
+      const t = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s));
+
+      const free = await customer(b, 'Gratis');
+      const freeAddr = await addr(b, free, {
+        createdAt: t(1),
+        zipCode: '03100',
+      });
+      const freeTrim = await customer(b, 'GratisEspacios');
+      await addr(b, freeTrim, { createdAt: t(2), zipCode: ' 03100 ' });
+      const denied = await customer(b, 'Denegada');
+      await addr(b, denied, { createdAt: t(3), zipCode: '03020' });
+      const inactive = await customer(b, 'ZonaInactiva');
+      const inactiveAddr = await addr(b, inactive, {
+        createdAt: t(4),
+        zipCode: '06700',
+      });
+      const foreignZip = await customer(b, 'ZonaAjena');
+      await addr(b, foreignZip, { createdAt: t(5), zipCode: '11000' });
+      const noZip = await customer(b, 'SinCP');
+      await addr(b, noZip, { createdAt: t(6), zipCode: null });
+      await addr(b, noZip, { createdAt: t(7), zipCode: '   ' });
+      const mixed = await customer(b, 'Mixto');
+      await addr(b, mixed, { createdAt: t(8), zipCode: '99999' });
+      const mixedFree = await addr(b, mixed, {
+        createdAt: t(9),
+        zipCode: '03100',
+      });
+      const homeless = await customer(b, 'SinDireccion');
+
+      await expectMatches(b.member, [
+        [{ deliveryZoneType: 'FREE' }, [free, freeTrim, mixed]],
+        [{ deliveryZoneType: 'DENIED' }, [denied]],
+        [{ deliveryZoneType: 'SURCHARGE' }, []],
+        [{ deliveryZoneType: 'CARRIER_ONLY' }, []],
+        [{ deliveryZoneNone: 'true' }, [inactive, foreignZip, mixed]],
+        // `false` is no filter.
+        [
+          { deliveryZoneNone: 'false' },
+          [
+            free,
+            freeTrim,
+            denied,
+            inactive,
+            foreignZip,
+            noZip,
+            mixed,
+            homeless,
+          ],
+        ],
+        [
+          { deliveryZoneType: 'DENIED', deliveryZoneNone: 'true' },
+          [denied, inactive, foreignZip, mixed],
+        ],
+        [{ deliveryZoneType: 'FREE', zipCode: '99999' }, []],
+      ]);
+
+      const res = await listing(b.member, { deliveryZoneType: 'FREE' }).expect(
+        200,
+      );
+      expect(rowOf(res, free).matchedAddressId).toBe(freeAddr);
+      expect(rowOf(res, mixed).matchedAddressId).toBe(mixedFree);
+      const none = await listing(b.member, { deliveryZoneNone: 'true' }).expect(
+        200,
+      );
+      expect(rowOf(none, inactive).matchedAddressId).toBe(inactiveAddr);
+    });
+  });
+
+  describe('§4.5 Comercial y contacto', () => {
+    it('priceListId (+ includeNull), isTrusted, hasRfc, fiscalRegime, hasEmail, hasPhone, hasChatbotRequests (any status, tenant only)', async () => {
+      const b = await branch('Comercial');
+      const other = await branch('Comercial B');
+      const [l1, l2] = await Promise.all([
+        prisma.globalPriceList.create({ data: { name: `L1 ${randomUUID()}` } }),
+        prisma.globalPriceList.create({ data: { name: `L2 ${randomUUID()}` } }),
+      ]);
+      try {
+        const full = await customer(b, 'Completo', {
+          globalPriceListId: l1.id,
+          isTrusted: true,
+          rfc: 'LOAA800101XXX',
+          fiscalRegime: '612',
+          email: 'a@b.test',
+          phone: '5512345678',
+          phoneCountryCode: '52',
+        });
+        const mayoreo = await customer(b, 'Mayoreo', {
+          globalPriceListId: l2.id,
+          rfc: '  ',
+          fiscalRegime: '601',
+          email: '',
+        });
+        const bare = await customer(b, 'Vacio');
+        const resolvedOnly = await customer(b, 'Resuelta');
+        await chatbotRequest(b.tenantId, full, 'NEW');
+        await chatbotRequest(b.tenantId, resolvedOnly, 'RESOLVED');
+        await chatbotRequest(b.tenantId, null);
+        // Another tenant's request pointing at our customer never counts.
+        await chatbotRequest(other.tenantId, bare);
+
+        await expectMatches(b.member, [
+          [{ priceListId: l1.id }, [full]],
+          [{ priceListId: `${l1.id},${l2.id}` }, [full, mayoreo]],
+          [
+            { priceListId: l2.id, priceListIncludeNull: 'true' },
+            [mayoreo, bare, resolvedOnly],
+          ],
+          [{ priceListIncludeNull: 'true' }, [bare, resolvedOnly]],
+          [{ isTrusted: 'true' }, [full]],
+          [{ isTrusted: 'false' }, [mayoreo, bare, resolvedOnly]],
+          [{ hasRfc: 'true' }, [full]],
+          [{ hasRfc: 'false' }, [mayoreo, bare, resolvedOnly]],
+          [{ fiscalRegime: '612' }, [full]],
+          [{ fiscalRegime: '601,612' }, [full, mayoreo]],
+          [{ hasEmail: 'false' }, [mayoreo, bare, resolvedOnly]],
+          [{ hasPhone: 'true' }, [full]],
+          [{ hasChatbotRequests: 'true' }, [full, resolvedOnly]],
+          [{ hasChatbotRequests: 'false' }, [mayoreo, bare]],
+          // AND between groups.
+          [{ isTrusted: 'true', hasChatbotRequests: 'false' }, []],
+          [{ hasChatbotRequests: 'true', search: 'resu' }, [resolvedOnly]],
+        ]);
+      } finally {
+        await world.cleanup();
+        await prisma.globalPriceList.deleteMany({
+          where: { id: { in: [l1.id, l2.id] } },
+        });
+      }
+    });
+  });
+
+  describe('§10.1 / §11 for the new params (HTTP)', () => {
+    it('without read:Sale: metric filters → 400 with the field; customer filters → 200 {count}', async () => {
+      const b = await branch('PermisosFiltros');
+      await customer(b, 'Rosa');
+      for (const [key, value] of [
+        ['hasDebt', 'false'],
+        ['overdueMoreThanDays', '30'],
+        ['averageTicketMin', '0'],
+        ['noPurchaseMoreThanDays', '90'],
+      ]) {
+        const res = await listing(b.noSale, { [key]: value }).expect(400);
+        expect(res.body).toEqual({
+          statusCode: 400,
+          code: 'LISTING_PARAM_REQUIRES_PERMISSION',
+          message: `${key} requires read:Sale`,
+          field: key,
+          details: { required: 'read:Sale' },
+        });
+      }
+      // A malformed metric param gets its validation error first.
+      const bad = await listing(b.noSale, { openDebtMin: '-1' }).expect(400);
+      expect(bad.body).toMatchObject({
+        code: 'LISTING_INVALID_NUMBER',
+        field: 'openDebtMin',
+      });
+      const ok = await listing(b.noSale, {
+        hasPets: 'false',
+        isTrusted: 'false',
+        createdFrom: '2026-01-01T00:00:00.000Z',
+      }).expect(200);
+      expect(ok.body.filterSummary).toEqual({ count: 1 });
+    });
+
+    it('error codes of §11 through the production pipe', async () => {
+      const b = await branch('ErroresFiltros');
+      const cases: Array<[Record<string, string>, string | null, string]> = [
+        [{ openDebtMin: 'abc' }, 'LISTING_INVALID_NUMBER', 'openDebtMin'],
+        [{ totalSoldMax: '-5' }, 'LISTING_INVALID_NUMBER', 'totalSoldMax'],
+        [{ salesCountMin: '1.5' }, 'LISTING_INVALID_NUMBER', 'salesCountMin'],
+        [
+          { averageTicketMin: '9', averageTicketMax: '1' },
+          'LISTING_INVERTED_RANGE',
+          'averageTicket',
+        ],
+        [
+          { lastPurchaseFrom: 'nope' },
+          'LISTING_INVALID_DATE',
+          'lastPurchaseFrom',
+        ],
+        [
+          { createdFrom: '2026-02-01', createdTo: '2026-01-01' },
+          'LISTING_INVERTED_RANGE',
+          'created',
+        ],
+        [{ petSize: 'XL' }, 'LISTING_INVALID_ENUM_VALUE', 'petSize'],
+        [{ fiscalRegime: '000' }, 'LISTING_INVALID_ENUM_VALUE', 'fiscalRegime'],
+        [
+          { deliveryZoneType: 'ZONA_A' },
+          'LISTING_INVALID_ENUM_VALUE',
+          'deliveryZoneType',
+        ],
+        [{ priceListId: '123' }, 'LISTING_INVALID_UUID', 'priceListId'],
+        [
+          { city: Array.from({ length: 201 }, (_, i) => `c${i}`).join(',') },
+          'LISTING_TOO_MANY_VALUES',
+          'city',
+        ],
+        [{ overdueMoreThanDays: '0' }, null, 'overdueMoreThanDays'],
+        [{ noPurchaseMoreThanDays: '3651' }, null, 'noPurchaseMoreThanDays'],
+        [{ hasRfc: 'yes' }, null, 'hasRfc'],
+        [
+          { preferredPaymentMethod: 'efectivo' },
+          null,
+          'preferredPaymentMethod',
+        ],
+      ];
+      for (const [query, code, field] of cases) {
+        const res = await listing(b.member, query).expect(400);
+        if (code) {
+          expect([query, res.body.code, res.body.field]).toEqual([
+            query,
+            code,
+            field,
+          ]);
+        } else {
+          expect([query, res.body.code]).toEqual([query, undefined]);
+          expect(JSON.stringify(res.body)).toContain(field);
+        }
+      }
+    });
+  });
+
+  // ═════════════════════════ T3 / S2: options (§5) ═════════════════════════
+
+  describe('GET /customers/listing/options (§5)', () => {
+    const options = (m: SeededMember, query: Record<string, string>) =>
+      request(server())
+        .get('/customers/listing/options')
+        .query(query)
+        .set(auth(m));
+
+    it('distinct trimmed case-insensitive groups, most frequent spelling, distinct customers, count desc then value, q, limit, blanks skipped, tenant only', async () => {
+      const b = await branch('Opciones');
+      const other = await branch('Opciones B');
+      const t = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s));
+      const c1 = await customer(b, 'Uno');
+      const c2 = await customer(b, 'Dos');
+      const c3 = await customer(b, 'Tres');
+      const c4 = await customer(b, 'Cuatro');
+      await addr(b, c1, {
+        createdAt: t(1),
+        neighborhood: 'Del Valle',
+        zipCode: '03100',
+        city: 'CDMX',
+      });
+      // Two addresses of one customer in the same colonia count once.
+      await addr(b, c1, {
+        createdAt: t(2),
+        neighborhood: ' del valle ',
+        zipCode: '03100',
+      });
+      await addr(b, c2, {
+        createdAt: t(3),
+        neighborhood: 'Del Valle',
+        zipCode: '03100',
+      });
+      await addr(b, c3, {
+        createdAt: t(4),
+        neighborhood: 'DEL VALLE',
+        zipCode: '03020',
+      });
+      await addr(b, c4, {
+        createdAt: t(5),
+        neighborhood: 'Roma Norte',
+        zipCode: '06700',
+      });
+      await addr(b, c4, {
+        createdAt: t(6),
+        neighborhood: 'Álamos',
+        zipCode: '   ',
+      });
+      await addr(b, c4, { createdAt: t(7), neighborhood: '  ', zipCode: null });
+      const foreign = await customer(other, 'Ajena');
+      await addr(other, foreign, {
+        createdAt: t(8),
+        neighborhood: 'Del Valle',
+      });
+      await addr(other, foreign, { createdAt: t(9), neighborhood: 'Polanco' });
+
+      const res = await options(b.member, { field: 'neighborhood' }).expect(
+        200,
+      );
+      expect(res.body.field).toBe('neighborhood');
+      expect(res.body.data[0]).toEqual({
+        value: 'Del Valle',
+        customersCount: 3,
+      });
+      // The 1-customer tie sorts by value in the database collation, which
+      // may place «Á» either side of «R»: assert the group, not its order.
+      expect(
+        (res.body.data as Array<{ value: string }>)
+          .slice(1)
+          .map((o) => o.value)
+          .sort(),
+      ).toEqual(['Roma Norte', 'Álamos'].sort());
+      expect(res.body.data).toHaveLength(3);
+
+      const q = await options(b.member, {
+        field: 'neighborhood',
+        q: 'VALL',
+      }).expect(200);
+      expect(q.body.data).toEqual([{ value: 'Del Valle', customersCount: 3 }]);
+      const limited = await options(b.member, {
+        field: 'neighborhood',
+        limit: '1',
+      }).expect(200);
+      expect(limited.body.data).toEqual([
+        { value: 'Del Valle', customersCount: 3 },
+      ]);
+
+      const zips = await options(b.member, { field: 'zipCode' }).expect(200);
+      expect(zips.body.data).toEqual([
+        { value: '03100', customersCount: 2 },
+        { value: '03020', customersCount: 1 },
+        { value: '06700', customersCount: 1 },
+      ]);
+      const cities = await options(b.member, { field: 'city' }).expect(200);
+      expect(cities.body).toEqual({
+        field: 'city',
+        data: [{ value: 'CDMX', customersCount: 1 }],
+      });
+      const municipalities = await options(b.member, {
+        field: 'municipality',
+      }).expect(200);
+      expect(municipalities.body).toEqual({ field: 'municipality', data: [] });
+
+      // Selecting an option matches the whole group through the §4.4 filter.
+      const filtered = await listing(b.member, {
+        neighborhood: 'Del Valle',
+      }).expect(200);
+      expect(filtered.body.pagination.total).toBe(3);
+
+      // Tenant isolation: the other tenant sees only its own values.
+      const theirs = await options(other.member, {
+        field: 'neighborhood',
+      }).expect(200);
+      expect(theirs.body.data).toEqual([
+        { value: 'Del Valle', customersCount: 1 },
+        { value: 'Polanco', customersCount: 1 },
+      ]);
+    });
+
+    it('fiscalRegime: only the SAT codes in use, with counts', async () => {
+      const b = await branch('OpcionesRegimen');
+      await customer(b, 'A', { fiscalRegime: '612' });
+      await customer(b, 'B', { fiscalRegime: '612' });
+      await customer(b, 'C', { fiscalRegime: '601' });
+      await customer(b, 'D', { fiscalRegime: 'XYZ' }); // not a SAT code
+      await customer(b, 'E', { fiscalRegime: null });
+      const res = await options(b.member, { field: 'fiscalRegime' }).expect(
+        200,
+      );
+      expect(res.body).toEqual({
+        field: 'fiscalRegime',
+        data: [
+          { value: '612', customersCount: 2 },
+          { value: '601', customersCount: 1 },
+        ],
+      });
+    });
+
+    it('permissions and validation: read:Customer is enough; without it 403; unknown field / limit → 400', async () => {
+      const b = await branch('OpcionesPermisos');
+      await options(b.noSale, { field: 'city' }).expect(200);
+      const saleOnly = await world.member(b.tenantId, 'Solo ventas', [
+        'Sale:read',
+      ]);
+      await options(saleOnly, { field: 'city' }).expect(403);
+      for (const query of [
+        {},
+        { field: 'preferredPaymentMethod' },
+        { field: 'deliveryZoneType' },
+        { field: 'city', limit: '201' },
+        { field: 'city', limit: '0' },
+        { field: 'city', page: '1' },
+      ] as Array<Record<string, string>>) {
+        await options(b.member, query).expect(400);
+      }
+    });
+  });
 });
