@@ -14,10 +14,12 @@
  *      rejected fence rolls the freshly acquired slot back with everything;
  *   2. cash session fence (`assertOpenSession`: tenant, owner, OPEN; locks the
  *      session row);
- *   3. customer row `FOR KEY SHARE`, then the candidate sales `FOR UPDATE
- *      ORDER BY id` (customer DELETE order), allocation recomputed under the
- *      lock and compared with `expectedDebtCents` (409 with the current
- *      preview);
+ *   3. customer row `FOR KEY SHARE`, then the sales `FOR UPDATE ORDER BY id`
+ *      (customer DELETE order): with `saleIds` the selection; without it
+ *      only the sales the tender reaches (candidates read unlocked in Q1
+ *      order, see `lockReachedSales`). Allocation recomputed under the lock;
+ *      a reached set that no longer matches the locked one, or a different
+ *      `expectedDebtCents`, answers 409 with the current preview;
  *   4. `sale_collections` row, then per sale the `SalePayment` rows (one per
  *      (sale, tender part), applied amount, `collectionId`) through the
  *      single-sale writer, which re-sums the ledger and updates
@@ -63,6 +65,7 @@ import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
 import { isOverdue } from './customer-statement.service';
 import {
   allocateCollection,
+  collectionLockPrefix,
   type CollectionAllocation,
   type CollectionTenderMethod,
 } from './domain/collection-allocation';
@@ -210,19 +213,26 @@ export class CustomerCollectionService {
       await ledger.assertOpenSession(cashSessionId, actorId);
 
       const customer = await this.requireCustomer(customerId, true);
-      const candidates = await this.loadCandidates(
-        customerId,
-        dto.saleIds,
-        true,
-      );
+      const { candidates, fitsLockedSet } =
+        dto.saleIds === undefined
+          ? await this.lockReachedSales(customerId, tenders)
+          : {
+              candidates: await this.loadCandidates(
+                customerId,
+                dto.saleIds,
+                true,
+              ),
+              fitsLockedSet: () => true,
+            };
       // Allocation errors under the lock (NO_OPEN_DEBT, EXCEEDS_DEBT,
-      // SALE_NOT_ELIGIBLE) answer before the expected-debt comparison.
+      // SALE_NOT_ELIGIBLE) answer before the debt-changed checks.
       const allocation = allocateCollection(candidates, tenders);
       const resolved = await this.resolveTenders(tenders);
 
       if (
-        dto.expectedDebtCents !== undefined &&
-        dto.expectedDebtCents !== allocation.debtCents
+        !fitsLockedSet(allocation) ||
+        (dto.expectedDebtCents !== undefined &&
+          dto.expectedDebtCents !== allocation.debtCents)
       ) {
         throw ruleError('COLLECTION_DEBT_CHANGED', {
           preview: await this.buildPreview(
@@ -264,7 +274,8 @@ export class CustomerCollectionService {
     const tenantId = this.tenantPrisma.getTenantId();
     const client = this.tenantPrisma.getClient();
     const today = this.today();
-    const occurredAt = new Date();
+    // Payment events, cash movements and `customer.collection.recorded`.
+    const occurredAt = this.now();
     const collectionId = randomUUID();
     const tendersJson = this.tenderResponses(resolved);
     // Read BEFORE the writes: with a selection it sums the customer's open
@@ -451,6 +462,64 @@ export class CustomerCollectionService {
   }
 
   /**
+   * Without `saleIds`: lock only the sales the tender reaches (R4).
+   *
+   * The candidates are read WITHOUT locks in Q1 order, the reached prefix
+   * (`collectionLockPrefix`: every candidate when the tender covers the whole
+   * debt) is locked `FOR UPDATE ORDER BY id`, and the allocation runs over
+   * the locked prefix plus the unlocked rest — the customer's debt as read in
+   * this request, which `expectedDebtCents` is compared with. The allocation
+   * "fits" only when every locked sale is still eligible and the sales that
+   * receive money are exactly the locked ones; otherwise a concurrent writer
+   * changed a debt and the caller answers 409 COLLECTION_DEBT_CHANGED with
+   * the current preview before any write. A sale that receives 0 is never
+   * locked, so a single-sale payment on it does not wait for the collection.
+   */
+  private async lockReachedSales(
+    customerId: string,
+    tenders: RequestTender[],
+  ): Promise<{
+    candidates: CollectionSaleRow[];
+    fitsLockedSet: (allocation: Allocation) => boolean;
+  }> {
+    const unlocked = await this.collections.findOpenDebtSales(customerId, {
+      lock: false,
+    });
+    const tenderedCents = tenders.reduce(
+      (total, tender) => total + tender.amountCents,
+      0,
+    );
+    const prefixIds = collectionLockPrefix(unlocked, tenderedCents)
+      .map((sale) => sale.saleId)
+      .sort();
+    const locked =
+      prefixIds.length === 0
+        ? []
+        : await this.collections.findSalesByIds(prefixIds, { lock: true });
+    const eligible = locked.filter(
+      (sale) =>
+        sale.customerId === customerId &&
+        sale.status === 'CONFIRMED' &&
+        sale.debtCents > 0,
+    );
+    const prefix = new Set(prefixIds);
+    const rest = unlocked.filter((sale) => !prefix.has(sale.saleId));
+    return {
+      candidates: [...eligible, ...rest],
+      fitsLockedSet: (allocation) => {
+        if (eligible.length !== prefixIds.length) return false;
+        const reached = allocation.sales.filter(
+          (share) => share.appliedCents > 0,
+        );
+        return (
+          reached.length === prefix.size &&
+          reached.every((share) => prefix.has(share.candidate.saleId))
+        );
+      },
+    };
+  }
+
+  /**
    * All the customer's CONFIRMED open-debt sales, or the explicit selection,
    * every selected id checked in request order (§3.1): unknown/foreign,
    * another customer, not CONFIRMED or without debt → NOT_ELIGIBLE + id.
@@ -579,7 +648,12 @@ export class CustomerCollectionService {
     const timeZone =
       this.config?.get<string>('PROMOTIONS_BUSINESS_TIMEZONE') ??
       DEFAULT_BUSINESS_TIMEZONE;
-    return businessToday(this.clock ? this.clock() : new Date(), timeZone);
+    return businessToday(this.now(), timeZone);
+  }
+
+  /** The injected SALES_CLOCK (tests pin it), else the wall clock. */
+  private now(): Date {
+    return this.clock ? this.clock() : new Date();
   }
 
   /**

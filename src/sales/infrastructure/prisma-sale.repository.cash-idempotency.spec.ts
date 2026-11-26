@@ -542,3 +542,44 @@ describe('PrismaSaleRepository — ambient transaction idempotency acquire', () 
     }
   });
 });
+
+describe('PrismaSaleRepository — customer collection slot success (T2b)', () => {
+  it('marks the acquired customer_collection slot SUCCEEDED with the response', async () => {
+    const harness = makeAmbientTxHarness();
+    const acquired = (await harness.repo.acquireCollectionIdempotency(
+      'key-1',
+      'hash-1',
+    )) as { kind: string; token: string };
+    expect(acquired.kind).toBe('acquired');
+
+    await harness.repo.markCollectionIdempotencySucceeded(acquired.token, {
+      collectionId: 'col-1',
+    });
+
+    expect(harness.rows()).toEqual([
+      expect.objectContaining({
+        id: acquired.token,
+        operation: 'customer_collection',
+        status: 'SUCCEEDED',
+        responseJson: { collectionId: 'col-1' },
+        saleId: null,
+      }),
+    ]);
+  });
+
+  it('throws (so the collection transaction rolls the money back) when no slot row is updated', async () => {
+    const harness = makeAmbientTxHarness([
+      { operation: 'sale_payment', key: 'key-1' },
+    ]);
+    const [foreignOperation] = harness.rows();
+
+    await expect(
+      harness.repo.markCollectionIdempotencySucceeded('missing-token', {}),
+    ).rejects.toThrow('COLLECTION_IDEMPOTENCY_NOT_MARKED');
+    // a slot of another operation is never taken for the collection's
+    await expect(
+      harness.repo.markCollectionIdempotencySucceeded(foreignOperation.id, {}),
+    ).rejects.toThrow('COLLECTION_IDEMPOTENCY_NOT_MARKED');
+    expect(harness.rows()[0].status).toBe('IN_FLIGHT');
+  });
+});

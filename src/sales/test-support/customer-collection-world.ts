@@ -10,7 +10,8 @@
  * Routes: the collection preview/apply, the single-sale payment, the sale
  * cancellation and the customer DELETE; T3 adds `GET /collections/:id` and
  * its receipt PDF (real `PrismaCollectionReader`, real render method of
- * `PdfGenerationService` without `onModuleInit`).
+ * `PdfGenerationService` without `onModuleInit`). The collection's payment
+ * method resolver is a stub that knows `CATALOG_CARD_METHOD` (T2b).
  */
 import { Logger, type INestApplication } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
@@ -33,6 +34,7 @@ import {
 } from '../../delivery-zones/test-support/delivery-zone-world';
 import { StockJournalWriter } from '../../inventory/infrastructure/stock-journal.writer';
 import { PdfGenerationService } from '../../pdf-generation/pdf-generation.service';
+import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import { OutboxWriterService } from '../../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../../shared/prisma/tenant-prisma.service';
 import type { TenantClsStore } from '../../shared/tenant/tenant-cls-store.interface';
@@ -52,6 +54,45 @@ import { SalesService } from '../sales.service';
 
 /** 12:00 in Mexico City on 2026-11-25 → business today 2026-11-25. */
 export const COLLECTION_NOW = new Date('2026-11-25T18:00:00.000Z');
+
+/**
+ * T2b — the one catalog payment method the collection resolver stub knows: a
+ * `card_debit` «Terminal BBVA / Débito». Any other id answers the real
+ * resolver's `PAYMENT_METHOD_NOT_FOUND`, a category mismatch its
+ * `PAYMENT_METHOD_CATEGORY_MISMATCH`.
+ */
+export const CATALOG_CARD_METHOD = {
+  id: '7c0f8f9e-5a4b-4c3d-9e2f-1a2b3c4d5e6f',
+  category: 'card_debit',
+  name: 'Terminal BBVA',
+  subtitle: 'Débito',
+} as const;
+
+const catalogResolverStub = {
+  resolveActive: async (input: {
+    paymentMethodId: string;
+    expectedCategory: string;
+  }) => {
+    if (input.paymentMethodId !== CATALOG_CARD_METHOD.id) {
+      throw new BusinessRuleViolationError(
+        'PAYMENT_METHOD_NOT_FOUND',
+        'PAYMENT_METHOD_NOT_FOUND',
+      );
+    }
+    if (input.expectedCategory !== CATALOG_CARD_METHOD.category) {
+      throw new BusinessRuleViolationError(
+        'PAYMENT_METHOD_CATEGORY_MISMATCH',
+        'PAYMENT_METHOD_CATEGORY_MISMATCH',
+      );
+    }
+    return {
+      category: CATALOG_CARD_METHOD.category,
+      name: CATALOG_CARD_METHOD.name,
+      subtitle: CATALOG_CARD_METHOD.subtitle,
+    };
+  },
+  listActive: async () => [],
+};
 
 export async function createCollectionTestApp(): Promise<INestApplication> {
   // Real render method without `onModuleInit` (no font CDN preflight).
@@ -87,8 +128,7 @@ export async function createCollectionTestApp(): Promise<INestApplication> {
             new PrismaCustomerCollectionRepository(tenantPrisma),
             new OutboxWriterService(),
             tenantPrisma,
-            // SAFETY: built-in methods only — the resolver is never called.
-            {} as never,
+            catalogResolverStub as never,
             new PrismaCashRegisterApplication(tenantPrisma),
             () => COLLECTION_NOW,
             undefined,

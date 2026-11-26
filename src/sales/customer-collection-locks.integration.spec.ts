@@ -1,8 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- supertest bodies are untyped JSON */
 /**
  * customer-collection / T2 (S3) — lock order of «Cobrar todo» against REAL
- * PostgreSQL: cash session → customer `FOR KEY SHARE` → candidate sales `FOR
- * UPDATE ORDER BY id`, versus
+ * PostgreSQL: cash session → customer `FOR KEY SHARE` → the sales the tender
+ * reaches `FOR UPDATE ORDER BY id` (T2b: a sale that receives 0 is never
+ * locked; a reached sale that changed under the lock answers 409
+ * COLLECTION_DEBT_CHANGED), versus
  *   - the single-sale payment (`POST /sales/:id/payments`: session → one sale),
  *   - customer DELETE (customer `FOR UPDATE` → its sales `ORDER BY id`),
  *   - another collection of the same customer.
@@ -318,7 +320,7 @@ describeIfDb('«Cobrar todo» lock order (PostgreSQL)', () => {
     const holdA = (b: Branch) => (tx: typeof prisma) =>
       tx.$queryRaw`SELECT id FROM sales WHERE id = ${b.A} FOR NO KEY UPDATE`;
 
-    it('cancel first (blocked on A), collection second without expectedDebtCents: A is cancelled and skipped, the collection pays only B', async () => {
+    it('cancel first (blocked on A), collection second without expectedDebtCents: the reached A is no longer eligible under the lock, 409 COLLECTION_DEBT_CHANGED with B only, nothing collected', async () => {
       const b = await branch('CancelarCobrar');
 
       const [canceled, collected] = await race(
@@ -328,22 +330,30 @@ describeIfDb('«Cobrar todo» lock order (PostgreSQL)', () => {
       );
 
       expect(canceled.status).toBe(200);
-      expect(collected.status).toBe(201);
+      expect(collected.status).toBe(409);
       expect(collected.body).toMatchObject({
-        tenderedCents: 600,
-        appliedCents: 500,
-        changeDueCents: 100,
-        remainingCustomerDebtCents: 0,
+        error: 'COLLECTION_DEBT_CHANGED',
+        preview: {
+          debtCents: 500,
+          tenderedCents: 600,
+          appliedCents: 500,
+          changeDueCents: 100,
+          remainingCustomerDebtCents: 0,
+        },
       });
-      expect(collected.body.sales.map((s: any) => s.saleId)).toEqual([b.B]);
+      expect(collected.body.preview.sales.map((s: any) => s.saleId)).toEqual([
+        b.B,
+      ]);
       const after = await balances(b);
       expect([after.A, after.B]).toEqual([
         [0, 'CREDIT'],
-        [500, 'PAID'],
+        [0, 'CREDIT'],
       ]);
       const sale = (id: string) => after.rows.sales.find((s) => s.id === id)!;
       expect(sale(b.A).status).toBe('CANCELED');
-      expect(after.rows.payments.filter((p) => p.saleId === b.A)).toEqual([]);
+      expect(after.rows.payments).toEqual([]);
+      expect(after.collections).toEqual([]);
+      expect(after.rows.movements).toEqual([]);
       // A was unpaid when cancelled: nothing to refund
       expect(after.rows.refunds).toEqual([]);
     }, 60_000);
@@ -456,7 +466,7 @@ describeIfDb('«Cobrar todo» lock order (PostgreSQL)', () => {
       ]);
     }, 60_000);
 
-    it('without expectedDebtCents: they serialize, A then B, nothing overpaid', async () => {
+    it('without expectedDebtCents: they serialize on A; the second finds A paid (its tender would now reach B, which it did not lock) and answers 409 with B, nothing overpaid', async () => {
       const b = await branch('DobleLibre');
 
       const [first, second] = await race(
@@ -465,15 +475,80 @@ describeIfDb('«Cobrar todo» lock order (PostgreSQL)', () => {
         () => collect(b, 'cashier', 300),
       );
 
-      expect([first.status, second.status]).toEqual([201, 201]);
+      expect([first.status, second.status]).toEqual([201, 409]);
       expect(first.body.sales.map((s: any) => s.saleId)).toEqual([b.A]);
-      expect(second.body.sales.map((s: any) => s.saleId)).toEqual([b.B]);
+      expect(second.body).toMatchObject({
+        error: 'COLLECTION_DEBT_CHANGED',
+        preview: { debtCents: 500, appliedCents: 300 },
+      });
+      expect(
+        second.body.preview.sales.map((s: any) => [s.saleId, s.appliedCents]),
+      ).toEqual([[b.B, 300]]);
       const after = await balances(b);
       expect([after.A, after.B]).toEqual([
         [300, 'PAID'],
-        [300, 'PARTIAL'],
+        [0, 'CREDIT'],
       ]);
-      expect(after.collections).toHaveLength(2);
+      expect(after.collections).toHaveLength(1);
+    }, 60_000);
+  });
+
+  // ─────────────── R4: a sale that receives nothing is never locked ───────────────
+
+  describe('lock set without saleIds', () => {
+    it('a sale that receives 0 is NOT locked: a single-sale payment on it completes while the collection waits on the reached sale', async () => {
+      const b = await branch('SinBloqueoCero');
+      // cash 300 reaches only A (due first); B (the LOWER id, which a lock of
+      // every candidate would take first) receives 0.
+      const helper = holdLock(lockSale(b.A));
+      const helperPid = await helper.acquired;
+      try {
+        // `.then` sends the (lazy) supertest request now
+        const collected = collect(b, 'collector', 300, 800).then((res) => res);
+        const collectionPid = await waitBlockedBy([helperPid]);
+
+        let settled = false;
+        const paid = api
+          .pay(b.cashier, b.B, {
+            cashSessionId: b.cashierSession,
+            payments: [{ method: 'cash', amountCents: 100 }],
+          })
+          .then((res) => res)
+          .finally(() => (settled = true));
+        // Handshake: until the payment answers, no backend ever waits on the
+        // collection, and the collection is still parked on A.
+        while (!settled) {
+          const waiters = await prisma.$queryRaw<Array<{ pid: number }>>`
+            SELECT pid FROM pg_stat_activity
+            WHERE pg_blocking_pids(pid) && ARRAY[${collectionPid}]::int[]`;
+          expect(waiters).toEqual([]);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect((await paid).status).toBe(201);
+        const stillParked = await prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE pid = ${collectionPid}
+            AND pg_blocking_pids(pid) && ARRAY[${helperPid}]::int[]`;
+        expect(stillParked).toHaveLength(1);
+
+        helper.release();
+        await helper.done;
+        const res = await collected;
+        expect(res.status).toBe(201);
+        expect(res.body.sales.map((s: any) => s.saleId)).toEqual([b.A]);
+        // B was read (unlocked) before its payment, and expectedDebtCents
+        // is compared with the debt read in this request (A 300 locked + B
+        // 500 unlocked = 800); the remaining debt reflects that same read.
+        expect(res.body.remainingCustomerDebtCents).toBe(500);
+      } finally {
+        helper.release();
+        await helper.done.catch(() => undefined);
+      }
+      const after = await balances(b);
+      expect([after.A, after.B]).toEqual([
+        [300, 'PAID'],
+        [100, 'PARTIAL'],
+      ]);
     }, 60_000);
   });
 });

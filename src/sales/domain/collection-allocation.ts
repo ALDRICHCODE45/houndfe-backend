@@ -90,6 +90,26 @@ export function orderCollectionCandidates<T extends CollectionCandidate>(
   });
 }
 
+/**
+ * The sales a tender of `tenderedCents` reaches, in Q1 order: the shortest
+ * prefix whose debt covers the tender, or every candidate when the tender is
+ * at least the whole debt (the change is computed over all of them). These
+ * are the only sales a collection without `saleIds` has to lock; the rest
+ * receive 0 (contract §3.3).
+ */
+export function collectionLockPrefix<T extends CollectionCandidate>(
+  candidates: readonly T[],
+  tenderedCents: number,
+): T[] {
+  const ordered = orderCollectionCandidates(candidates);
+  let covered = 0;
+  for (let index = 0; index < ordered.length; index += 1) {
+    covered += ordered[index].debtCents;
+    if (covered >= tenderedCents) return ordered.slice(0, index + 1);
+  }
+  return ordered;
+}
+
 export function allocateCollection<T extends CollectionCandidate>(
   candidates: readonly T[],
   tenders: readonly CollectionTender[],

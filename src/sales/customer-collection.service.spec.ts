@@ -68,6 +68,8 @@ interface Harness {
   outbox: { publish: jest.Mock };
   saleRepo: Record<string, jest.Mock>;
   resolver: { resolveActive: jest.Mock };
+  /** Ids of every `findSalesByIds` call with `lock: true`, per call. */
+  lockedIds: string[][];
 }
 
 function harness(
@@ -76,13 +78,21 @@ function harness(
     customer?: boolean;
     acquire?: unknown;
     otherOpenDebtCents?: number;
+    /**
+     * The rows as the LOCKED read sees them (a concurrent writer committed
+     * between the unlocked candidate read and the lock); defaults to `sales`.
+     */
+    lockedSales?: CollectionSaleRow[];
   } = {},
 ): Harness {
   const calls: string[] = [];
+  const lockedIds: string[][] = [];
   const sales = opts.sales ?? exampleSales();
   const persisted: Harness['persisted'] = [];
   const inserted: any[] = [];
-  const paidNow = new Map(sales.map((s) => [s.saleId, s.paidCents]));
+  const paidNow = new Map(
+    (opts.lockedSales ?? sales).map((s) => [s.saleId, s.paidCents]),
+  );
 
   const collectionRepo: ICustomerCollectionRepository = {
     findCustomer: jest.fn(async (id, { lock }) => {
@@ -102,7 +112,9 @@ function harness(
     }),
     findSalesByIds: jest.fn(async (ids, { lock }) => {
       calls.push(`findSalesByIds:${lock}`);
-      return sales.filter((s) => ids.includes(s.saleId));
+      if (lock) lockedIds.push([...ids]);
+      const source = lock ? (opts.lockedSales ?? sales) : sales;
+      return source.filter((s) => ids.includes(s.saleId));
     }),
     sumOpenDebt: jest.fn(async () => {
       calls.push('sumOpenDebt');
@@ -132,7 +144,9 @@ function harness(
     persistCollectedPayments: jest.fn(async (input) => {
       calls.push(`persist:${input.saleId}`);
       persisted.push(input);
-      const sale = sales.find((s) => s.saleId === input.saleId)!;
+      const sale = (opts.lockedSales ?? sales).find(
+        (s) => s.saleId === input.saleId,
+      )!;
       const batch = input.payments.reduce(
         (a: number, p: any) => a + p.amountCents,
         0,
@@ -198,6 +212,7 @@ function harness(
     outbox,
     saleRepo,
     resolver,
+    lockedIds,
   };
 }
 
@@ -392,7 +407,7 @@ describe('CustomerCollectionService.apply', () => {
     expect(h.calls).toEqual([]);
   });
 
-  it('runs acquire → session fence → customer lock → sale locks → writes → events → success, in ONE transaction', async () => {
+  it('runs acquire → session fence → customer lock → candidate read → sale locks → writes → events → success, in ONE transaction', async () => {
     const h = harness();
 
     const result = await h.service.apply(CUSTOMER, ACTOR, body(), 'key-1');
@@ -403,7 +418,8 @@ describe('CustomerCollectionService.apply', () => {
       'acquire',
       'assertOpenSession',
       'findCustomer:true',
-      'findOpenDebtSales:true',
+      'findOpenDebtSales:false',
+      'findSalesByIds:true',
       'insertCollection',
       'persist:A',
       'outbox:sale.payment.received',
@@ -675,6 +691,25 @@ describe('CustomerCollectionService.apply', () => {
     });
   });
 
+  it('stamps payment events, cash movements and customer.collection.recorded with the SALES_CLOCK', async () => {
+    const h = harness();
+    await h.service.apply(CUSTOMER, ACTOR, body(), 'key-1');
+
+    const payloads = (type: string) =>
+      h.outbox.publish.mock.calls.filter((c) => c[4] === type).map((c) => c[5]);
+    const iso = NOW.toISOString();
+    expect(payloads('sale.payment.received').length).toBeGreaterThan(0);
+    for (const payload of payloads('sale.payment.received')) {
+      expect(payload.occurredAt).toBe(iso);
+    }
+    expect(payloads('sale.fully.paid').map((p) => p.paidAt)).toEqual([
+      iso,
+      iso,
+    ]);
+    expect(payloads('customer.collection.recorded')[0].occurredAt).toBe(iso);
+    expect(h.ledger.recordPayments.mock.calls[0][0].occurredAt).toEqual(NOW);
+  });
+
   it('replays a stored response without touching the fence, locks or money', async () => {
     const stored = { collectionId: 'col-0' };
     const h = harness({ acquire: { kind: 'replay', payload: stored } });
@@ -751,6 +786,169 @@ describe('CustomerCollectionService.apply', () => {
       h.calls.indexOf('insertCollection'),
     );
     expect(res.remainingCustomerDebtCents).toBe(600);
+  });
+
+  describe('without saleIds: locks only the sales the tender reaches (R4)', () => {
+    // Q1 order of the example: A 300 → B 500 → C 400 (debt 1200).
+    const card = (amountCents: number) =>
+      body({ payments: [{ method: 'card_debit', amountCents }] });
+
+    it('reads the candidates unlocked, then locks only the reached prefix (ids ascending) after the customer', async () => {
+      const h = harness();
+      const { body: res } = await h.service.apply(
+        CUSTOMER,
+        ACTOR,
+        card(400),
+        'key-1',
+      );
+
+      expect(h.lockedIds).toEqual([['A', 'B']]);
+      expect(h.calls.slice(3, 6)).toEqual([
+        'findCustomer:true',
+        'findOpenDebtSales:false',
+        'findSalesByIds:true',
+      ]);
+      expect(h.persisted.map((p) => p.saleId)).toEqual(['A', 'B']);
+      // the debt of the unlocked rest (C) still counts
+      expect(res.remainingCustomerDebtCents).toBe(800);
+    });
+
+    it('locks every candidate when the tender covers the whole debt (the change needs them all)', async () => {
+      const h = harness();
+      const { body: res } = await h.service.apply(
+        CUSTOMER,
+        ACTOR,
+        body({
+          payments: [
+            { method: 'card_debit', amountCents: 1200 },
+            { method: 'cash', amountCents: 100 },
+          ],
+        }),
+        'key-1',
+      );
+      expect(h.lockedIds).toEqual([['A', 'B', 'C']]);
+      expect(res.changeDueCents).toBe(100);
+    });
+
+    it('answers COLLECTION_NO_OPEN_DEBT without locking any sale when nothing is owed', async () => {
+      const h = harness({ sales: [] });
+      const error = await ruleError(
+        h.service.apply(CUSTOMER, ACTOR, card(100), 'key-1'),
+      );
+      expect(error.code).toBe('COLLECTION_NO_OPEN_DEBT');
+      expect(h.lockedIds).toEqual([]);
+    });
+
+    it('answers 409 COLLECTION_DEBT_CHANGED (current preview, nothing written) when a reached sale is no longer eligible under the lock', async () => {
+      const h = harness({
+        lockedSales: exampleSales().map((s) =>
+          s.saleId === 'A'
+            ? { ...s, paidCents: 300, debtCents: 0, paymentStatus: 'PAID' }
+            : s,
+        ),
+      });
+      const error = await ruleError(
+        h.service.apply(CUSTOMER, ACTOR, card(400), 'key-1'),
+      );
+
+      expect(error.code).toBe('COLLECTION_DEBT_CHANGED');
+      expect(error.details).toEqual({
+        preview: expect.objectContaining({
+          debtCents: 900,
+          appliedCents: 400,
+          remainingCustomerDebtCents: 500,
+          sales: [
+            expect.objectContaining({ saleId: 'B', appliedCents: 400 }),
+            expect.objectContaining({ saleId: 'C', appliedCents: 0 }),
+          ],
+        }),
+      });
+      expect(h.inserted).toEqual([]);
+      expect(h.persisted).toEqual([]);
+      expect(h.ledger.recordPayments).not.toHaveBeenCalled();
+      expect(
+        h.saleRepo.markCollectionIdempotencySucceeded,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('answers 409 COLLECTION_DEBT_CHANGED when a smaller debt under the lock would carry the tender into an unlocked sale', async () => {
+      // tender 800 = A 300 + B 500 → prefix [A, B]; B was paid 100 meanwhile
+      const h = harness({
+        lockedSales: exampleSales().map((s) =>
+          s.saleId === 'B' ? { ...s, paidCents: 300, debtCents: 400 } : s,
+        ),
+      });
+      const error = await ruleError(
+        h.service.apply(CUSTOMER, ACTOR, card(800), 'key-1'),
+      );
+
+      expect(error.code).toBe('COLLECTION_DEBT_CHANGED');
+      expect(error.details).toEqual({
+        preview: expect.objectContaining({
+          debtCents: 1100,
+          sales: [
+            expect.objectContaining({ saleId: 'A', appliedCents: 300 }),
+            expect.objectContaining({ saleId: 'B', appliedCents: 400 }),
+            expect.objectContaining({ saleId: 'C', appliedCents: 100 }),
+          ],
+        }),
+      });
+      expect(h.lockedIds).toEqual([['A', 'B']]);
+      expect(h.persisted).toEqual([]);
+    });
+
+    it('answers 409 COLLECTION_DEBT_CHANGED when a larger debt under the lock leaves a locked sale without money', async () => {
+      // tender 400 → prefix [A, B]; A now owes 400 (absorbs the whole tender)
+      const h = harness({
+        lockedSales: exampleSales().map((s) =>
+          s.saleId === 'A' ? { ...s, totalCents: 400, debtCents: 400 } : s,
+        ),
+      });
+      const error = await ruleError(
+        h.service.apply(CUSTOMER, ACTOR, card(400), 'key-1'),
+      );
+      expect(error.code).toBe('COLLECTION_DEBT_CHANGED');
+      expect(h.persisted).toEqual([]);
+    });
+
+    it('compares expectedDebtCents with the debt read in this request (locked prefix + unlocked rest)', async () => {
+      // B paid 50 meanwhile: the tender still reaches exactly [A, B]
+      const lockedSales = exampleSales().map((s) =>
+        s.saleId === 'B' ? { ...s, paidCents: 250, debtCents: 450 } : s,
+      );
+      const stale = harness({ lockedSales });
+      const error = await ruleError(
+        stale.service.apply(
+          CUSTOMER,
+          ACTOR,
+          body({
+            expectedDebtCents: 1200,
+            payments: [{ method: 'card_debit', amountCents: 400 }],
+          }),
+          'key-1',
+        ),
+      );
+      expect(error.code).toBe('COLLECTION_DEBT_CHANGED');
+      expect(error.details).toEqual({
+        preview: expect.objectContaining({ debtCents: 1150 }),
+      });
+
+      const fresh = harness({ lockedSales });
+      const { body: res } = await fresh.service.apply(
+        CUSTOMER,
+        ACTOR,
+        body({
+          expectedDebtCents: 1150,
+          payments: [{ method: 'card_debit', amountCents: 400 }],
+        }),
+        'key-1',
+      );
+      expect(res.sales.map((s) => [s.saleId, s.appliedCents])).toEqual([
+        ['A', 300],
+        ['B', 100],
+      ]);
+      expect(res.remainingCustomerDebtCents).toBe(750);
+    });
   });
 
   it('fails closed (rolls back) when the writer disagrees with the locked debt', async () => {

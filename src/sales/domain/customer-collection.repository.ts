@@ -4,7 +4,9 @@
  * `ISaleRepository.persistCollectedPayments`.
  *
  * Lock order of the collection transaction (after the cash session fence):
- * customer row `FOR KEY SHARE` → candidate sales `FOR UPDATE ORDER BY id`.
+ * customer row `FOR KEY SHARE` → sales `FOR UPDATE ORDER BY id` (the
+ * selection, or without one only the sales the tender reaches, read first
+ * without locks through `findOpenDebtSales` and locked by `findSalesByIds`).
  * Customer DELETE takes customer `FOR UPDATE` → the customer's sales `ORDER BY
  * id`, and the single-sale payment locks one sale, so none of them can wait
  * on each other in a cycle.

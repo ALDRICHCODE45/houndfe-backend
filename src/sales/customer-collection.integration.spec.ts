@@ -16,6 +16,7 @@ import {
 } from '../delivery-zones/test-support/delivery-zone-world';
 import { sortPaymentsForHash } from './sales.service';
 import {
+  CATALOG_CARD_METHOD,
   counter,
   createCollectionTestApp,
   moneyRows,
@@ -676,6 +677,129 @@ describeIfDb('«Cobrar todo» customer collection (PostgreSQL)', () => {
         payments: tenders(['cash', 1]),
       });
       expect(many.status).toBe(400);
+    });
+
+    it('validates the tender bounds with a 400 (never 500), writing nothing: amount and total within INT4, reference up to 120', async () => {
+      const e = await example('Limites');
+      const before = await moneyRows(e.tenantId);
+      const send = (payments: object[]) =>
+        api.collect(e.member, e.customerId, {
+          cashSessionId: e.sessionId,
+          payments,
+        });
+
+      const oversized = await send([
+        { method: 'cash', amountCents: 2_147_483_648 },
+      ]);
+      expect(oversized.status).toBe(400);
+      const overflow = await send([
+        { method: 'card_debit', amountCents: 2_000_000_000 },
+        { method: 'cash', amountCents: 147_483_648 },
+      ]);
+      expect(overflow.status).toBe(400);
+      expect(JSON.stringify(overflow.body)).toContain(
+        'PAYMENTS_TOTAL_TOO_LARGE',
+      );
+      const longReference = await send([
+        { method: 'transfer', amountCents: 100, reference: 'x'.repeat(121) },
+      ]);
+      expect(longReference.status).toBe(400);
+      const preview = await api.preview(e.member, e.customerId, {
+        payments: [{ method: 'cash', amountCents: 2_147_483_648 }],
+      });
+      expect(preview.status).toBe(400);
+
+      expect(await moneyRows(e.tenantId)).toEqual(before);
+    });
+  });
+
+  // ──────────────────────── catalog payment method ────────────────────────
+
+  describe('a catalog paymentMethodId (R3)', () => {
+    it('snapshots the catalog on every per-sale payment row, in tendersJson and in GET /collections/:id', async () => {
+      const e = await example('Catalogo');
+      const catalog = {
+        paymentMethodId: CATALOG_CARD_METHOD.id,
+        name: CATALOG_CARD_METHOD.name,
+        subtitle: CATALOG_CARD_METHOD.subtitle,
+      };
+
+      // card 600 → A 300 + B 300; cash 200 → B 200 (C receives nothing)
+      const res = await api.collect(e.member, e.customerId, {
+        cashSessionId: e.sessionId,
+        payments: [
+          {
+            method: 'card_debit',
+            amountCents: 600,
+            paymentMethodId: CATALOG_CARD_METHOD.id,
+            reference: 'AUT-77',
+          },
+          { method: 'cash', amountCents: 200 },
+        ],
+      });
+
+      expect(res.status).toBe(201);
+      const expectedTenders = [
+        { method: 'card_debit', amountCents: 600, catalog },
+        { method: 'cash', amountCents: 200, catalog: null },
+      ];
+      expect(res.body.payments).toEqual(expectedTenders);
+
+      const rows = await moneyRows(e.tenantId);
+      const collected = rows.payments.filter(
+        (p) => p.collectionId === res.body.collectionId,
+      );
+      expect(
+        collected.map((p) => [
+          p.saleId,
+          p.method,
+          p.amountCents,
+          p.reference,
+          p.metadataJson,
+        ]),
+      ).toHaveLength(3);
+      expect(
+        collected.map((p) => [
+          p.saleId,
+          p.method,
+          p.amountCents,
+          p.reference,
+          p.metadataJson,
+        ]),
+      ).toEqual(
+        expect.arrayContaining([
+          [e.A, 'CARD_DEBIT', 300, 'AUT-77', { catalog }],
+          [e.B, 'CARD_DEBIT', 300, 'AUT-77', { catalog }],
+          [e.B, 'CASH', 200, null, null],
+        ]),
+      );
+      expect(rows.collections).toEqual([
+        expect.objectContaining({
+          id: res.body.collectionId,
+          tendersJson: expectedTenders,
+        }),
+      ]);
+
+      const read = await api.read(e.member, res.body.collectionId as string);
+      expect(read.status).toBe(200);
+      expect(read.body.payments).toEqual(expectedTenders);
+    });
+
+    it('rejects an unknown catalog id with the resolver error, writing nothing', async () => {
+      const e = await example('CatalogoDesconocido');
+      const before = await moneyRows(e.tenantId);
+      const res = await api.collect(e.member, e.customerId, {
+        cashSessionId: e.sessionId,
+        payments: [
+          {
+            method: 'card_debit',
+            amountCents: 100,
+            paymentMethodId: randomUUID(),
+          },
+        ],
+      });
+      expect(res.body.error).toBe('PAYMENT_METHOD_NOT_FOUND');
+      expect(await moneyRows(e.tenantId)).toEqual(before);
     });
   });
 

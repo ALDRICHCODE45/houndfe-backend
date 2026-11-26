@@ -17,14 +17,49 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
+  MaxLength,
   Min,
+  Validate,
   ValidateIf,
   ValidateNested,
+  ValidatorConstraint,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
 import type { CollectionTenderMethod } from '../domain/collection-allocation';
 
 export const COLLECTION_MAX_TENDERS = 5;
 export const COLLECTION_MAX_SALES = 50;
+/**
+ * PostgreSQL INT4 max: each tender AND their sum (`sale_collections.
+ * tenderedCents`, the cash movement) must fit, so an oversized tender is a
+ * validation 400 instead of a 500 on the insert.
+ */
+export const COLLECTION_MAX_TENDERED_CENTS = 2_147_483_647;
+/**
+ * The single-sale payment DTO has no reference limit; 120 bounds the copy on
+ * every per-sale payment row a collection writes.
+ */
+export const COLLECTION_MAX_REFERENCE_LENGTH = 120;
+
+/** The tendered total fits INT4 (each amount is checked by its own @Max). */
+@ValidatorConstraint({ name: 'collectionTenderedTotal', async: false })
+class CollectionTenderedTotalConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    if (!Array.isArray(value)) return true;
+    let total = 0;
+    for (const tender of value as Array<{ amountCents?: unknown }>) {
+      // A non-integer amount is reported by the tender's own validators.
+      if (!Number.isInteger(tender?.amountCents)) return true;
+      total += tender.amountCents as number;
+    }
+    return total <= COLLECTION_MAX_TENDERED_CENTS;
+  }
+
+  defaultMessage(): string {
+    return 'PAYMENTS_TOTAL_TOO_LARGE';
+  }
+}
 
 export class CustomerCollectionTenderDto {
   @IsIn(['cash', 'card_credit', 'card_debit', 'transfer'])
@@ -32,10 +67,12 @@ export class CustomerCollectionTenderDto {
 
   @IsInt()
   @Min(1)
+  @Max(COLLECTION_MAX_TENDERED_CENTS)
   amountCents: number;
 
   @IsOptional()
   @IsString()
+  @MaxLength(COLLECTION_MAX_REFERENCE_LENGTH)
   reference?: string;
 
   @IsOptional()
@@ -49,6 +86,7 @@ export class CustomerCollectionPreviewDto {
   @IsArray()
   @ArrayMaxSize(COLLECTION_MAX_TENDERS)
   @ValidateNested({ each: true })
+  @Validate(CollectionTenderedTotalConstraint)
   @Type(() => CustomerCollectionTenderDto)
   payments?: CustomerCollectionTenderDto[];
 
@@ -78,6 +116,7 @@ export class CreateCustomerCollectionDto {
   @ArrayMinSize(1)
   @ArrayMaxSize(COLLECTION_MAX_TENDERS)
   @ValidateNested({ each: true })
+  @Validate(CollectionTenderedTotalConstraint)
   @Type(() => CustomerCollectionTenderDto)
   payments: CustomerCollectionTenderDto[];
 

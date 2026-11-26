@@ -7,6 +7,7 @@
 import { BusinessRuleViolationError } from '../../shared/domain/domain-error';
 import {
   allocateCollection,
+  collectionLockPrefix,
   orderCollectionCandidates,
   type CollectionCandidate,
   type CollectionTender,
@@ -312,6 +313,43 @@ describe('allocateCollection', () => {
             .every((s) => s.appliedCents === 0),
         ).toBe(true);
       }
+    }
+  });
+});
+
+describe('collectionLockPrefix (the sales a tender reaches)', () => {
+  // Q1 order: A 300 (01/11) → B 500 (10/11) → C 400 (no due date)
+  const candidates = [
+    sale('C', 400, null),
+    sale('B', 500, '2026-11-10'),
+    sale('A', 300, '2026-11-01'),
+  ];
+  const ids = (tendered: number) =>
+    collectionLockPrefix(candidates, tendered).map((s) => s.saleId);
+
+  it('is the shortest Q1 prefix whose debt covers the tender', () => {
+    expect(ids(1)).toEqual(['A']);
+    expect(ids(300)).toEqual(['A']);
+    expect(ids(301)).toEqual(['A', 'B']);
+    expect(ids(800)).toEqual(['A', 'B']);
+    expect(ids(801)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('is every candidate when the tender reaches or exceeds the whole debt', () => {
+    expect(ids(1200)).toEqual(['A', 'B', 'C']);
+    expect(ids(5000)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('is empty without candidates', () => {
+    expect(collectionLockPrefix([], 100)).toEqual([]);
+  });
+
+  it('matches the sales allocateCollection gives money to', () => {
+    for (const tendered of [1, 299, 300, 301, 799, 800, 801, 1199, 1200]) {
+      const reached = allocateCollection(candidates, [card(tendered)])
+        .sales.filter((s) => s.appliedCents > 0)
+        .map((s) => s.candidate.saleId);
+      expect(ids(tendered)).toEqual(reached);
     }
   });
 });

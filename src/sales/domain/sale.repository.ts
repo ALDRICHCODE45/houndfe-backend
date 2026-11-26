@@ -239,6 +239,7 @@ export interface ISaleRepository {
     | { kind: 'in_flight' }
   >;
 
+  /** Throws unless exactly one `customer_collection` slot row is updated. */
   markCollectionIdempotencySucceeded(
     token: string,
     payload: unknown,

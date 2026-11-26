@@ -2745,21 +2745,33 @@ export class PrismaSaleRepository implements ISaleRepository {
     );
   }
 
+  /**
+   * Exactly one slot row must turn SUCCEEDED; anything else throws so the
+   * collection transaction rolls the money back instead of leaving a
+   * collection whose key would stay IN_FLIGHT (or mark someone else's row).
+   */
   async markCollectionIdempotencySucceeded(
     token: string,
     payload: unknown,
   ): Promise<void> {
-    await this.tenantPrisma.getClient().saleIdempotency.updateMany({
-      where: {
-        id: token,
-        tenantId: this.requireTenantId(),
-        operation: 'customer_collection',
-      },
-      data: {
-        status: 'SUCCEEDED',
-        responseJson: payload as Prisma.InputJsonValue,
-      },
-    });
+    const { count } = await this.tenantPrisma
+      .getClient()
+      .saleIdempotency.updateMany({
+        where: {
+          id: token,
+          tenantId: this.requireTenantId(),
+          operation: 'customer_collection',
+        },
+        data: {
+          status: 'SUCCEEDED',
+          responseJson: payload as Prisma.InputJsonValue,
+        },
+      });
+    if (count !== 1) {
+      throw new Error(
+        `COLLECTION_IDEMPOTENCY_NOT_MARKED: ${count} slot rows updated for ${token}`,
+      );
+    }
   }
 
   async acquireCancellationIdempotency(
