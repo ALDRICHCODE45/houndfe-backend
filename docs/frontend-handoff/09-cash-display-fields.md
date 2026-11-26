@@ -94,6 +94,10 @@ A `FLOAT` item still also carries `sourceRegisterId` and `sourceDrawerReleasedAt
 | `sourceRegisterName` | string \| `null` | Name of the register of the session the cash came from. |
 | `notes` | string \| `null` | The notes the sender wrote when creating the handover. `null` when they wrote none. The receiver's receipt notes are not included. |
 
+## `GET /cash-registers` — drawer hold (later addition)
+
+Added later by cash-register-held-by: each register item carries `drawerHeld`, `drawerHeldStatus`, `drawerHeldSince` and `heldBy`. `heldBy.cashierDisplayName` follows the same name rules as `cashierDisplayName` above, but `heldBy` is filled only when the caller can see the holding session (own session, or `read:CashSessionAudit`). Full shape and privacy rule: [25-cash-redesign.md §7](25-cash-redesign.md).
+
 ## Null semantics
 
 - A name is `null` only when the user (or register) row cannot be found. Cash rows block deleting a user or register they reference, so in practice this does not happen; treat `null` as «Sin nombre» and fall back to the id if you need one.

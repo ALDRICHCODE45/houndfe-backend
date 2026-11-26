@@ -774,3 +774,136 @@ describe('cash custody discovery — preserved receive flow and query dispatch (
     expect(asItems(registers.items)).toHaveLength(1);
   });
 });
+
+// ── cash-register-held-by: list hold vs. the authoritative opening guard ──
+
+describe('cash-register-held-by — REGISTERS drawerHeld parity with OPEN_SESSION (facade)', () => {
+  async function createRegister(
+    app: PrismaCashRegisterApplication,
+    name: string,
+  ): Promise<string> {
+    return asJson(
+      await app.execute(
+        actor('u1'),
+        { kind: 'CREATE_REGISTER', name },
+        randomUUID(),
+      ),
+    ).id as string;
+  }
+
+  function open(
+    app: PrismaCashRegisterApplication,
+    who: CashActor,
+    registerId: string,
+  ): Promise<string> {
+    return app
+      .execute(
+        who,
+        {
+          kind: 'OPEN_SESSION',
+          registerId,
+          openingCents: 0,
+          openingConfirmed: true,
+        },
+        randomUUID(),
+      )
+      .then((doc) => asJson(asJson(doc).session).id as string);
+  }
+
+  async function registers(
+    app: PrismaCashRegisterApplication,
+    who: CashActor,
+  ): Promise<Record<string, Record<string, unknown>>> {
+    const doc = asJson(await app.query(who, { kind: 'REGISTERS' }));
+    return Object.fromEntries(
+      asItems(doc.items).map((item) => [item.id as string, item]),
+    );
+  }
+
+  it('drawerHeld is true exactly for the registers whose opening throws CASH_REGISTER_UNRELEASED_SESSION', async () => {
+    const { app, host } = makeApp();
+    seedActors(host, ['u1', 'u2', 'u3']);
+    const free = await createRegister(app, 'Caja Libre');
+    const heldOpen = await createRegister(app, 'Caja Abierta');
+    const heldClosed = await createRegister(app, 'Caja Cerrada');
+    await open(app, actor('u2'), heldOpen);
+    const closedId = await open(app, actor('u2'), heldClosed);
+    // A CLOSED session whose drawer was never released still blocks.
+    const row = host.db.sessions.find((session) => session.id === closedId);
+    if (row) {
+      row.status = 'CLOSED';
+      row.closedAt = new Date();
+    }
+
+    const cashier = actor('u3', [
+      ['read', 'CashRegister'],
+      ['read', 'CashSession'],
+      ['create', 'CashSession'],
+    ]);
+    const items = await registers(app, cashier);
+    expect(items[heldOpen]).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'OPEN',
+      heldBy: null,
+    });
+    expect(items[heldClosed]).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'CLOSED',
+      heldBy: null,
+    });
+    expect(items[free]).toMatchObject({ drawerHeld: false, heldBy: null });
+
+    for (const registerId of [heldOpen, heldClosed]) {
+      await expect(open(app, cashier, registerId)).rejects.toMatchObject({
+        code: 'CASH_REGISTER_UNRELEASED_SESSION',
+      });
+    }
+    await expect(open(app, cashier, free)).resolves.toEqual(expect.any(String));
+    expect((await registers(app, cashier))[free]).toMatchObject({
+      drawerHeld: true,
+      heldBy: { byMe: true, cashierDisplayName: 'Name u3' },
+    });
+  });
+
+  it('reports drawerHeld false on the next list after the drawer is released', async () => {
+    const { app, host } = makeApp();
+    seedActors(host, ['u1']);
+    const registerId = await createRegister(app, 'Caja A');
+    const sessionId = await open(app, actor('u1'), registerId);
+    await app.execute(
+      actor('u1'),
+      { kind: 'START_COUNT', sessionId },
+      randomUUID(),
+    );
+    await app.execute(
+      actor('u1'),
+      {
+        kind: 'DECLARE',
+        sessionId,
+        lines: [{ channelKey: 'CASH', amountCents: 0 }],
+      },
+      randomUUID(),
+    );
+    expect((await registers(app, actor('u1')))[registerId]).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'SUBMITTED',
+      heldBy: { sessionId, byMe: true },
+    });
+
+    await app.execute(
+      actor('u1'),
+      { kind: 'RELEASE_DRAWER', sessionId },
+      randomUUID(),
+    );
+
+    expect((await registers(app, actor('u1')))[registerId]).toMatchObject({
+      drawerHeld: false,
+      drawerHeldStatus: null,
+      drawerHeldSince: null,
+      heldBy: null,
+    });
+    await expect(open(app, actor('u1'), registerId)).resolves.toEqual(
+      expect.any(String),
+    );
+  });
+});

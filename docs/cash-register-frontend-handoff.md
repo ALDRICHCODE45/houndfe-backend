@@ -148,6 +148,13 @@ enums and error codes are in the contract — link to it, do not restate it.
   `update:CashRegister`.
 - UI: list, create with `name`, rename/activate (`isActive`). Handle
   `CASH_REGISTER_NAME_CONFLICT` and `CASH_REGISTER_INACTIVE`.
+- `GET /cash-registers` items also carry `drawerHeld`, `drawerHeldStatus`,
+  `drawerHeldSince` and `heldBy` (cash-register-held-by). Use them to mark a
+  register as «Ocupada» in the opening selector. `heldBy` (with the cashier
+  name) is only filled when the caller can see that session, under the
+  `GET /cash-sessions` rule. It is a snapshot, so still handle
+  `CASH_REGISTER_UNRELEASED_SESSION` (422) on open. Shape:
+  [frontend-handoff/25-cash-redesign.md §7](frontend-handoff/25-cash-redesign.md).
 
 ### Phase 2 — Current session and manual movements
 

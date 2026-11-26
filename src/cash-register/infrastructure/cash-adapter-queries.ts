@@ -52,6 +52,7 @@ import {
   toDomainSession,
 } from './cash-adapter-mappers';
 import { closingListItems } from './cash-adapter-closing-list';
+import { registerDrawerHolds } from './cash-adapter-drawer-hold';
 import { resolveListScope } from './cash-adapter-list-scope';
 import { normalizePage, parseRange } from './cash-adapter-paging';
 import { userNames } from './cash-adapter-storage';
@@ -80,12 +81,21 @@ export async function queryRegisters(
       registerInstance(row),
     ),
   );
+  // cash-register-held-by — one batched hold lookup over the visible
+  // registers only, with the same predicate as the opening guard.
+  const holds = await registerDrawerHolds(
+    tx,
+    tenantId,
+    actor,
+    visible.map((row) => row.id),
+  );
   return document({
     items: visible.map((row) => ({
       id: row.id,
       name: row.name,
       isActive: row.isActive,
       createdAt: iso(row.createdAt),
+      ...holds.get(row.id),
     })),
   });
 }

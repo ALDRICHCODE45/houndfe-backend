@@ -862,3 +862,293 @@ describe('cash-adapter-queries — direct module contract', () => {
     });
   });
 });
+
+/**
+ * cash-register-held-by — `GET /cash-registers` reports, per register,
+ * whether a session with an unreleased drawer holds it (the exact predicate
+ * of the 422 `CASH_REGISTER_UNRELEASED_SESSION` opening guard, any status),
+ * its status/openedAt for every caller, and `heldBy` (with the cashier name)
+ * only when the caller may see that session under the GET /cash-sessions
+ * visibility rule.
+ */
+describe('cash-adapter-queries — register drawer hold (cash-register-held-by)', () => {
+  const CASHIER = [
+    ['read', 'CashRegister'],
+    ['read', 'CashSession'],
+  ] as const;
+  const AUDITOR = [
+    ['read', 'CashRegister'],
+    ['read', 'CashSessionAudit'],
+  ] as const;
+
+  const anyString: unknown = expect.any(String);
+
+  async function registerItems(
+    host: Host,
+    tx: Parameters<typeof queryRegisters>[0],
+    who: CashActor,
+  ): Promise<Record<string, Record<string, unknown>>> {
+    const doc = await queryRegisters(tx, host.tenantId, who);
+    return Object.fromEntries(
+      asItems(doc.items).map((item) => [item.id as string, item]),
+    );
+  }
+
+  it('reports drawerHeld false and null hold fields with no or only released sessions', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-empty', 'Caja A');
+    seedRegister(host, 'reg-released', 'Caja B');
+    seedSession(host, {
+      id: 's-released',
+      registerId: 'reg-released',
+      status: 'CLOSED',
+      closedAt: new Date(),
+      drawerReleasedAt: new Date(),
+    });
+
+    const doc = await queryRegisters(tx, host.tenantId, actor('u1'));
+
+    for (const item of asItems(doc.items)) {
+      expect(Object.keys(item).sort()).toEqual(
+        [
+          'createdAt',
+          'drawerHeld',
+          'drawerHeldSince',
+          'drawerHeldStatus',
+          'heldBy',
+          'id',
+          'isActive',
+          'name',
+        ].sort(),
+      );
+      expect(item).toMatchObject({
+        drawerHeld: false,
+        drawerHeldStatus: null,
+        drawerHeldSince: null,
+        heldBy: null,
+      });
+    }
+  });
+
+  it('holds the register for a CLOSED session whose drawer was never released', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    const openedAt = new Date('2026-11-26T09:12:00.000Z');
+    seedSession(host, {
+      status: 'CLOSED',
+      openedAt,
+      closedAt: new Date(),
+      drawerReleasedAt: null,
+    });
+
+    const items = await registerItems(host, tx, actor('u1'));
+
+    expect(items['reg-1']).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'CLOSED',
+      drawerHeldSince: '2026-11-26T09:12:00.000Z',
+    });
+  });
+
+  it("fills heldBy with byMe and the cashier name for the caller's own session", async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    const openedAt = new Date('2026-11-26T09:12:00.000Z');
+    seedSession(host, { id: 's-own', cashierUserId: 'u1', openedAt });
+
+    const items = await registerItems(host, tx, actor('u1', CASHIER));
+
+    expect(items['reg-1']).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'OPEN',
+      drawerHeldSince: '2026-11-26T09:12:00.000Z',
+      heldBy: {
+        sessionId: 's-own',
+        status: 'OPEN',
+        openedAt: '2026-11-26T09:12:00.000Z',
+        cashierDisplayName: 'Name u1',
+        byMe: true,
+      },
+    });
+  });
+
+  it("hides heldBy (and the name) for another cashier's session without the audit grant, but keeps status and since", async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1', 'u2']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    const openedAt = new Date('2026-11-26T09:12:00.000Z');
+    seedSession(host, {
+      id: 's-other',
+      cashierUserId: 'u2',
+      status: 'COUNTING',
+      openedAt,
+      frozenAt: new Date(),
+    });
+
+    const items = await registerItems(host, tx, actor('u1', CASHIER));
+
+    expect(items['reg-1']).toEqual({
+      id: 'reg-1',
+      name: 'Caja A',
+      isActive: true,
+      createdAt: anyString,
+      drawerHeld: true,
+      drawerHeldStatus: 'COUNTING',
+      drawerHeldSince: '2026-11-26T09:12:00.000Z',
+      heldBy: null,
+    });
+    expect(JSON.stringify(items['reg-1'])).not.toContain('Name u2');
+  });
+
+  it("fills heldBy for another cashier's session with read:CashSessionAudit", async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1', 'u2']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    const openedAt = new Date('2026-11-26T09:12:00.000Z');
+    seedSession(host, {
+      id: 's-other',
+      cashierUserId: 'u2',
+      status: 'SUBMITTED',
+      openedAt,
+    });
+
+    const items = await registerItems(host, tx, actor('u1', AUDITOR));
+
+    expect(items['reg-1'].heldBy).toEqual({
+      sessionId: 's-other',
+      status: 'SUBMITTED',
+      openedAt: '2026-11-26T09:12:00.000Z',
+      cashierDisplayName: 'Name u2',
+      byMe: false,
+    });
+  });
+
+  it('renders a null cashierDisplayName when the cashier user row is missing', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    seedSession(host, { id: 's-ghost', cashierUserId: 'u-ghost' });
+
+    const items = await registerItems(host, tx, actor('u1', AUDITOR));
+
+    expect(items['reg-1'].heldBy).toMatchObject({
+      sessionId: 's-ghost',
+      cashierDisplayName: null,
+      byMe: false,
+    });
+  });
+
+  it('reports the hold on an inactive register too', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-1', 'Caja Inactiva', false);
+    seedSession(host, { id: 's-1', status: 'SUBMITTED' });
+
+    const items = await registerItems(host, tx, actor('u1'));
+
+    expect(items['reg-1']).toMatchObject({
+      isActive: false,
+      drawerHeld: true,
+      drawerHeldStatus: 'SUBMITTED',
+      heldBy: { sessionId: 's-1' },
+    });
+  });
+
+  it('picks the latest openedAt, then the highest id, when several unreleased sessions exist', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    seedRegister(host, 'reg-2', 'Caja B');
+    const early = new Date('2026-11-26T08:00:00.000Z');
+    const late = new Date('2026-11-26T10:00:00.000Z');
+    seedSession(host, { id: 's-a-late', openedAt: late });
+    seedSession(host, { id: 's-a-early', openedAt: early });
+    seedSession(host, { id: 's-b-1', registerId: 'reg-2', openedAt: late });
+    seedSession(host, { id: 's-b-2', registerId: 'reg-2', openedAt: late });
+    seedSession(host, { id: 's-b-0', registerId: 'reg-2', openedAt: early });
+
+    const items = await registerItems(host, tx, actor('u1'));
+
+    expect(asJson(items['reg-1'].heldBy).sessionId).toBe('s-a-late');
+    expect(items['reg-1'].drawerHeldSince).toBe(late.toISOString());
+    expect(asJson(items['reg-2'].heldBy).sessionId).toBe('s-b-2');
+  });
+
+  it('only looks up holds for registers that passed the per-row read filter, in one batched query', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1', 'u2']);
+    seedRegister(host, 'reg-active', 'Caja Activa', true);
+    seedRegister(host, 'reg-active-2', 'Caja Activa 2', true);
+    seedRegister(host, 'reg-inactive', 'Caja Inactiva', false);
+    seedSession(host, { id: 's-1', registerId: 'reg-active' });
+    seedSession(host, {
+      id: 's-2',
+      registerId: 'reg-active-2',
+      cashierUserId: 'u2',
+    });
+    seedSession(host, { id: 's-3', registerId: 'reg-inactive' });
+    const sessionsMany = jest.spyOn(tx.cashSession, 'findMany');
+    const sessionsFirst = jest.spyOn(tx.cashSession, 'findFirst');
+    const usersMany = jest.spyOn(tx.user, 'findMany');
+    const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    can('read', 'CashRegister', { isActive: true });
+    can('read', 'CashSession');
+
+    const doc = await queryRegisters(tx, host.tenantId, {
+      userId: 'u1',
+      ability: build(),
+    });
+
+    const items = asItems(doc.items);
+    expect(items.map((item) => item.id)).toEqual([
+      'reg-active',
+      'reg-active-2',
+    ]);
+    expect(items.map((item) => item.drawerHeld)).toEqual([true, true]);
+    expect(asJson(items[0].heldBy).byMe).toBe(true);
+    expect(items[1].heldBy).toBeNull();
+    expect(sessionsMany).toHaveBeenCalledTimes(1);
+    expect(sessionsFirst).not.toHaveBeenCalled();
+    const where = asJson(asJson(sessionsMany.mock.calls[0][0]).where);
+    expect(where).toEqual({
+      tenantId: host.tenantId,
+      registerId: { in: ['reg-active', 'reg-active-2'] },
+      drawerReleasedAt: null,
+    });
+    // Names are loaded once, and only for the sessions that end up in heldBy.
+    expect(usersMany).toHaveBeenCalledTimes(1);
+    expect(asJson(asJson(usersMany.mock.calls[0][0]).where)).toEqual({
+      id: { in: ['u1'] },
+    });
+  });
+
+  it('skips the session and name lookups when no register is visible', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedRegister(host, 'reg-inactive', 'Caja Inactiva', false);
+    const sessionsMany = jest.spyOn(tx.cashSession, 'findMany');
+    const usersMany = jest.spyOn(tx.user, 'findMany');
+
+    const doc = await queryRegisters(
+      tx,
+      host.tenantId,
+      conditionalRegisterReader('u1'),
+    );
+
+    expect(asItems(doc.items)).toEqual([]);
+    expect(sessionsMany).not.toHaveBeenCalled();
+    expect(usersMany).not.toHaveBeenCalled();
+  });
+});

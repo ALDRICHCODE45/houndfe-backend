@@ -34,6 +34,7 @@ import {
   assertCommandAbility,
   sessionInstance,
 } from './cash-adapter-instances';
+import { unreleasedSessionWhere } from './cash-adapter-drawer-hold';
 import { toDomainSession } from './cash-adapter-mappers';
 import {
   lockHandoverRow,
@@ -98,7 +99,9 @@ export async function openSession(
   assertStorageRangeCents(command.openingCents, 'openingCents');
 
   const unreleased = await tx.cashSession.findFirst({
-    where: { tenantId, registerId: register.id, drawerReleasedAt: null },
+    // cash-register-held-by — same predicate as `GET /cash-registers`
+    // `drawerHeld` (any status; only `drawerReleasedAt IS NULL` matters).
+    where: unreleasedSessionWhere(tenantId, [register.id]),
   });
   if (unreleased) {
     throw cashAppError(

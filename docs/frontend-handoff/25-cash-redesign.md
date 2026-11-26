@@ -227,3 +227,71 @@ The snapshot is frozen at close; it is never recomputed. Field list checked agai
 | `closingNotes` | string \| null | Body `notes` of the close. |
 
 Totals are physical cash only; never add non-cash channels into them. Show the two differences separately.
+
+## 7. `GET /cash-registers` — drawer hold per register (cash-register-held-by)
+
+**Status:** implemented on branch `feat/cash-register-held-by`. Additive response fields only: no new route, permission, query param or migration. Proposal and evidence: [docs/proposals/cash-register-held-by.md](../proposals/cash-register-held-by.md).
+
+Fixes the «Abrir caja» selector showing «Disponible» for a register whose opening then fails with `422 CASH_REGISTER_UNRELEASED_SESSION`.
+
+- **Permission:** unchanged, `read:CashRegister`. The per-row register filter is unchanged too. Hold fields are only computed for the registers you can already see.
+- **Response `200`.** Each item keeps `id`, `name`, `isActive` and `createdAt`, and adds four keys:
+
+```json
+{
+  "items": [
+    {
+      "id": "a1f3e0b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+      "name": "Caja Mostrador 1",
+      "isActive": true,
+      "createdAt": "2026-10-01T12:00:00.000Z",
+      "drawerHeld": true,
+      "drawerHeldStatus": "COUNTING",
+      "drawerHeldSince": "2026-11-26T09:12:00.000Z",
+      "heldBy": null
+    },
+    {
+      "id": "b2e4f1c3-4d5e-4f6a-9b0c-1d2e3f4a5b6c",
+      "name": "Caja Mostrador 2",
+      "isActive": true,
+      "createdAt": "2026-10-01T12:00:00.000Z",
+      "drawerHeld": true,
+      "drawerHeldStatus": "OPEN",
+      "drawerHeldSince": "2026-11-26T08:30:00.000Z",
+      "heldBy": {
+        "sessionId": "5b0c2a64-6f1e-4d8a-9a43-0e4c1c6f9d21",
+        "status": "OPEN",
+        "openedAt": "2026-11-26T08:30:00.000Z",
+        "cashierDisplayName": "Ana Cajera",
+        "byMe": true
+      }
+    },
+    {
+      "id": "c3f5a2d4-5e6f-4a7b-8c9d-2e3f4a5b6c7d",
+      "name": "Caja Mostrador 3",
+      "isActive": true,
+      "createdAt": "2026-10-01T12:00:00.000Z",
+      "drawerHeld": false,
+      "drawerHeldStatus": null,
+      "drawerHeldSince": null,
+      "heldBy": null
+    }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `drawerHeld` | boolean | Always present. `true` when the register has a session whose drawer was never released (`drawerReleasedAt: null`), **whatever its status**, including `CLOSED`. This is the same rule that makes `POST /cash-registers/:id/sessions` fail with `422 CASH_REGISTER_UNRELEASED_SESSION`, and both use one shared backend filter. |
+| `drawerHeldStatus` | `OPEN` \| `COUNTING` \| `SUBMITTED` \| `CLOSED` \| `null` | Status of the holding session. Set whenever `drawerHeld` is `true`, **for every caller**. `null` when the register is free. For display only. |
+| `drawerHeldSince` | ISO string \| `null` | `openedAt` of the holding session. Set whenever `drawerHeld` is `true`, for every caller. `null` when free. |
+| `heldBy` | object \| `null` | Details of the holding session, **only if you can see that session** (see privacy). Otherwise `null`, even when `drawerHeld` is `true`. |
+| `heldBy.sessionId` | UUID string | Holding session id. Use it for «Continuar / Liberar caja». |
+| `heldBy.status`, `heldBy.openedAt` | same values as `drawerHeldStatus` / `drawerHeldSince` | |
+| `heldBy.cashierDisplayName` | string \| `null` | `User.name` of the session's cashier. `null` only if the user row is missing. |
+| `heldBy.byMe` | boolean | `true` when the holding session is yours. |
+
+- **Privacy:** this uses the same rule as `GET /cash-sessions`. `heldBy` (and so the cashier name) is filled only when the session is **yours** (with `read:CashSession`) or you have `read:CashSessionAudit`. An ordinary cashier sees another cashier's register as «Ocupada · en conteo desde 09:12» (`drawerHeldStatus` + `drawerHeldSince`), never their name. A supervisor sees «Ocupada por Ana desde 09:12».
+- **Inactive registers** (`isActive: false`) report the same fields. A held inactive drawer still needs releasing.
+- **Snapshot, not a guarantee.** The value is read without locks. Another device can open or release the register between the list and your `POST`. `POST /cash-registers/:id/sessions` stays the authoritative check. **Keep handling `422 CASH_REGISTER_UNRELEASED_SESSION`**: show «La caja tiene una sesión sin liberar» and refresh the list.
+- The database already allows at most one unreleased session per register (partial unique index `cash_sessions_one_unreleased_per_register`), so at most one session holds a register.
