@@ -103,6 +103,34 @@ export class SaleEventListener {
     });
   }
 
+  /**
+   * customer-collection / T2 (S4) — one «Cobrar todo». Audit log only: no
+   * listener notifies the customer on sale payments today, so this is the
+   * single collection-level hook for a future customer notice (Q6 «Uno por
+   * cobro»); the per-sale events above keep firing for internal consumers.
+   */
+  @OnEvent('customer.collection.recorded')
+  onCustomerCollectionRecorded(event: {
+    collectionId: string;
+    tenantId: string;
+    customerId: string;
+    actorId: string;
+    appliedCents: number;
+    changeDueCents: number;
+    sales: Array<{ saleId: string }>;
+  }) {
+    this.logger.log({
+      eventType: 'customer.collection.recorded',
+      collectionId: event.collectionId,
+      tenantId: event.tenantId,
+      customerId: event.customerId,
+      actorId: event.actorId,
+      appliedCents: event.appliedCents,
+      changeDueCents: event.changeDueCents,
+      saleIds: event.sales.map((sale) => sale.saleId),
+    });
+  }
+
   @OnEvent('sale.customer.assigned')
   onSaleCustomerAssigned(event: SaleCustomerAssignedEvent) {
     this.logger.log({

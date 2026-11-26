@@ -223,6 +223,27 @@ export interface ISaleRepository {
     payload: unknown,
   ): Promise<void>;
 
+  /**
+   * customer-collection / T2 — `customer_collection` slot (`saleId` stays
+   * null: a collection spans several sales). Must run inside the caller's
+   * transaction (conflict-safe acquire), so a rejected collection rolls the
+   * slot back with everything else.
+   */
+  acquireCollectionIdempotency(
+    key: string,
+    requestHash: string,
+  ): Promise<
+    | { kind: 'acquired'; token: string }
+    | { kind: 'replay'; payload: unknown }
+    | { kind: 'conflict' }
+    | { kind: 'in_flight' }
+  >;
+
+  markCollectionIdempotencySucceeded(
+    token: string,
+    payload: unknown,
+  ): Promise<void>;
+
   acquireCancellationIdempotency(
     saleId: string,
     key: string,
@@ -438,6 +459,8 @@ export interface ISaleRepository {
   persistCollectedPayments(input: {
     saleId: string;
     userId: string | null;
+    /** customer-collection / T2 — the «Cobrar todo» the rows belong to. */
+    collectionId?: string;
     payments: Array<{
       method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
       amountCents: number;

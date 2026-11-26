@@ -100,6 +100,10 @@ import type {
 } from './domain/sale.repository';
 import { SaleStockService, type SaleStockActor } from './sale-stock.service';
 import { reservedStockWarning, withStockWarning } from './stock-warning';
+import {
+  publishSaleFullyPaidEvent,
+  publishSalePaymentReceivedEvents,
+} from './sale-payment-events';
 import { SYSTEM_ACTOR_ID } from '../shared/tenant/tenant-runner.service';
 import { OutboxWriterService } from '../shared/outbox/outbox-writer.service';
 import { TenantPrismaService } from '../shared/prisma/tenant-prisma.service';
@@ -150,7 +154,7 @@ export const SALES_CLOCK = Symbol('SALES_CLOCK');
  */
 const MAX_EXACT_OPENING_ROUNDS = 20;
 
-type SupportedChargeMethod =
+export type SupportedChargeMethod =
   | 'cash'
   | 'card_credit'
   | 'card_debit'
@@ -174,7 +178,7 @@ type CollectionPaymentEntry = {
 
 type AddPaymentAuthMode = 'owner' | 'reviewer';
 
-type ChargePaymentEntry = {
+export type ChargePaymentEntry = {
   method: SupportedChargeMethod;
   amountCents: number;
   reference?: string;
@@ -182,7 +186,7 @@ type ChargePaymentEntry = {
   paymentMethodId?: string;
 };
 
-type CanonicalChargePayment = PersistedChargePayment;
+export type CanonicalChargePayment = PersistedChargePayment;
 
 type ConfirmBotSaleInput = {
   cashierUserId: string;
@@ -457,7 +461,7 @@ function normalizeChargeRequestPayments(
  * `metadataJson: undefined`, which `persistChargeConfirmation` writes
  * as `Prisma.JsonNull` (D7) — byte-identical to pre-change behavior.
  */
-async function toCanonicalChargePayments(
+export async function toCanonicalChargePayments(
   payments: ChargePaymentEntry[],
   resolver: IPaymentMethodResolver,
   tenantId: string,
@@ -508,7 +512,7 @@ async function toCanonicalChargePayments(
  * (no `paymentMethodId`) hash byte-identically to the pre-change
  * implementation (key suffix empty; JSON.stringify drops undefined).
  */
-function sortPaymentsForHash(
+export function sortPaymentsForHash(
   payments: ChargePaymentEntry[],
 ): ChargePaymentEntry[] {
   const key = (p: ChargePaymentEntry) =>
@@ -1297,42 +1301,11 @@ export class SalesService {
     occurredAt: Date;
     resultingPaymentStatus?: 'PAID' | 'PARTIAL' | 'CREDIT';
   }): Promise<void> {
-    const payments = input.payments ?? [];
-    let cumulativePaidCents =
-      input.paidCents - payments.reduce((sum, p) => sum + p.amountCents, 0);
-    let remainingDebtCents =
-      input.paidCents + input.debtCents - cumulativePaidCents;
-
-    for (const payment of payments) {
-      cumulativePaidCents += payment.amountCents;
-      remainingDebtCents = Math.max(
-        remainingDebtCents - payment.amountCents,
-        0,
-      );
-
-      await this.outboxWriter.publish(
-        this.tenantPrisma.getClient(),
-        input.tenantId,
-        'Sale',
-        input.saleId,
-        'sale.payment.received',
-        {
-          saleId: input.saleId,
-          tenantId: input.tenantId,
-          actorId: input.actorId,
-          paymentId: payment.paymentId,
-          method: payment.method,
-          amountCents: payment.amountCents,
-          reference: payment.reference ?? undefined,
-          occurredAt: input.occurredAt.toISOString(),
-          resultingPaidCents: cumulativePaidCents,
-          resultingDebtCents: remainingDebtCents,
-          resultingPaymentStatus:
-            input.resultingPaymentStatus ??
-            (remainingDebtCents === 0 ? 'PAID' : 'PARTIAL'),
-        },
-      );
-    }
+    await publishSalePaymentReceivedEvents(
+      this.outboxWriter,
+      this.tenantPrisma.getClient(),
+      input,
+    );
   }
 
   private async publishSaleFullyPaidEvent(input: {
@@ -1342,19 +1315,10 @@ export class SalesService {
     totalCents: number;
     paidAt: Date;
   }): Promise<void> {
-    await this.outboxWriter.publish(
+    await publishSaleFullyPaidEvent(
+      this.outboxWriter,
       this.tenantPrisma.getClient(),
-      input.tenantId,
-      'Sale',
-      input.saleId,
-      'sale.fully.paid',
-      {
-        saleId: input.saleId,
-        tenantId: input.tenantId,
-        folio: input.folio,
-        totalCents: input.totalCents,
-        paidAt: input.paidAt.toISOString(),
-      },
+      input,
     );
   }
 

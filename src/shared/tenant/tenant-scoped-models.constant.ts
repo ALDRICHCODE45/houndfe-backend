@@ -31,6 +31,10 @@ export const TENANT_SCOPED_MODELS = new Set([
   // settlement ledger would not auto-inject `tenantId` and cross-tenant
   // settlement rows could leak.
   'SaleRefundSettlement',
+  // customer-collection / T2 — «Cobrar todo» collections. Same fail-open
+  // allowlist semantics: without this entry a collection read through
+  // TenantPrismaService would not inject `tenantId` and could leak.
+  'SaleCollection',
   // Quotations (WU1) — five tables, one bounded context. Without these
   // entries, `findAll` / `findById` / `delete` would not auto-inject
   // tenantId into the WHERE clause and a cross-tenant row could leak.

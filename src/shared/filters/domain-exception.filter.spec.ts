@@ -81,6 +81,32 @@ describe('DomainExceptionFilter', () => {
     }
   });
 
+  it('maps the customer collection codes (customer-collection / T2): debt changed 409 with the preview, the rest 422', () => {
+    const filter = new DomainExceptionFilter();
+
+    const changed = makeHost();
+    filter.catch(
+      new BusinessRuleViolationError(
+        'COLLECTION_DEBT_CHANGED',
+        'COLLECTION_DEBT_CHANGED',
+        { preview: { debtCents: 100 } },
+      ),
+      changed.host,
+    );
+    expect(changed.status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
+
+    for (const code of [
+      'COLLECTION_NO_OPEN_DEBT',
+      'COLLECTION_SALE_NOT_ELIGIBLE',
+      'COLLECTION_EXCEEDS_DEBT',
+      'CASH_SESSION_REQUIRED',
+    ]) {
+      const { host, status } = makeHost();
+      filter.catch(new BusinessRuleViolationError(code, code), host);
+      expect(status).toHaveBeenCalledWith(HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+  });
+
   it('keeps EntityNotFoundError as 404', () => {
     const filter = new DomainExceptionFilter();
     const { host, status } = makeHost();

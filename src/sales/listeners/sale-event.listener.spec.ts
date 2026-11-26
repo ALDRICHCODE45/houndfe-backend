@@ -112,4 +112,38 @@ describe('SaleEventListener', () => {
       }),
     );
   });
+  it('logs one customer.collection.recorded with the collected sale ids (customer-collection / T2)', () => {
+    const listener = new SaleEventListener();
+    const loggerSpy = jest
+      .spyOn(
+        (
+          listener as unknown as {
+            logger: { log: (...args: unknown[]) => void };
+          }
+        ).logger,
+        'log',
+      )
+      .mockImplementation(() => undefined);
+
+    listener.onCustomerCollectionRecorded({
+      collectionId: 'col-1',
+      tenantId: 'tenant-1',
+      customerId: 'customer-1',
+      actorId: 'user-1',
+      appliedCents: 900,
+      changeDueCents: 0,
+      sales: [{ saleId: 'sale-1' }, { saleId: 'sale-2' }],
+    });
+
+    expect(loggerSpy).toHaveBeenCalledWith({
+      eventType: 'customer.collection.recorded',
+      collectionId: 'col-1',
+      tenantId: 'tenant-1',
+      customerId: 'customer-1',
+      actorId: 'user-1',
+      appliedCents: 900,
+      changeDueCents: 0,
+      saleIds: ['sale-1', 'sale-2'],
+    });
+  });
 });

@@ -29,6 +29,10 @@ import { CustomerStatementService } from './customer-statement.service';
 import { CUSTOMER_STATEMENT_READER } from './domain/customer-statement.reader';
 import { PrismaCustomerStatementReader } from './infrastructure/prisma-customer-statement.reader';
 import { SalesPaymentsController } from './sales-payments.controller';
+import { CustomerCollectionsController } from './customer-collections.controller';
+import { CustomerCollectionService } from './customer-collection.service';
+import { CUSTOMER_COLLECTION_REPOSITORY } from './domain/customer-collection.repository';
+import { PrismaCustomerCollectionRepository } from './infrastructure/prisma-customer-collection.repository';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
 import { SaleHoldExpireService } from './sale-hold-expire.service';
@@ -77,6 +81,8 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     ReceiptReviewController,
     // sales-history-redesign S4 — GET /customers/:customerId/sales-monthly.
     SalesCustomerMonthlyController,
+    // customer-collection / T2 — POST /customers/:customerId/collections(/preview).
+    CustomerCollectionsController,
   ],
   providers: [
     SalesService,
@@ -89,6 +95,12 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     {
       provide: CUSTOMER_STATEMENT_READER,
       useClass: PrismaCustomerStatementReader,
+    },
+    // customer-collection / T2 — «Cobrar todo».
+    CustomerCollectionService,
+    {
+      provide: CUSTOMER_COLLECTION_REPOSITORY,
+      useClass: PrismaCustomerCollectionRepository,
     },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.

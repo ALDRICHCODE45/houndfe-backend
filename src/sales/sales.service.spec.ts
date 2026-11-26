@@ -2436,6 +2436,44 @@ describe('SalesService', () => {
         expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
       });
 
+      it('rejects card 1200 + transfer 1200 + cash 200 on 2000 (each non-cash ≤ total, together above it) with CHANGE_EXCEEDS_CASH_TENDERED before any write', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-two-noncash-exceed',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+        const saleStock = (
+          service as unknown as {
+            saleStock: { lockStock: jest.Mock; charge: jest.Mock };
+          }
+        ).saleStock;
+        saleStock.lockStock.mockClear();
+        saleStock.charge.mockClear();
+
+        await expect(
+          service.chargeDraft(
+            sale.id,
+            'user-1',
+            {
+              payments: [
+                { method: 'card_debit', amountCents: 1200, reference: 'R' },
+                { method: 'transfer', amountCents: 1200, reference: 'T' },
+                { method: 'cash', amountCents: 200 },
+              ],
+            } as never,
+            'idem-two-noncash-exceed',
+          ),
+        ).rejects.toMatchObject({ code: 'CHANGE_EXCEEDS_CASH_TENDERED' });
+
+        expect(saleStock.lockStock).not.toHaveBeenCalled();
+        expect(saleStock.charge).not.toHaveBeenCalled();
+        expect(promotionUsageRepo.claimForSale).not.toHaveBeenCalled();
+        expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+        expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+        expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
+      });
+
       it('accepts cash-only 2400 on 2000 with change 400', async () => {
         const sale = buildDraftSale(
           'sale-charge-cash-only-change',

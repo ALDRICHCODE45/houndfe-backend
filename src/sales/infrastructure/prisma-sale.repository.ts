@@ -195,7 +195,8 @@ type IdempotencyOperation =
   | 'sale_cancel'
   | 'sale_hold_expire'
   | 'bot_sale_register'
-  | 'sale_refund_settlement';
+  | 'sale_refund_settlement'
+  | 'customer_collection';
 
 /** Externally consumed acquire outcome shared by every public acquire method. */
 type IdempotencyAcquireOutcome =
@@ -1625,6 +1626,7 @@ export class PrismaSaleRepository implements ISaleRepository {
   async persistCollectedPayments(input: {
     saleId: string;
     userId: string | null;
+    collectionId?: string;
     payments: Array<{
       method: 'cash' | 'card_credit' | 'card_debit' | 'transfer';
       amountCents: number;
@@ -1699,6 +1701,10 @@ export class PrismaSaleRepository implements ISaleRepository {
             : (payment.metadataJson as Prisma.InputJsonValue),
         userId: input.userId,
         tenantId,
+        // customer-collection / T2 — only the rows of a «Cobrar todo».
+        ...(input.collectionId !== undefined
+          ? { collectionId: input.collectionId }
+          : {}),
       })),
     });
 
@@ -2722,6 +2728,38 @@ export class PrismaSaleRepository implements ISaleRepository {
     payload: unknown,
   ): Promise<void> {
     return this.markIdempotencySucceeded(token, saleId, payload);
+  }
+
+  /**
+   * customer-collection / T2 — `customer_collection` slot. Called INSIDE the
+   * collection transaction, so the conflict-safe branch applies and a
+   * rejected collection rolls the slot back. `saleId` stays null on success
+   * too: one collection spans several sales.
+   */
+  async acquireCollectionIdempotency(key: string, requestHash: string) {
+    return this.acquireIdempotency(
+      'customer_collection',
+      null,
+      key,
+      requestHash,
+    );
+  }
+
+  async markCollectionIdempotencySucceeded(
+    token: string,
+    payload: unknown,
+  ): Promise<void> {
+    await this.tenantPrisma.getClient().saleIdempotency.updateMany({
+      where: {
+        id: token,
+        tenantId: this.requireTenantId(),
+        operation: 'customer_collection',
+      },
+      data: {
+        status: 'SUCCEEDED',
+        responseJson: payload as Prisma.InputJsonValue,
+      },
+    });
   }
 
   async acquireCancellationIdempotency(

@@ -10,6 +10,11 @@ import { ReceiptReviewController } from './review/receipt-review.controller';
 import { ReceiptReviewService } from './review/receipt-review.service';
 import { RECEIPT_REVIEW_REPOSITORY } from './review/domain/receipt-review.repository';
 import { PrismaReceiptReviewRepository } from './review/infrastructure/prisma-receipt-review.repository';
+import { CustomerCollectionsController } from './customer-collections.controller';
+import { CustomerCollectionService } from './customer-collection.service';
+import { CUSTOMER_COLLECTION_REPOSITORY } from './domain/customer-collection.repository';
+import { PrismaCustomerCollectionRepository } from './infrastructure/prisma-customer-collection.repository';
+import { TENANT_SCOPED_MODELS } from '../shared/tenant/tenant-scoped-models.constant';
 
 describe('SalesModule receipt review registration', () => {
   it('registers the receipt review controller, service, and repository adapter binding', () => {
@@ -91,5 +96,29 @@ describe('SalesModule customer statement registration (sales-history-redesign S1
           typeof entry === 'object' && entry !== null && 'forwardRef' in entry,
       ),
     ).toBe(false);
+  });
+});
+
+describe('SalesModule customer collection registration (customer-collection / T2)', () => {
+  it('registers the «Cobrar todo» controller, service and Prisma repository binding', () => {
+    const controllers = Reflect.getMetadata(
+      MODULE_METADATA.CONTROLLERS,
+      SalesModule,
+    ) as unknown[];
+    const providers = Reflect.getMetadata(
+      MODULE_METADATA.PROVIDERS,
+      SalesModule,
+    ) as unknown[];
+
+    expect(controllers).toContain(CustomerCollectionsController);
+    expect(providers).toContain(CustomerCollectionService);
+    expect(providers).toContainEqual({
+      provide: CUSTOMER_COLLECTION_REPOSITORY,
+      useClass: PrismaCustomerCollectionRepository,
+    });
+  });
+
+  it('registers SaleCollection as a tenant-scoped model', () => {
+    expect(TENANT_SCOPED_MODELS.has('SaleCollection')).toBe(true);
   });
 });

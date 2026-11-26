@@ -133,6 +133,11 @@ export class DomainExceptionFilter implements ExceptionFilter {
     // exceed the cash tendered (non-cash tenders above the total).
     if (exception.code === 'CHANGE_EXCEEDS_CASH_TENDERED')
       return HttpStatus.UNPROCESSABLE_ENTITY;
+    // customer-collection / T2 (S3) — the debt under lock differs from the
+    // `expectedDebtCents` the cashier saw (body: `preview`). The other
+    // COLLECTION_* codes and CASH_SESSION_REQUIRED stay on the 422 default.
+    if (exception.code === 'COLLECTION_DEBT_CHANGED')
+      return HttpStatus.CONFLICT;
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'SHIPPING_ADDRESS_REQUIRES_CUSTOMER')

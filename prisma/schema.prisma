@@ -458,6 +458,7 @@ model Tenant {
   saleRefundSettlements     SaleRefundSettlement[]
   saleComments              SaleComment[]
   saleIdempotencies         SaleIdempotency[]
+  saleCollections           SaleCollection[]
   saleFolioCounters         SaleFolioCounter[]
   salePromotionApplied      SalePromotionApplied[]
   salePromotionVetoes       SalePromotionVeto[]
@@ -1684,12 +1685,49 @@ model SalePayment {
   sale    Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
   user    User?        @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   refunds SaleRefund[]
+  // customer-collection / T2 — the «Cobrar todo» this row belongs to (null for
+  // every other payment). NO ACTION: a collection can never be deleted while a
+  // payment points to it (payments must never disappear or lose their group),
+  // checked at statement end so the tenant cascade still removes both.
+  collectionId String?
+  collection   SaleCollection? @relation(fields: [collectionId], references: [id], onDelete: NoAction, onUpdate: Cascade)
 
   @@index([saleId])
   @@index([tenantId])
   @@index([tenantId, method], map: "idx_sale_payments_tenant_method")
   @@index([userId])
+  @@index([collectionId])
   @@map("sale_payments")
+}
+
+// customer-collection / T2 (contract v1 §5) — one «Cobrar todo»: a single
+// payment spread over several open-debt sales of one customer. The per-sale
+// money lives in `sale_payments` (`collectionId`); this row keeps the totals,
+// the change (never on a sale, so a later cancellation never refunds it) and
+// the tenders as entered (`tendersJson`, written once, never updated).
+// `customerId` is SET NULL like `sales.customerId`, so deleting the customer
+// keeps the money history. `actorUserId` has no FK (audit id, like the
+// stored payment actor of the response).
+model SaleCollection {
+  id             String   @id @default(uuid())
+  tenantId       String
+  customerId     String?
+  actorUserId    String
+  cashSessionId  String
+  tenderedCents  Int
+  appliedCents   Int
+  changeDueCents Int
+  tendersJson    Json
+  createdAt      DateTime @default(now())
+
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer    Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  cashSession CashSession   @relation(fields: [tenantId, cashSessionId], references: [tenantId, id], onDelete: NoAction, onUpdate: Cascade)
+  payments    SalePayment[]
+
+  @@index([tenantId, customerId, createdAt])
+  @@index([tenantId, cashSessionId])
+  @@map("sale_collections")
 }
 
 model SaleRefund {
@@ -2153,6 +2191,7 @@ model Customer {
   promotionCustomers PromotionCustomer[]
   chatbotRequests    ChatbotRequest[]
   backorders         Backorder[]
+  saleCollections    SaleCollection[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3401,6 +3440,8 @@ model CashSession {
   counts    CashCount[]
   handovers CashHandover[] @relation("CashHandoverSourceSession")
   closing   CashClosing?
+  // customer-collection / T2 — «Cobrar todo» collections bound to the session.
+  saleCollections SaleCollection[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, openingHandoverId])
