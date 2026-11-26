@@ -2,6 +2,10 @@
 
 Roadmap proposal #12: the bot tells the customer where and when to pick up an order, with a WhatsApp map pin. Implemented on `feat/branch-location`.
 
+## 0. Deploy order (production)
+
+The bot validated `pickupLocation` strictly, so the new `location` key would read every pickup checkout as contract drift. **Deploy the chatbot with commit `2fdfd8d` (location optional and nullable) first, then the backend with `ba138ae1` or later.** The backend migration is additive and can run at any point of that order.
+
 ## 1. Route
 
 | Method | Path                  | Scope          | Success |
