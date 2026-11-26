@@ -155,3 +155,31 @@ Original questions:
 ## 12. Risk and size
 
 Moves money and adds a migration (`sale_collections`, `sale_payments.collectionId`), new locks over several sales and cash movements: high-risk items 1, 4 and 5-adjacent. Implemented as its own feature with independent verification and race tests (collection vs single payment vs customer delete vs cancellation). Estimate: ~1,500 authored lines plus the receipt PDF.
+
+## Implementation notes (final routes)
+
+Implemented on `feat/customer-collection` (b6e4f5eb, 2c6113cc, 21521920, 0c3c4382). The code is authoritative; the final frontend contract is `docs/frontend-handoff/30-customer-collection.md`. Deviations from v1:
+
+- **§5 order:** the idempotency slot is acquired **before** the cash session check (the order of `POST /sales/:id/payments`). A same-key replay returns the stored `200` even after the session was closed. A rejected session check rolls the new slot back with everything else.
+- **§5.4 storage:** `sale_collections` also stores `tendersJson`, the tenders as answered (method, tendered amount, catalog snapshot). `GET /collections/:id` and the receipt rebuild `payments` from it.
+- **§2/§6 preview:**
+  - accepts **0 tenders** (debt and order only);
+  - adds a top-level **`debtCents`** (the debt of the candidates before the collection, to send back as `expectedDebtCents`);
+  - accepts and ignores `cashSessionId` and `expectedDebtCents`.
+
+  The `409 COLLECTION_DEBT_CHANGED` body carries the current preview under `preview`.
+- **§5.3 locks:** with `saleIds`, every selected sale is locked. Without `saleIds`, only the sales the tender **reaches** are locked `FOR UPDATE ORDER BY id`: the shortest Q1 prefix whose debt covers the tender, or every sale when the tender covers the whole debt. The rest are read without locks. When the set of sales that would receive money differs from the locked set, the answer is `409 COLLECTION_DEBT_CHANGED` with the preview, **even without `expectedDebtCents`**. `remainingCustomerDebtCents`, and the debt of sales that receive nothing, are therefore informational unlocked reads.
+- **Validation bounds (new):** each tender ≤ 2,147,483,647 cents; their sum ≤ 2,147,483,647 (`400`, `PAYMENTS_TOTAL_TOO_LARGE`); `reference` ≤ 120 characters.
+- **422 vs 409 precedence:** `COLLECTION_SALE_NOT_ELIGIBLE`, `COLLECTION_NO_OPEN_DEBT`, `COLLECTION_EXCEEDS_DEBT` and the catalog payment method errors are evaluated under the lock **before** `COLLECTION_DEBT_CHANGED`, so they win over it.
+- **§10:** `CASH_SESSION_NOT_OWNED` is **`422`** (the shared cash code), not `403`. `CASH_SESSION_NOT_FOUND`, `CASH_ACTOR_INACTIVE` and `CASH_TENANT_MEMBERSHIP_REQUIRED` are also `422`. `IDEMPOTENCY_KEY_REQUIRED` uses the Nest `400` body (the code is in `message`). The catalog errors are `404 PAYMENT_METHOD_NOT_FOUND`, `409 INACTIVE_PAYMENT_METHOD` and `400 PAYMENT_METHOD_CATEGORY_MISMATCH`.
+- **§1/§6 `GET /collections/:id`:** this is not a replay of the POST body.
+  - It is rebuilt at the **collection moment**: per-sale balances right after the collection (later payments and refunds excluded), `overdue` as it was before the collection, and the customer's debt right after it.
+  - It adds `saleStatus` per sale (the current status, so a sale cancelled since reads `CANCELED`).
+  - `customer` and `remainingCustomerDebtCents` become `null` after the customer is deleted.
+  - An unknown collection is `404 COLLECTION_NOT_FOUND`.
+- **§7 PDF:** `Content-Disposition: attachment; filename="comprobante-cobro-<id>.pdf"` and `Cache-Control: no-store`. `format` defaults to `ticket`; any other value is `400 INVALID_FORMAT`.
+- **§4/§5.5 change movement:**
+  - The `SALE_CHANGE` cash movement's `sourceId` is the collection id.
+  - The `SALE_PAYMENT` movement of the last applied cash part carries that part plus the change.
+  - When no cash part is applied (all cash is change), no cash movement is written.
+- **§5.6 / Q6:** no listener notifies the customer of payments today. The per-sale events stay as they are (tagged with `collectionId`), and `customer.collection.recorded` is the single hook for a future customer notice.
