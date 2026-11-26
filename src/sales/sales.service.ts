@@ -373,6 +373,7 @@ function chargeValidationError(
     | 'CUSTOMER_REQUIRED_FOR_CREDIT'
     | 'PAYMENT_AMOUNT_INVALID'
     | 'PAYMENT_AMOUNT_INSUFFICIENT'
+    | 'CHANGE_EXCEEDS_CASH_TENDERED'
     | 'AMBIGUOUS_PAYMENT_SHAPE'
     | 'CREDIT_METHOD_NOT_VALID_IN_MULTI'
     | 'TOO_MANY_PAYMENTS',
@@ -3672,6 +3673,20 @@ export class SalesService {
 
       if (!hasCash && tenderedCents > totalCents) {
         chargeValidationError('PAYMENT_AMOUNT_INVALID');
+      }
+
+      // customer-collection / T1 (S1) — owner rule «Rechazar si el cambio
+      // supera el efectivo»: change (tendered − total) may never exceed the
+      // cash tendered, i.e. the non-cash tenders may not exceed the total.
+      // The no-cash overpay keeps PAYMENT_AMOUNT_INVALID above. Runs before
+      // the stock lock, capacity claim, folio and every money write.
+      const cashTenderedCents = normalizedPayments.reduce(
+        (acc, payment) =>
+          payment.method === 'cash' ? acc + payment.amountCents : acc,
+        0,
+      );
+      if (hasCash && tenderedCents - cashTenderedCents > totalCents) {
+        chargeValidationError('CHANGE_EXCEEDS_CASH_TENDERED');
       }
 
       if (tenderedCents < 0) {

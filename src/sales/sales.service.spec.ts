@@ -2395,6 +2395,165 @@ describe('SalesService', () => {
       expect(result.changeDueCents).toBe(500);
     });
 
+    // customer-collection / T1 (S1) — change may never exceed the cash
+    // tendered (non-cash tenders may not exceed the total). Fixture total is
+    // 2000, so the spec example (card 1100 + cash 100 on 1000) scales ×2.
+    describe('change never exceeds cash tendered (S1)', () => {
+      it('rejects card 2200 + cash 200 on 2000 with CHANGE_EXCEEDS_CASH_TENDERED before any write', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-change-exceeds-cash',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+        const saleStock = (
+          service as unknown as {
+            saleStock: { lockStock: jest.Mock; charge: jest.Mock };
+          }
+        ).saleStock;
+        saleStock.lockStock.mockClear();
+        saleStock.charge.mockClear();
+
+        await expect(
+          service.chargeDraft(
+            sale.id,
+            'user-1',
+            {
+              payments: [
+                { method: 'card_debit', amountCents: 2200, reference: 'R' },
+                { method: 'cash', amountCents: 200 },
+              ],
+            } as never,
+            'idem-change-exceeds-cash',
+          ),
+        ).rejects.toMatchObject({ code: 'CHANGE_EXCEEDS_CASH_TENDERED' });
+
+        expect(saleStock.lockStock).not.toHaveBeenCalled();
+        expect(saleStock.charge).not.toHaveBeenCalled();
+        expect(promotionUsageRepo.claimForSale).not.toHaveBeenCalled();
+        expect(saleRepo.allocateNextFolio).not.toHaveBeenCalled();
+        expect(saleRepo.persistChargeConfirmation).not.toHaveBeenCalled();
+        expect(saleRepo.markChargeIdempotencySucceeded).not.toHaveBeenCalled();
+      });
+
+      it('accepts cash-only 2400 on 2000 with change 400', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-cash-only-change',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+
+        const result = await service.chargeDraft(
+          sale.id,
+          'user-1',
+          { payments: [{ method: 'cash', amountCents: 2400 }] } as never,
+          'idem-cash-only-change',
+        );
+
+        expect(result.paymentStatus).toBe('PAID');
+        expect(result.paidCents).toBe(2000);
+        expect(result.changeDueCents).toBe(400);
+      });
+
+      it('accepts card 1600 + cash 600 on 2000 with change 200', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-mixed-change',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+
+        const result = await service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [
+              { method: 'card_debit', amountCents: 1600, reference: 'R' },
+              { method: 'cash', amountCents: 600 },
+            ],
+          } as never,
+          'idem-mixed-change',
+        );
+
+        expect(result.paymentStatus).toBe('PAID');
+        expect(result.paidCents).toBe(2000);
+        expect(result.changeDueCents).toBe(200);
+      });
+
+      it('accepts card 2000 + cash 100 on 2000 (change equals cash) with change 100', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-change-equals-cash',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+
+        const result = await service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [
+              { method: 'card_credit', amountCents: 2000, reference: 'R' },
+              { method: 'cash', amountCents: 100 },
+            ],
+          } as never,
+          'idem-change-equals-cash',
+        );
+
+        expect(result.paymentStatus).toBe('PAID');
+        expect(result.changeDueCents).toBe(100);
+      });
+
+      it('accepts exact card 2000 on 2000 with no change', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-exact-card',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+
+        const result = await service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [
+              { method: 'card_debit', amountCents: 2000, reference: 'R' },
+            ],
+          } as never,
+          'idem-exact-card',
+        );
+
+        expect(result.paymentStatus).toBe('PAID');
+        expect(result.changeDueCents).toBe(0);
+      });
+
+      it('keeps partial underpayment (card 500 + cash 500 on 2000) as PARTIAL', async () => {
+        const sale = buildDraftSale(
+          'sale-charge-mixed-partial',
+          'user-1',
+          'customer-1',
+        );
+        setupHappyPathDraft(sale);
+
+        const result = await service.chargeDraft(
+          sale.id,
+          'user-1',
+          {
+            payments: [
+              { method: 'card_debit', amountCents: 500, reference: 'R' },
+              { method: 'cash', amountCents: 500 },
+            ],
+          } as never,
+          'idem-mixed-partial',
+        );
+
+        expect(result.paymentStatus).toBe('PARTIAL');
+        expect(result.debtCents).toBe(1000);
+        expect(result.changeDueCents).toBe(0);
+      });
+    });
+
     it('uses stable idempotency hash for reordered payments[]', async () => {
       const sale = buildDraftSale(
         'sale-charge-array-idempotency',

@@ -111,6 +111,7 @@ describe('DomainExceptionFilter', () => {
       'PAYMENT_METHOD_NOT_SUPPORTED',
       'PAYMENT_AMOUNT_INSUFFICIENT',
       'PAYMENT_AMOUNT_INVALID',
+      'CHANGE_EXCEEDS_CASH_TENDERED',
       'INVALID_DUE_DATE',
     ]) {
       const { host, status } = makeHost();

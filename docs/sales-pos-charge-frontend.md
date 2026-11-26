@@ -463,6 +463,7 @@ Ambos formatos aceptan opcionalmente `dueDate` (ISO-8601) en el body. Aplica sol
 | Crédito legacy con `amountCents > 0` | `INVALID_CREDIT_CHARGE` | 422 |
 | Tarjeta/transferencia con monto mayor al total | `PAYMENT_AMOUNT_INVALID` | 422 |
 | `amountCents < 0` | `PAYMENT_AMOUNT_INVALID` | 422 |
+| Hay `cash` y la suma de los pagos no-cash supera el total (el cambio sería mayor que el efectivo entregado) | `CHANGE_EXCEEDS_CASH_TENDERED` | 422 |
 | Pagos no-cash que NO cubren el total Y no hay ningún `cash` en el array | `PAYMENT_AMOUNT_INSUFFICIENT` | 422 |
 | Suma de pagos < total Y venta sin cliente asignado | `CUSTOMER_REQUIRED_FOR_CREDIT` | 422 |
 | Venta no encontrada o de otro tenant | `SALE_NOT_FOUND` | 404 |
@@ -519,11 +520,15 @@ El cambio/vuelto SOLO aplica cuando se cumplen AMBAS condiciones:
 
 Fórmula: `changeDueCents = suma_total_entregada - totalCents`
 
+El cambio nunca puede ser mayor que el efectivo entregado (2026-11-26): si los pagos no-cash suman más que el total, el cobro se rechaza con `422 CHANGE_EXCEEDS_CASH_TENDERED` y no se escribe nada.
+
 En CUALQUIER otro caso → `changeDueCents = 0`.
 
 > Ejemplo: total = $550, pagos = [cash $300, cash $300]. `paidCents` = 550 (capped al total), `changeDueCents` = 50, `paymentStatus` = PAID.
 
 > Ejemplo: total = $550, pagos = [transfer $600]. Error `PAYMENT_AMOUNT_INVALID` — no se puede sobre-pagar con no-efectivo.
+
+> Ejemplo: total = $1000, pagos = [card $1100, cash $100]. Error `CHANGE_EXCEEDS_CASH_TENDERED` — el cambio ($200) sería mayor que el efectivo ($100). Válido: [card $800, cash $300] → cambio $100.
 
 ### 3.7) Regla de cliente para crédito/parcial
 
@@ -1311,6 +1316,7 @@ curl -X PATCH "$API_URL/sales/$SALE_ID/due-date" \
 | `PAYMENT_METHOD_NOT_SUPPORTED` | 422 | Método no reconocido | Bug del frontend |
 | `INVALID_CREDIT_CHARGE` | 422 | Crédito con `amountCents > 0` | Bug del frontend |
 | `PAYMENT_AMOUNT_INVALID` | 422 | No-cash sobre-paga, o negativo | Validar en frontend antes de enviar |
+| `CHANGE_EXCEEDS_CASH_TENDERED` | 422 | Hay efectivo y los pagos no-cash superan el total | «El cambio no puede ser mayor que el efectivo entregado. Ajusta los montos.» |
 | `PAYMENT_AMOUNT_INSUFFICIENT` | 422 | Pagos no-cash no cubren el total y no hay cash en el array | Pedir agregar `cash` o ajustar montos |
 | `CUSTOMER_REQUIRED_FOR_CREDIT` | 422 | Pago parcial/crédito sin cliente | Pedir asignar cliente antes de cobrar |
 | `SALE_NOT_FOUND` | 404 | Venta no existe o de otro tenant | Refrescar listado |

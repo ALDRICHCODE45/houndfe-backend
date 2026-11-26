@@ -129,6 +129,10 @@ export class DomainExceptionFilter implements ExceptionFilter {
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'PAYMENT_AMOUNT_INVALID')
       return HttpStatus.UNPROCESSABLE_ENTITY;
+    // customer-collection / T1 (S1) — counter charge whose change would
+    // exceed the cash tendered (non-cash tenders above the total).
+    if (exception.code === 'CHANGE_EXCEEDS_CASH_TENDERED')
+      return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'SHIPPING_ADDRESS_NOT_FOR_CUSTOMER')
       return HttpStatus.UNPROCESSABLE_ENTITY;
     if (exception.code === 'SHIPPING_ADDRESS_REQUIRES_CUSTOMER')
