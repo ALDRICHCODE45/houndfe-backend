@@ -28,7 +28,7 @@ Each item in `GET /cash-registers` gets four new fields. Existing fields stay as
 }
 ```
 
-**Implemented:** always send `drawerHeld`, plus `drawerHeldStatus`/`drawerHeldSince` whenever it is true (no name). Fill in `heldBy` only when `isSessionVisible(actor, session)` is true, meaning it is the caller's own session (with `read:CashSession`) or the caller has `read:CashSessionAudit` (E7). The rest of the time, send `heldBy: null` while `drawerHeld: true`.
+**Implemented:** always send `drawerHeld`, plus `drawerHeldStatus`/`drawerHeldSince` whenever it is true (no name). Fill in `heldBy` only when the caller has `read:CashSession` (the gate `GET /cash-sessions` applies first) and `isSessionVisible(actor, session)` is true, meaning it is the caller's own session or the caller has `read:CashSessionAudit` (E7). Independent verify found the first gate missing; fixed with a test for audit without `read:CashSession`. The rest of the time, send `heldBy: null` while `drawerHeld: true`.
 
 Why:
 

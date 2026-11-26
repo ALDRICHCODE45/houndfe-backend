@@ -16,6 +16,10 @@
  * deterministically (latest openedAt, then id) as a defense.
  */
 import type { CashSession, Prisma } from '@prisma/client';
+import {
+  canAbility,
+  CASH_SESSION_READ_REQUIREMENT,
+} from '../application/cash-authorization';
 import type { CashActor } from '../cash-application.port';
 import type { TenantClient } from './cash-adapter-client';
 import { isSessionVisible } from './cash-adapter-instances';
@@ -79,9 +83,11 @@ export async function registerDrawerHolds(
       holder.set(session.registerId, session);
     }
   }
-  const visible = [...holder.values()].filter((session) =>
-    isSessionVisible(actor, session),
-  );
+  // Same two gates as GET /cash-sessions: the read:CashSession grant first
+  // (that route answers 403 without it), then the per-row visibility.
+  const visible = canAbility(actor, CASH_SESSION_READ_REQUIREMENT)
+    ? [...holder.values()].filter((session) => isSessionVisible(actor, session))
+    : [];
   const names = await userNames(
     tx,
     visible.map((session) => session.cashierUserId),

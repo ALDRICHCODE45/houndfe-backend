@@ -878,6 +878,13 @@ describe('cash-adapter-queries — register drawer hold (cash-register-held-by)'
   ] as const;
   const AUDITOR = [
     ['read', 'CashRegister'],
+    ['read', 'CashSession'],
+    ['read', 'CashSessionAudit'],
+  ] as const;
+  // Audit grant WITHOUT read:CashSession: GET /cash-sessions answers 403 for
+  // this caller, so the register list must not name the holder either.
+  const AUDIT_ONLY = [
+    ['read', 'CashRegister'],
     ['read', 'CashSessionAudit'],
   ] as const;
 
@@ -1029,6 +1036,30 @@ describe('cash-adapter-queries — register drawer hold (cash-register-held-by)'
       cashierDisplayName: 'Name u2',
       byMe: false,
     });
+  });
+
+  it('hides heldBy from an audit grant without read:CashSession (same gate as GET /cash-sessions)', async () => {
+    const { host, tenantPrisma } = makeTenantHarness();
+    const tx = tenantPrisma.getClient();
+    seedActors(host, ['u1', 'u2']);
+    seedRegister(host, 'reg-1', 'Caja A');
+    const openedAt = new Date('2026-11-26T09:12:00.000Z');
+    seedSession(host, {
+      id: 's-other',
+      cashierUserId: 'u2',
+      status: 'SUBMITTED',
+      openedAt,
+    });
+
+    const items = await registerItems(host, tx, actor('u1', AUDIT_ONLY));
+
+    expect(items['reg-1']).toMatchObject({
+      drawerHeld: true,
+      drawerHeldStatus: 'SUBMITTED',
+      drawerHeldSince: '2026-11-26T09:12:00.000Z',
+      heldBy: null,
+    });
+    expect(JSON.stringify(items['reg-1'])).not.toContain('Name u2');
   });
 
   it('renders a null cashierDisplayName when the cashier user row is missing', async () => {
