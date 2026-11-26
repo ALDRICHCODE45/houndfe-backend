@@ -616,6 +616,11 @@ d('bot checkout and sale shipping (PostgreSQL)', () => {
   describe('store pickup (shipping { mode: "pickup" })', () => {
     it('checkout: new customer without address gets a PICKUP sale and the pickup location', async () => {
       const s = await sucursal({ hours: true });
+      // branch-location: the sucursal map pin travels with the pickup location.
+      await prisma.shippingOrigin.update({
+        where: { tenantId: s.tenantId },
+        data: { latitude: 19.432608, longitude: -99.133209 },
+      });
 
       const res = await http()
         .post('/chatbot-api/checkouts')
@@ -661,6 +666,7 @@ d('bot checkout and sale shipping (PostgreSQL)', () => {
           timeZone: 'America/Mexico_City',
           summary: 'Lunes a sábado: 09:00–18:00. Domingo: cerrado.',
         }),
+        location: { latitude: 19.432608, longitude: -99.133209 },
       });
       expect(await saleRow(res.body.sale.saleId)).toMatchObject({
         fulfillmentMode: 'PICKUP',

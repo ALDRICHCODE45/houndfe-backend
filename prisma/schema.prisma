@@ -3814,6 +3814,9 @@ model ShippingOrigin {
   state        String
   postalCode   String   @db.Char(5)
   contactPhone String
+  /// branch-location — map pin of the sucursal (WGS84); both or neither.
+  latitude     Float?
+  longitude    Float?
   updatedById  String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

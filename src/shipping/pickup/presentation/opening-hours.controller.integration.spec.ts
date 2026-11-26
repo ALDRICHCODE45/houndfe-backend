@@ -294,6 +294,7 @@ describeDb('opening hours routes (PostgreSQL)', () => {
         postalCode: null,
       }) as unknown,
       hours: null,
+      location: null,
     });
 
     await db.shippingOrigin.create({
@@ -305,6 +306,8 @@ describeDb('opening hours routes (PostgreSQL)', () => {
         state: 'Ciudad de México',
         postalCode: '06000',
         contactPhone: '5512345678',
+        latitude: 19.432608,
+        longitude: -99.133209,
       },
     });
     await http()
@@ -318,5 +321,9 @@ describeDb('opening hours routes (PostgreSQL)', () => {
     expect(location.hours?.summary).toBe(
       'Lunes a viernes: 09:00–14:00 y 16:00–20:00. Sábado: 10:00–14:00. Domingo: cerrado.',
     );
+    expect(location.location).toEqual({
+      latitude: 19.432608,
+      longitude: -99.133209,
+    });
   });
 });

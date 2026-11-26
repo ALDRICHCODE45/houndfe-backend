@@ -71,6 +71,12 @@ export class ChatbotApiController {
     private readonly receiptStatusService: ReceiptStatusService,
   ) {}
 
+  /** branch-location — pickup sucursal card (class scope `catalog:read`). */
+  @Get('branch')
+  getBranch() {
+    return this.chatbotApiService.getBranch();
+  }
+
   @Get('catalog/search')
   searchCatalog(@Query() query: CatalogSearchQueryDto) {
     return this.chatbotApiService.searchCatalog({

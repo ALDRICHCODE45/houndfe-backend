@@ -247,7 +247,8 @@ Response `201`:
         { "day": "SUNDAY", "label": "Domingo", "closed": true, "ranges": [] }
       ],
       "summary": "Lunes a sábado: 09:00–18:00. Domingo: cerrado."
-    }
+    },
+    "location": { "latitude": 19.432608, "longitude": -99.133209 }
   }
 }
 ```
@@ -261,8 +262,11 @@ Response `201`:
 | `name` | The sucursal (tenant) name. |
 | `address` | The sucursal shipping origin (`docs/shipping-packaging.md` §4). Without an origin, it falls back to the free-text sucursal address: only `formatted` is set and the other fields are `null`. It is `null` when there is neither. |
 | `hours` | The opening hours of §4, or `null` while they are not set. `days` is always the seven weekdays, Monday first; `closed` is `true` when a day has no ranges. `summary` is a short Spanish text: consecutive days with the same hours are grouped (`Lunes a viernes`, `Lunes y martes`), ranges are joined with `y`, and a closed day says `cerrado`. |
+| `location` | The sucursal map pin `{ latitude, longitude }` from the shipping origin, or `null` while it is not set (send only the text). |
 
-The location is the one in effect at sale time. A replay returns it unchanged.
+The location is the one in effect at sale time. A replay returns it unchanged, so a replay of a sale created before `location` existed has no `location` key: treat a missing key as `null`.
+
+`GET /chatbot-api/branch` (`catalog:read`) returns the same object for the credential tenant, live, without a sale: see `docs/chatbot-handoff/branch-location-bot-contract.md`.
 
 ## 4. Sucursal opening hours (store settings)
 

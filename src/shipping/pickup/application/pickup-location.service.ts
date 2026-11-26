@@ -4,7 +4,9 @@
  *   name    — the sucursal (tenant) name;
  *   address — the T2 shipping origin; without one, the free-text
  *             `Tenant.address` as `formatted` only; null when neither exists;
- *   hours   — the opening hours formatted for the bot; null until set.
+ *   hours   — the opening hours formatted for the bot; null until set;
+ *   location — branch-location: the origin's map pin; null unless both
+ *             coordinates are stored.
  *
  * Reads go through the transaction-aware client, so the checkout builds it
  * inside its own transaction and caches it with the idempotent response.
@@ -28,10 +30,16 @@ export interface PickupAddress {
   formatted: string;
 }
 
+export interface PickupCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
 export interface PickupLocation {
   name: string;
   address: PickupAddress | null;
   hours: FormattedOpeningHours | null;
+  location: PickupCoordinates | null;
 }
 
 @Injectable()
@@ -86,6 +94,10 @@ export class PickupLocationService {
       name: tenant?.name ?? '',
       address,
       hours: hours ? formatOpeningHoursEs(hours) : null,
+      location:
+        origin?.latitude != null && origin.longitude != null
+          ? { latitude: origin.latitude, longitude: origin.longitude }
+          : null,
     };
   }
 }

@@ -51,6 +51,22 @@ function makeCredential(scopes: string[], rawToken = 'svc_valid-key') {
   });
 }
 
+const BRANCH = {
+  name: 'Sucursal Centro',
+  address: {
+    addressLine1: 'Av. Juárez 123',
+    addressLine2: null,
+    neighborhood: 'Centro',
+    municipality: 'Cuauhtémoc',
+    state: 'Ciudad de México',
+    postalCode: '06000',
+    formatted:
+      'Av. Juárez 123, Centro, Cuauhtémoc, Ciudad de México, C.P. 06000',
+  },
+  hours: null,
+  location: { latitude: 19.432608, longitude: -99.133209 },
+};
+
 describe('ChatbotApiController', () => {
   let app: INestApplication;
   let service: {
@@ -65,6 +81,7 @@ describe('ChatbotApiController', () => {
     getOrderHistoryByPhone: jest.Mock;
     cancelBotSale: jest.Mock;
     getActivePaymentDetail: jest.Mock;
+    getBranch: jest.Mock;
   };
   let receiptUpload: { upload: jest.Mock; attachLegacyUrl: jest.Mock };
   let receiptStatus: { getForBot: jest.Mock };
@@ -74,6 +91,7 @@ describe('ChatbotApiController', () => {
 
   beforeEach(async () => {
     service = {
+      getBranch: jest.fn().mockResolvedValue(BRANCH),
       searchCatalog: jest.fn().mockResolvedValue([
         {
           productId: 'prod-1',
@@ -381,6 +399,30 @@ describe('ChatbotApiController', () => {
   function httpServer(): Parameters<typeof request>[0] {
     return app.getHttpServer() as Parameters<typeof request>[0];
   }
+
+  describe('GET /chatbot-api/branch (branch-location)', () => {
+    it('returns 401 without a service credential', async () => {
+      await request(httpServer()).get('/chatbot-api/branch').expect(401);
+      expect(service.getBranch).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 for valid credentials without catalog:read', async () => {
+      await request(httpServer())
+        .get('/chatbot-api/branch')
+        .set('Authorization', 'Bearer svc_limited-key')
+        .expect(403);
+      expect(service.getBranch).not.toHaveBeenCalled();
+    });
+
+    it('returns the branch name, address, hours and location', async () => {
+      const res = await request(httpServer())
+        .get('/chatbot-api/branch')
+        .set('Authorization', 'Bearer svc_valid-key')
+        .expect(200);
+      expect(service.getBranch).toHaveBeenCalledWith();
+      expect(res.body).toEqual(BRANCH);
+    });
+  });
 
   it('GET /chatbot-api/catalog/search returns 401 without a service credential', async () => {
     await request(httpServer())

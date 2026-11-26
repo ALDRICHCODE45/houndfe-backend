@@ -485,6 +485,9 @@ The address carriers pick up from. It is separate from the free-text `Tenant.add
 | `neighborhood` (colonia), `municipality` (alcaldía), `state` | trimmed, 1–120 chars, required | `Centro` | `" "`, missing |
 | `postalCode` | exactly 5 digits | `06000` | `6000`, `06A00` |
 | `contactPhone` | 10–15 digits, optional leading `+` | `5512345678`, `+525512345678` | `12345`, `55 1234 5678` |
+| `latitude`, `longitude` | optional map pin of the sucursal, sent **together**: latitude −90…90, longitude −180…180 (numbers). Both omitted → the stored pin is **kept**; both `null` → cleared | `19.432608` + `-99.133209`; `null` + `null` | only one of them, `null` + a number, `90.5`, `"norte"` |
+
+The pin is the only part of the body that is not a whole replace: a screen without the map inputs never erases it. The bot sends it as a WhatsApp location for store pickup (`GET /chatbot-api/branch`, checkout `pickupLocation.location`).
 
 Unknown keys (e.g. `country`) are a `400`. All four of colonia, alcaldía, state and postal code are needed for a carrier quote.
 
@@ -501,10 +504,14 @@ Response (seen, unconfigured: `{"configured":false,"origin":null}`):
     "state": "Ciudad de México",
     "postalCode": "03100",
     "contactPhone": "5555432100",
+    "latitude": 19.374212,
+    "longitude": -99.177801,
     "updatedAt": "2026-11-06T18:00:00.000Z"
   }
 }
 ```
+
+`latitude`/`longitude` are `null` until a pin is set.
 
 Errors: `400` C or D, and `404` D for a foreign `:tenantId`, as in §5. There is no delete.
 

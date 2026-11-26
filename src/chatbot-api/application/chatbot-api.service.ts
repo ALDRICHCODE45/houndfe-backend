@@ -68,7 +68,10 @@ import { SalesService } from '../../sales/sales.service';
 import { SALE_REPOSITORY } from '../../sales/domain/sale.repository';
 import type { ISaleRepository } from '../../sales/domain/sale.repository';
 import { ShippingQuoteVerifier } from '../../shipping/quotes/application/shipping-quote-verifier.service';
-import { PickupLocationService } from '../../shipping/pickup/application/pickup-location.service';
+import {
+  PickupLocationService,
+  type PickupLocation,
+} from '../../shipping/pickup/application/pickup-location.service';
 import {
   canonicalShipping,
   classifyBotShipping,
@@ -293,6 +296,15 @@ export class ChatbotApiService {
     });
     const result = await this.evaluateCartPromotionsUseCase.execute(pricing);
     return { ...result, customerResolution };
+  }
+
+  /**
+   * branch-location — the credential tenant's sucursal card for the bot:
+   * name, address, hours and map pin, from the same source as the checkout
+   * `pickupLocation` (one place for the POS to edit).
+   */
+  getBranch(): Promise<PickupLocation> {
+    return this.pickupLocations.resolve(this.tenantPrisma.getTenantId());
   }
 
   /** Read-only checkout discovery; deliberately does not reuse newest-phone lookup. */

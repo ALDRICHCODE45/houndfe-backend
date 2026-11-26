@@ -353,7 +353,12 @@ describeDb('shipping settings routes (PostgreSQL)', () => {
       expect(put.status).toBe(200);
       expect(put.body).toEqual({
         configured: true,
-        origin: { ...ORIGIN, updatedAt: expect.any(String) as unknown },
+        origin: {
+          ...ORIGIN,
+          latitude: null,
+          longitude: null,
+          updatedAt: expect.any(String) as unknown,
+        },
       });
 
       const replaced = await http()
@@ -368,6 +373,77 @@ describeDb('shipping settings routes (PostgreSQL)', () => {
       const tenant = await db.tenant.findUnique({ where: { id: t.tenantId } });
       expect(tenant?.address).toBe('texto libre');
     });
+
+    it('stores coordinates as a pair, keeps them when omitted and clears them with null', async () => {
+      const t = await seedTenant();
+      const set = await http()
+        .put(originUrl(t.tenantId))
+        .set(t.auth)
+        .send({ ...ORIGIN, latitude: 19.432608, longitude: -99.133209 });
+      expect(set.status).toBe(200);
+      expect(set.body).toMatchObject({
+        origin: { latitude: 19.432608, longitude: -99.133209 },
+      });
+
+      // A client that does not know the coordinates keeps them.
+      const kept = await http()
+        .put(originUrl(t.tenantId))
+        .set(t.auth)
+        .send({ ...ORIGIN, postalCode: '44100' });
+      expect(kept.body).toMatchObject({
+        origin: {
+          postalCode: '44100',
+          latitude: 19.432608,
+          longitude: -99.133209,
+        },
+      });
+      const read = await http().get(originUrl(t.tenantId)).set(t.auth);
+      expect(read.body).toMatchObject({
+        origin: { latitude: 19.432608, longitude: -99.133209 },
+      });
+
+      const cleared = await http()
+        .put(originUrl(t.tenantId))
+        .set(t.auth)
+        .send({ ...ORIGIN, latitude: null, longitude: null });
+      expect(cleared.body).toMatchObject({
+        origin: { latitude: null, longitude: null },
+      });
+    });
+
+    it.each([
+      ['latitude without longitude', { latitude: 19.4 }],
+      ['longitude without latitude', { longitude: -99.1 }],
+      ['latitude null with a longitude', { latitude: null, longitude: -99.1 }],
+      ['latitude above 90', { latitude: 90.5, longitude: -99.1 }],
+      ['latitude below -90', { latitude: -91, longitude: -99.1 }],
+      ['longitude above 180', { latitude: 19.4, longitude: 180.5 }],
+      ['longitude below -180', { latitude: 19.4, longitude: -181 }],
+      ['text coordinates', { latitude: 'norte', longitude: -99.1 }],
+    ])(
+      'rejects %s with 400 and leaves the stored coordinates unchanged',
+      async (_label, coordinates) => {
+        const t = await seedTenant();
+        await http()
+          .put(originUrl(t.tenantId))
+          .set(t.auth)
+          .send({ ...ORIGIN, latitude: 20, longitude: -100 })
+          .expect(200);
+        const res = await http()
+          .put(originUrl(t.tenantId))
+          .set(t.auth)
+          .send({ ...ORIGIN, postalCode: '44100', ...coordinates });
+        expect(res.status).toBe(400);
+        const row = await db.shippingOrigin.findUnique({
+          where: { tenantId: t.tenantId },
+        });
+        expect(row).toMatchObject({
+          postalCode: ORIGIN.postalCode,
+          latitude: 20,
+          longitude: -100,
+        });
+      },
+    );
 
     it('isolates tenants: another tenant path is 404 and never written', async () => {
       const mine = await seedTenant();

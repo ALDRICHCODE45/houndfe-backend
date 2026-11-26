@@ -17,12 +17,27 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { MAX_PACKAGE_WEIGHT_G, MAX_SIDE_CM } from './packaging.dto';
 
 const CM = { maxDecimalPlaces: 1, allowNaN: false, allowInfinity: false };
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
+
+/**
+ * branch-location — the pin is validated unless it is absent (both omitted)
+ * or cleared (both `null`), so a lone or `null`-mixed coordinate fails
+ * `@IsNumber` and the request is a 400.
+ */
+const validateCoordinates = (dto: {
+  latitude?: unknown;
+  longitude?: unknown;
+}): boolean => {
+  const bothOmitted = dto.latitude === undefined && dto.longitude === undefined;
+  const bothNull = dto.latitude === null && dto.longitude === null;
+  return !bothOmitted && !bothNull;
+};
 
 export class CreateShippingBoxDto {
   @Transform(trim)
@@ -103,6 +118,23 @@ export class PutShippingOriginDto {
     message: 'contactPhone must be 10 to 15 digits, optionally prefixed by +',
   })
   contactPhone!: string;
+
+  /**
+   * branch-location — the sucursal map pin, sent as a pair. Omitting both
+   * keeps the stored pin (clients that do not know it never erase it); `null`
+   * in both clears it; anything else (one alone, out of range) is a 400.
+   */
+  @ValidateIf(validateCoordinates)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-90)
+  @Max(90)
+  latitude?: number | null;
+
+  @ValidateIf(validateCoordinates)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-180)
+  @Max(180)
+  longitude?: number | null;
 }
 
 export interface ShippingBoxView {
@@ -126,6 +158,8 @@ export interface ShippingOriginView {
   state: string;
   postalCode: string;
   contactPhone: string;
+  latitude: number | null;
+  longitude: number | null;
   updatedAt: string;
 }
 

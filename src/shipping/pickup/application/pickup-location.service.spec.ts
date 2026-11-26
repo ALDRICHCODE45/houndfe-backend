@@ -87,6 +87,7 @@ describe('PickupLocationService', () => {
         summary:
           'Lunes a viernes: cerrado. Sábado: 10:00–14:00. Domingo: cerrado.',
       },
+      location: null,
     });
   });
 
@@ -109,6 +110,7 @@ describe('PickupLocationService', () => {
         formatted: 'Calle 5 #10, Monterrey',
       },
       hours: null,
+      location: null,
     });
   });
 
@@ -120,5 +122,46 @@ describe('PickupLocationService', () => {
     });
 
     expect((await service.resolve(TENANT)).address).toBeNull();
+  });
+
+  it('exposes the origin coordinates as location when both are set', async () => {
+    const { service } = build({
+      tenant: { name: 'Sucursal Centro', address: null },
+      origin: {
+        addressLine1: 'Av. Juárez 123',
+        addressLine2: null,
+        neighborhood: 'Centro',
+        municipality: 'Cuauhtémoc',
+        state: 'Ciudad de México',
+        postalCode: '06000',
+        latitude: 19.432608,
+        longitude: -99.133209,
+      },
+      hours: null,
+    });
+
+    expect((await service.resolve(TENANT)).location).toEqual({
+      latitude: 19.432608,
+      longitude: -99.133209,
+    });
+  });
+
+  it('returns a null location when the origin has no coordinates', async () => {
+    const { service } = build({
+      tenant: { name: 'Sucursal Centro', address: null },
+      origin: {
+        addressLine1: 'Av. Juárez 123',
+        addressLine2: null,
+        neighborhood: 'Centro',
+        municipality: 'Cuauhtémoc',
+        state: 'Ciudad de México',
+        postalCode: '06000',
+        latitude: null,
+        longitude: null,
+      },
+      hours: null,
+    });
+
+    expect((await service.resolve(TENANT)).location).toBeNull();
   });
 });

@@ -128,6 +128,7 @@ PUT body (`addressLine2` is optional; omitted or empty means `null`):
 
 - `postalCode`: exactly 5 digits.
 - `contactPhone`: 10 to 15 digits, optionally starting with `+`.
+- `latitude`, `longitude` (optional map pin, both or neither): latitude −90…90, longitude −180…180. Omitting both keeps the stored pin; `null` in both clears it; one alone is a 400. The database enforces the pair and the ranges with CHECKs.
 - Text fields are trimmed; blank values are rejected.
 
 Response (`configured: false, origin: null` until the first PUT):
@@ -139,7 +140,8 @@ Response (`configured: false, origin: null` until the first PUT):
     "addressLine1": "Av. Juárez 123", "addressLine2": "Local 4",
     "neighborhood": "Centro", "municipality": "Cuauhtémoc",
     "state": "Ciudad de México", "postalCode": "06000",
-    "contactPhone": "5512345678", "updatedAt": "…"
+    "contactPhone": "5512345678",
+    "latitude": 19.432608, "longitude": -99.133209, "updatedAt": "…"
   }
 }
 ```

@@ -50,6 +50,8 @@ const toOriginResponse = (
           state: row.state,
           postalCode: row.postalCode,
           contactPhone: row.contactPhone,
+          latitude: row.latitude,
+          longitude: row.longitude,
           updatedAt: row.updatedAt.toISOString(),
         },
       }
@@ -148,9 +150,13 @@ export class ShippingSettingsService {
     actorUserId: string,
     dto: PutShippingOriginDto,
   ): Promise<ShippingOriginResponse> {
+    // branch-location: omitted coordinates stay `undefined`, which Prisma
+    // leaves untouched on update (the DTO guarantees both-or-neither).
     const data = {
       ...dto,
       addressLine2: dto.addressLine2 || null,
+      latitude: dto.latitude,
+      longitude: dto.longitude,
       updatedById: actorUserId,
     };
     const row = await this.db.shippingOrigin.upsert({
