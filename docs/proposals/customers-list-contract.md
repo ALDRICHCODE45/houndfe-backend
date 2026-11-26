@@ -1,6 +1,6 @@
 # Customers module (table with filters + customer page) — contract proposal v1
 
-Status: **v1 PROPOSAL, awaiting the owner's OK; nothing implemented.**
+Status: **v1 APPROVED (owner OK 2026-11-26) and IMPLEMENTED** on `feat/customers-listing` (6bd81dfa, 15476114, 81a73364, f9792e3b). Final routes, shapes and errors: `docs/frontend-handoff/31-customers-module.md`. Differences from this text: `method` is lowercase in both feed event kinds; POST and PATCH /customers responses also carry `isTrusted`; `isTrusted` rejects `null` (strict boolean).
 
 - Requested by the frontend on 2026-11-26, after the owner chose the design. The design files are in the frontend repo: `design/customers-module/01-tabla-y-filtros.html` (the table) and `02-pagina-pestanas.html` (the customer page `/pos/clientes/:id` with tabs).
 - v1 applies the owner's and the frontend's answers to the v0 questions. The frontend relayed them on 2026-11-26 (§15).
@@ -344,7 +344,7 @@ Order: `occurredAt desc, eventId desc`. This is a total order, so `page`/`limit`
       "kind": "payment",
       "eventId": "uuid-payment",
       "occurredAt": "2026-11-20T19:31:02.000Z",
-      "method": "CASH",
+      "method": "cash",
       "catalog": null,
       "reference": null,
       "amountCents": 45000,
