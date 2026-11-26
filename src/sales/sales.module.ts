@@ -37,6 +37,10 @@ import { CollectionsController } from './collections.controller';
 import { CollectionReadService } from './collection-read.service';
 import { COLLECTION_READER } from './domain/collection-reader';
 import { PrismaCollectionReader } from './infrastructure/prisma-collection.reader';
+import { CustomerPaymentsController } from './customer-payments.controller';
+import { CustomerPaymentsService } from './customer-payments.service';
+import { CUSTOMER_PAYMENTS_READER } from './customer-payments.reader';
+import { PrismaCustomerPaymentsReader } from './customer-payments.prisma-reader';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
 import { SaleHoldExpireService } from './sale-hold-expire.service';
@@ -90,6 +94,8 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     // customer-collection / T3 — GET /collections/:collectionId. The receipt
     // PDF route is registered in PdfGenerationModule (imports this module).
     CollectionsController,
+    // customers-listing T2 — GET /customers/:customerId/payments.
+    CustomerPaymentsController,
   ],
   providers: [
     SalesService,
@@ -112,6 +118,12 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     // customer-collection / T3 — collection read + receipt data.
     CollectionReadService,
     { provide: COLLECTION_READER, useClass: PrismaCollectionReader },
+    // customers-listing T2 — customer payments feed.
+    CustomerPaymentsService,
+    {
+      provide: CUSTOMER_PAYMENTS_READER,
+      useClass: PrismaCustomerPaymentsReader,
+    },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.
     SaleHoldSweepStore,

@@ -72,6 +72,39 @@ export function isOverdue(
   return openDebtCents > 0 && day !== null && day < today;
 }
 
+/** One payment row as the change rule needs it. */
+export interface SaleChangeRow {
+  saleId: string;
+  /** DB enum (`CASH`, `CARD_CREDIT`, `CARD_DEBIT`, `TRANSFER`). */
+  method: string;
+  /** Stored (tendered) amount. */
+  amountCents: number;
+  /** The sale-level change returned at the charge (`sales.changeDueCents`). */
+  saleChangeDueCents: number;
+}
+
+/**
+ * The statement change rule, shared with the customer payments feed: change
+ * is recorded once per sale (`changeDueCents`) and only on a cash charge that
+ * settled the sale, so every payment row of such a sale is a charge row; the
+ * change is taken from its CASH rows in payment order (rows must come in
+ * `createdAt asc, id asc`). Returns the change share of each row, in order.
+ */
+export function splitSaleChange(rows: readonly SaleChangeRow[]): number[] {
+  const changeLeft = new Map<string, number>();
+  return rows.map((row) => {
+    if (!changeLeft.has(row.saleId)) {
+      changeLeft.set(row.saleId, Math.max(row.saleChangeDueCents, 0));
+    }
+    let changeCents = 0;
+    if (row.method === 'CASH') {
+      changeCents = Math.min(changeLeft.get(row.saleId)!, row.amountCents);
+      changeLeft.set(row.saleId, changeLeft.get(row.saleId)! - changeCents);
+    }
+    return changeCents;
+  });
+}
+
 function blankToNull(value: string | null): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -195,24 +228,13 @@ export class CustomerStatementService {
     };
   }
 
-  /**
-   * Change is recorded once per sale (`changeDueCents`) and only on a cash
-   * charge that settled the sale, so every payment row of such a sale is a
-   * charge row; the change is taken from its CASH rows in payment order.
-   */
+  /** Cash net of the sale-level change (`splitSaleChange`). */
   private shapePayments(
     rows: CustomerStatementSnapshot['payments'],
   ): CustomerStatementPaymentDto[] {
-    const changeLeft = new Map<string, number>();
-    return rows.map((row) => {
-      if (!changeLeft.has(row.saleId)) {
-        changeLeft.set(row.saleId, Math.max(row.saleChangeDueCents, 0));
-      }
-      let changeCents = 0;
-      if (row.method === 'CASH') {
-        changeCents = Math.min(changeLeft.get(row.saleId)!, row.amountCents);
-        changeLeft.set(row.saleId, changeLeft.get(row.saleId)! - changeCents);
-      }
+    const changes = splitSaleChange(rows);
+    return rows.map((row, index) => {
+      const changeCents = changes[index];
       return {
         id: row.id,
         paidAt: row.paidAt.toISOString(),
