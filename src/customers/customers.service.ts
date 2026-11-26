@@ -178,6 +178,8 @@ export class CustomersService {
       customer.globalPriceListId = dto.globalPriceListId || null;
     if (dto.comments !== undefined)
       customer.comments = dto.comments?.trim() || null;
+    // customers-listing T4 (contract §6.1): a JSON boolean, absent = unchanged.
+    if (dto.isTrusted !== undefined) customer.isTrusted = dto.isTrusted;
 
     // Billing fields
     if (dto.businessName !== undefined)
@@ -361,7 +363,9 @@ export class CustomersService {
         billingState: c.billingState,
         createdAt: c.createdAt,
         updatedAt: c.updatedAt,
-      }).toResponse(),
+        // customers-listing T4: the GET /customers item keeps its shape, so
+        // `isTrusted` is read but not returned here (contract §6).
+      }).toListResponse(),
       globalPriceList: c.globalPriceList ?? null,
       addresses: c.addresses,
       matchedPetName,
@@ -396,6 +400,7 @@ export class CustomersService {
       globalPriceListId: data.globalPriceListId,
       comments: data.comments,
       preferredPaymentMethod: data.preferredPaymentMethod,
+      isTrusted: data.isTrusted,
       businessName: data.businessName,
       fiscalZipCode: data.fiscalZipCode,
       rfc: data.rfc,

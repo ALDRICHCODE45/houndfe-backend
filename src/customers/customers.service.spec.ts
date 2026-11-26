@@ -484,3 +484,130 @@ describe('CustomersService pets (customer-pets / T1)', () => {
     });
   });
 });
+
+describe('CustomersService isTrusted (customers-listing T4, contract §6, §6.1)', () => {
+  /** `GET /customers` item keys before T4: must stay EXACTLY these. */
+  const LIST_ITEM_KEYS = [
+    'id',
+    'firstName',
+    'lastName',
+    'phoneCountryCode',
+    'phone',
+    'email',
+    'globalPriceListId',
+    'comments',
+    'preferredPaymentMethod',
+    'businessName',
+    'fiscalZipCode',
+    'rfc',
+    'fiscalRegime',
+    'billingStreet',
+    'billingExteriorNumber',
+    'billingInteriorNumber',
+    'billingZipCode',
+    'billingNeighborhood',
+    'billingMunicipality',
+    'billingCity',
+    'billingState',
+    'createdAt',
+    'updatedAt',
+    'globalPriceList',
+    'addresses',
+    'matchedPetName',
+  ].sort();
+
+  const row = (over: Record<string, unknown> = {}) => ({
+    ...makeCustomerRecord('cust-1'),
+    preferredPaymentMethod: null,
+    isTrusted: true,
+    globalPriceList: null,
+    addresses: [],
+    ...over,
+  });
+
+  const stored = (isTrusted: boolean) =>
+    Customer.fromPersistence({
+      ...makeCustomerRecord('cust-1'),
+      preferredPaymentMethod: null,
+      isTrusted,
+    });
+
+  it('GET /customers/:id exposes isTrusted from the row', async () => {
+    const { service, tenantClient } = makeService();
+    tenantClient.customer.findUnique.mockResolvedValue(
+      row({ _count: { pets: 0 } }),
+    );
+    await expect(service.findOne('cust-1')).resolves.toMatchObject({
+      id: 'cust-1',
+      isTrusted: true,
+      activePetsCount: 0,
+    });
+  });
+
+  it('GET /customers items keep exactly their previous keys (no isTrusted), with and without search', async () => {
+    const { service, tenantClient } = makeService();
+    tenantClient.customer.findMany.mockResolvedValueOnce([row()]);
+    const [plain] = await service.findAll();
+    expect(Object.keys(plain).sort()).toEqual(LIST_ITEM_KEYS);
+
+    tenantClient.customer.findMany
+      .mockResolvedValueOnce([row({ pets: [{ name: 'Bruno' }] })])
+      .mockResolvedValueOnce([]);
+    const [viaPet] = await service.findAll('bruno');
+    expect(Object.keys(viaPet).sort()).toEqual(LIST_ITEM_KEYS);
+  });
+
+  it.each([true, false])(
+    'PATCH isTrusted=%s sets it, saves it and echoes it',
+    async (isTrusted) => {
+      const { service, customerRepo, tenantClient } = makeService();
+      customerRepo.findById.mockResolvedValue(stored(!isTrusted));
+      tenantClient.customer.findUnique.mockResolvedValue(row({ isTrusted }));
+
+      const response = await service.update('cust-1', { isTrusted });
+
+      const [saved] = customerRepo.save.mock.calls[0] as [Customer];
+      expect(saved.isTrusted).toBe(isTrusted);
+      expect(saved.isTrustedDirty).toBe(true);
+      expect(saved.toPersistence()).toMatchObject({ isTrusted });
+      expect(response).toMatchObject({ isTrusted });
+      expect(response).not.toHaveProperty('activePetsCount');
+    },
+  );
+
+  it('PATCH without isTrusted leaves it unchanged and not dirty (other fields as before)', async () => {
+    const { service, customerRepo, tenantClient } = makeService();
+    customerRepo.findById.mockResolvedValue(stored(true));
+    tenantClient.customer.findUnique.mockResolvedValue(row());
+
+    await service.update('cust-1', {
+      firstName: '  Eva ',
+      email: ' EVA@X.TEST ',
+      rfc: ' abcd010101xyz ',
+    });
+
+    const [saved] = customerRepo.save.mock.calls[0] as [Customer];
+    expect(saved.isTrusted).toBe(true);
+    expect(saved.isTrustedDirty).toBe(false);
+    expect(saved).toMatchObject({
+      firstName: 'Eva',
+      email: 'eva@x.test',
+      rfc: 'ABCD010101XYZ',
+    });
+  });
+
+  it('POST /customers creates with isTrusted false and the response carries it', async () => {
+    const { service, prisma, tenantClient } = makeService();
+    tenantClient.customer.findUnique.mockResolvedValue(
+      row({ isTrusted: false }),
+    );
+
+    const created = await service.create({ firstName: 'Ada' });
+
+    const [{ data }] = prisma.customer.create.mock.calls[0] as [
+      { data: { isTrusted: boolean } },
+    ];
+    expect(data.isTrusted).toBe(false);
+    expect(created).toMatchObject({ isTrusted: false });
+  });
+});

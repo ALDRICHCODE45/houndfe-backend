@@ -77,6 +77,9 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingMunicipality: p.billingMunicipality,
         billingCity: p.billingCity,
         billingState: p.billingState,
+        // customers-listing T4: only when set on this instance, so a save that
+        // never touched it (chatbot upsert) keeps a concurrent PATCH's value.
+        ...(customer.isTrustedDirty ? { isTrusted: p.isTrusted } : {}),
         updatedAt: new Date(),
       },
       create: {
@@ -101,6 +104,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
         billingMunicipality: p.billingMunicipality,
         billingCity: p.billingCity,
         billingState: p.billingState,
+        isTrusted: p.isTrusted,
         tenantId,
       } as Prisma.CustomerUncheckedCreateInput,
     });
@@ -163,6 +167,7 @@ export class PrismaCustomerRepository implements ICustomerRepository {
       globalPriceListId: data.globalPriceListId,
       comments: data.comments,
       preferredPaymentMethod: data.preferredPaymentMethod,
+      isTrusted: data.isTrusted,
       businessName: data.businessName,
       fiscalZipCode: data.fiscalZipCode,
       rfc: data.rfc,

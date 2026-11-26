@@ -279,3 +279,85 @@ describe('PrismaCustomerRepository.delete lock order (customer-pets / T3)', () =
     expect(client.backorder.deleteMany).not.toHaveBeenCalled();
   });
 });
+
+describe('PrismaCustomerRepository isTrusted (customers-listing T4, contract §6.1)', () => {
+  type UpsertArgs = {
+    update: Record<string, unknown>;
+    create: Record<string, unknown>;
+  };
+
+  const record = (isTrusted: boolean) => ({
+    id: 'cust-1',
+    firstName: 'Ada',
+    lastName: null,
+    phoneCountryCode: null,
+    phone: null,
+    email: null,
+    globalPriceListId: null,
+    comments: null,
+    preferredPaymentMethod: null,
+    isTrusted,
+    businessName: null,
+    fiscalZipCode: null,
+    rfc: null,
+    fiscalRegime: null,
+    billingStreet: null,
+    billingExteriorNumber: null,
+    billingInteriorNumber: null,
+    billingZipCode: null,
+    billingNeighborhood: null,
+    billingMunicipality: null,
+    billingCity: null,
+    billingState: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  function harness(stored: boolean) {
+    const tenantPrisma = makeTenantPrismaMock();
+    tenantPrisma.client.customer.findUnique.mockResolvedValue(record(stored));
+    tenantPrisma.client.customer.upsert.mockResolvedValue(record(stored));
+    const repo = new PrismaCustomerRepository(
+      tenantPrisma as unknown as TenantPrismaService,
+    );
+    const upsertArgs = () =>
+      tenantPrisma.client.customer.upsert.mock.calls[0]?.[0] as UpsertArgs;
+    return { repo, upsertArgs };
+  }
+
+  it('maps the stored column into the entity', async () => {
+    const { repo } = harness(true);
+    const customer = await repo.findById('cust-1');
+    expect(customer?.isTrusted).toBe(true);
+    expect(customer?.isTrustedDirty).toBe(false);
+  });
+
+  it('a loaded customer saved without touching isTrusted does NOT write the column (chatbot upsert path)', async () => {
+    const { repo, upsertArgs } = harness(true);
+    const customer = (await repo.findById('cust-1'))!;
+    customer.preferredPaymentMethod = 'transfer';
+
+    await repo.save(customer);
+
+    expect(upsertArgs().update).not.toHaveProperty('isTrusted');
+    expect(upsertArgs().update).toMatchObject({
+      preferredPaymentMethod: 'transfer',
+    });
+  });
+
+  it('writes the column once isTrusted is set', async () => {
+    const { repo, upsertArgs } = harness(true);
+    const customer = (await repo.findById('cust-1'))!;
+    customer.isTrusted = false;
+
+    await repo.save(customer);
+
+    expect(upsertArgs().update).toMatchObject({ isTrusted: false });
+  });
+
+  it('a new customer is created with isTrusted false', async () => {
+    const { repo, upsertArgs } = harness(false);
+    await repo.save(Customer.create({ id: 'cust-1', firstName: 'Ada' }));
+    expect(upsertArgs().create).toMatchObject({ isTrusted: false });
+  });
+});

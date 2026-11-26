@@ -41,6 +41,10 @@ import { CustomerPaymentsController } from './customer-payments.controller';
 import { CustomerPaymentsService } from './customer-payments.service';
 import { CUSTOMER_PAYMENTS_READER } from './customer-payments.reader';
 import { PrismaCustomerPaymentsReader } from './customer-payments.prisma-reader';
+import { CustomerSalesSummaryController } from './customer-sales-summary.controller';
+import { CustomerSalesSummaryService } from './customer-sales-summary.service';
+import { CUSTOMER_SALES_SUMMARY_READER } from './customer-sales-summary.reader';
+import { PrismaCustomerSalesSummaryReader } from './customer-sales-summary.prisma-reader';
 import { SaleHoldController } from './sale-hold.controller';
 import { SaleHoldService } from './sale-hold.service';
 import { SaleHoldExpireService } from './sale-hold-expire.service';
@@ -96,6 +100,8 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     CollectionsController,
     // customers-listing T2 — GET /customers/:customerId/payments.
     CustomerPaymentsController,
+    // customers-listing T4 — GET /customers/:customerId/sales-summary.
+    CustomerSalesSummaryController,
   ],
   providers: [
     SalesService,
@@ -123,6 +129,12 @@ import { AdminPaymentMethodModule } from '../admin/payment-methods/admin-payment
     {
       provide: CUSTOMER_PAYMENTS_READER,
       useClass: PrismaCustomerPaymentsReader,
+    },
+    // customers-listing T4 — customer page KPI strip (listing metric rules).
+    CustomerSalesSummaryService,
+    {
+      provide: CUSTOMER_SALES_SUMMARY_READER,
+      useClass: PrismaCustomerSalesSummaryReader,
     },
     SaleHoldService,
     // pay-in-store-pickup / T2 — reminder and expiry sweep of the holds.

@@ -24,6 +24,12 @@ export interface CustomerProps {
   globalPriceListId: string | null;
   comments: string | null;
   preferredPaymentMethod: string | null;
+  /**
+   * «Cliente de confianza» (customers-listing T4, contract §6.1). Optional
+   * here so persistence-shaped literals written before the field existed stay
+   * valid; absent reads as the column default `false`.
+   */
+  isTrusted?: boolean;
 
   // Billing
   businessName: string | null;
@@ -53,6 +59,8 @@ export class Customer {
   public globalPriceListId: string | null;
   public comments: string | null;
   public preferredPaymentMethod: string | null;
+  private trusted: boolean;
+  private trustedDirty = false;
 
   public businessName: string | null;
   public fiscalZipCode: string | null;
@@ -80,6 +88,7 @@ export class Customer {
     this.globalPriceListId = props.globalPriceListId;
     this.comments = props.comments;
     this.preferredPaymentMethod = props.preferredPaymentMethod;
+    this.trusted = props.isTrusted ?? false;
     this.businessName = props.businessName;
     this.fiscalZipCode = props.fiscalZipCode;
     this.rfc = props.rfc;
@@ -94,6 +103,25 @@ export class Customer {
     this.billingState = props.billingState;
     this.createdAt = props.createdAt;
     this.updatedAt = props.updatedAt;
+  }
+
+  get isTrusted(): boolean {
+    return this.trusted;
+  }
+
+  /** Last write wins, like every other PATCH field; marks the field dirty. */
+  set isTrusted(value: boolean) {
+    this.trusted = value;
+    this.trustedDirty = true;
+  }
+
+  /**
+   * Whether `isTrusted` was set on this instance. The repository writes the
+   * column on update only then, so a save that never touched it (the chatbot
+   * customer upsert) cannot overwrite a concurrent `PATCH isTrusted`.
+   */
+  get isTrustedDirty(): boolean {
+    return this.trustedDirty;
   }
 
   static create(params: {
@@ -135,6 +163,7 @@ export class Customer {
       globalPriceListId: params.globalPriceListId ?? null,
       comments: params.comments?.trim() || null,
       preferredPaymentMethod: params.preferredPaymentMethod?.trim() || null,
+      isTrusted: false,
       businessName: params.businessName?.trim() || null,
       fiscalZipCode: params.fiscalZipCode?.trim() || null,
       rfc: params.rfc?.trim().toUpperCase() || null,
@@ -171,6 +200,7 @@ export class Customer {
       globalPriceListId: this.globalPriceListId,
       comments: this.comments,
       preferredPaymentMethod: this.preferredPaymentMethod,
+      isTrusted: this.trusted,
       businessName: this.businessName,
       fiscalZipCode: this.fiscalZipCode,
       rfc: this.rfc,
@@ -186,7 +216,19 @@ export class Customer {
     };
   }
 
+  /**
+   * Detail shape (`GET`/`PATCH`/`POST /customers[/:id]`): the list shape plus
+   * `isTrusted` (customers-listing T4, contract §6).
+   */
   toResponse() {
+    return { ...this.toListResponse(), isTrusted: this.trusted };
+  }
+
+  /**
+   * `GET /customers` item shape (the POS / checkout picker). Kept exactly as
+   * before T4: no `isTrusted` (contract §6, «GET /customers stays unchanged»).
+   */
+  toListResponse() {
     return {
       id: this.id,
       firstName: this.firstName,
