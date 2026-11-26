@@ -798,6 +798,7 @@ describeIfDb('«Cobrar todo» customer collection (PostgreSQL)', () => {
           },
         ],
       });
+      expect(res.status).toBe(404);
       expect(res.body.error).toBe('PAYMENT_METHOD_NOT_FOUND');
       expect(await moneyRows(e.tenantId)).toEqual(before);
     });
