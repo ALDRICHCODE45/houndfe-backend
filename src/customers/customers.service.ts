@@ -19,7 +19,7 @@ import { petNameKey } from '../customer-pets/domain/customer-pet-rules';
  * Prisma passes `contains` to `LIKE` as is, so `%`, `_` and `\` in a search
  * term would act as wildcards; escape them to match literally.
  */
-const escapeLike = (term: string) => term.replace(/[\\%_]/g, '\\$&');
+export const escapeLike = (term: string) => term.replace(/[\\%_]/g, '\\$&');
 
 @Injectable()
 export class CustomersService {

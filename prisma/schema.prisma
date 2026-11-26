@@ -1601,6 +1601,11 @@ model Sale {
   @@index([sellerUserId])
   @@index([customerId])
   @@index([shippingAddressId])
+  // Migration-only partial covering index (20261126110000_customers_listing_sales_index):
+  // `sales_tenant_customer_confirmed_idx` ("tenantId", "customerId") INCLUDE
+  // ("totalCents", "openDebtCents", "dueDate", "confirmedAt") WHERE status =
+  // 'CONFIRMED' AND "customerId" IS NOT NULL — the per-customer metrics of
+  // GET /customers/listing (src/customers/listing/customer-sales-metrics.sql.ts).
   @@map("sales")
 }
 
@@ -2226,6 +2231,9 @@ model CustomerAddress {
   updatedAt DateTime @updatedAt
 
   @@index([tenantId])
+  // customers-listing (20261126110000_customers_listing_sales_index): the oldest
+  // (primary) address of each GET /customers/listing row.
+  @@index([tenantId, customerId, createdAt, id], map: "customer_addresses_tenant_customer_created_idx")
   @@map("customer_addresses")
 }
 
