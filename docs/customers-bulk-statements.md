@@ -69,7 +69,7 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 | Run time | **120 s** per download (server deadline): after that → `503 BULK_EXPORT_TIMEOUT` (§5) |
 
 - More than 50 resolved customers → `400 BULK_SELECTION_TOO_LARGE` before anything is rendered. Disable the button when `N > 50` («Máximo 50 clientes por descarga»), where N = selected rows, or `filterSummary.count − unticked` for «todos los del filtro».
-- The request is **synchronous**: PDFs are rendered one at a time. Measured with the real PDF engine: ≈ 50 ms for a statement with no movements, ≈ 180 ms median / ≈ 210 ms p95 for one with 20 sales and 10 payments (≈ 35 KB each). 50 statements → roughly 3–11 s. Show a spinner and do not set a client timeout under ~30 s (the server gives up at 120 s anyway).
+- The request is **synchronous**: PDFs are rendered one at a time. Measured with the real PDF engine: ≈ 50 ms for a statement with no movements, ≈ 180 ms median / ≈ 210 ms p95 for one with 20 sales and 10 payments (≈ 35 KB each). 50 full statements ≈ 9–10 s (benchmark). Show a spinner and do not set a client timeout under ~30 s (the server gives up at 120 s anyway).
 
 ### 4.1 Known limits (by design)
 

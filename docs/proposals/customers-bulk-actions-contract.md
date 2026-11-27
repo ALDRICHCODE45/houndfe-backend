@@ -1,6 +1,8 @@
-# Customers table bulk actions (statement PDFs + CSV export) — contract proposal v0
+# Customers table bulk actions (statement PDFs + CSV export) — contract v1
 
-Status: **v0 PROPOSAL — not approved, not implemented.** Nothing in this document exists in the code yet unless it is marked **EXISTS**.
+Status: **v1 APPROVED (owner OK 2026-11-27) and IMPLEMENTED on `feat/customers-bulk-actions`.** Commits: 08795da8 (contract v0), 1ab4920b (in-repo ZIP writer and safe file names), bafb6c29 (selection + CSV export behind `export:Customer` + CORS `Content-Disposition`), 9946d2f5 (reserved filter keys → 400, denied-export log line, CORS `exposedHeaders` merge), 7047c129 (bulk statements ZIP); **e55240d0 advisory follow-up** for the T3 fixes (per-run deadline with a new timeout error code, quiet client-abort handling). Task: `odd/tasks/customers-bulk-actions.md`. Frontend handoff: `docs/frontend-handoff/32-customers-bulk-actions.md`. Route guides: `docs/customers-bulk-export.md`, `docs/customers-bulk-statements.md`.
+
+The owner / frontend answers (§0.1) override the v0 text. The sections below were corrected to match the committed code; where the code and this document differ, **the code wins**. §1 and the Evidence appendix still describe `main` 34b209a9, before the implementation (for example «there is no `export` action» and «CORS exposes no headers» are no longer true).
 
 - Requested by the frontend on 2026-11-27, relaying the owner: «acciones masivas en la tabla de clientes». The user selects customers with a checkbox per row or with «todos los del filtro». Two actions then appear: **Estados de cuenta PDF** and **Exportar CSV**.
 - Builds on `docs/proposals/customers-list-contract.md` (v1, implemented) and `docs/frontend-handoff/31-customers-module.md`, and on the single statement PDF of `docs/frontend-handoff/29-customer-statement-pdf.md`.
@@ -12,7 +14,33 @@ Legend:
 - **EXISTS** = in the code today.
 - **NEW** = proposed here.
 
-Every change is additive. No existing route, shape or error changes. **No migration** in the recommended v0.
+Every change is additive. No existing route, shape or error changes. **No migration**: the new `export:Customer` permission row is upserted by the permission seeder on boot.
+
+## 0.1 v0 → v1 changes / resolved decisions
+
+Answers to §12 (owner relayed by the frontend, 2026-11-27, task log L2–L5):
+
+| Q | Answer | v1 effect |
+|---|---|---|
+| Q1 | Owner: «Los topes alcanzan: 50 PDFs por descarga y 10.000 filas por CSV.» | Caps unchanged: 50 statements, 10,000 CSV rows. No async job, no streaming |
+| Q2 | Owner: «ZIP con un PDF por cliente.» | ZIP (§3.2) |
+| Q3 | Frontend: «sí, nombre del cliente en cada archivo del ZIP, saneado para nombres de archivo y con desambiguación si dos clientes se llaman igual.» | Entry name = customer name, UTF-8, disambiguated (§3.2, replaces the v0 `estado-de-cuenta-<nombre>-<id8>-…` ASCII pattern) |
+| Q4 (permission) | Owner first answered «El CSV sale con read:Customer, sin permiso propio…», then **corrected it verbatim: «Nonono, perdon, exportar datos de clientes debe ser un permiso nuevo especial.»** | NEW permission `export:Customer` («Exportar datos de clientes (CSV)»), seeded, assignable in Admin → Roles. Checked as an **explicit** row: `manage:Customer` does **not** imply it; `manage:all` (Super Admin) does. Without it → `403`. Metric columns still need `read:Sale`. Bulk statements unchanged (`read:Sale` + `read:Customer`) |
+| Q4 (audit) | Owner: «Por ahora no, pero dejalo anotado para platicarlo despues» | **No audit table.** One structured log line per request (§5.1). **FUTURE item:** persisted export audit table, to discuss with the owner later |
+| Q5 | Owner: «Sí, incluí a los clientes sin movimientos, porque el PDF muestra su deuda actual.» | Included; no `skipInactive` flag |
+| Q6 | Owner: «Asumimos Excel en es-MX y mantenemos el truco `="03100"` para el CP.» | Comma separator, `="03100"` CP kept |
+| Q7 | Frontend: «tu decisión técnica. Si el ZIP propio queda bien testeado, va sin dependencia nueva.» | In-repo ZIP writer, no dependency (§3.6), with DEFLATE + store fallback |
+| Q8 | Frontend: «las columnas están bien.» | 28 columns of §4.3 unchanged |
+| Q9 | Frontend: «exponé `Content-Disposition` en CORS (`exposedHeaders`).» | `Content-Disposition` is in `Access-Control-Expose-Headers` on every route (editorial routes keep their own list; caller-configured `exposedHeaders` are merged). Only that header is exposed — **`Retry-After` is not**, so a cross-origin client reads `details.retryAfterSeconds` of the 429 body |
+| Q10 | Frontend: «404 estricto con la lista de ids faltantes.» | Strict 404, ids in **`details.missingIds`** (v0 said `details.customerIds`) |
+
+Other changes found during implementation:
+
+- **Reserved filter keys:** an own `__proto__` / `constructor` / `prototype` key inside `selection.filter` → `400` (same body as any unknown param), on both routes. Known gap: the global validation pipe silently strips such keys at the **top level of the body or of `selection`** (outside `filter`), so they are ignored instead of rejected.
+- **Bulk statements guard order:** the one-run-per-process check happens **before** the selection is resolved, so during another run even a request with a bad `filter` value gets `429`, not the `400`.
+- **One run per replica, across tenants:** the busy slot is an in-memory singleton, by design.
+- **Measured:** 10,000 CSV rows with metrics ≈ 1.1 s, ≈ 1.1 MB. Statements: ≈ 50 ms for an empty statement, ≈ 180 ms median / ≈ 210 ms p95 for 20 sales + 10 payments (≈ 35 KB each); a run of 50 full statements ≈ 9–10 s. Below the 400 ms p95 gate of §3.3, so the cap stays 50 in-process.
+- **Pending (advisory follow-up):** a per-run deadline for bulk statements with a new timeout error code, and quiet handling of client aborts.
 
 ## 0. Requests and disposition
 
@@ -106,7 +134,7 @@ The resolved count (after the filter and the exclusions) is checked against the 
 
 ### 2.4 Unknown, foreign or deleted ids (ids mode)
 
-**Decision: strict.** If any id in `customerIds` is not a customer of the caller's branch, the request fails with `404 BULK_CUSTOMERS_NOT_FOUND` and `details.customerIds` lists the missing ids (all of them, at most 1,000). Nothing is generated.
+**Decision: strict.** If any id in `customerIds` is not a customer of the caller's branch, the request fails with `404 BULK_CUSTOMERS_NOT_FOUND` and `details.missingIds` lists the missing ids (all of them, at most 1,000). Nothing is generated.
 
 - A foreign id and a deleted id look the same (tenant isolation, and customers are hard-deleted, E32). This reveals nothing beyond what `GET /customers/:id` already answers with 404 (E1).
 - Why not skip silently: the user asked for 30 statements and would receive 29 without noticing. That is worse than one retry. The frontend removes the listed ids from the selection, tells the user («N clientes ya no existen y se quitaron de la selección»), and resends.
@@ -151,12 +179,14 @@ The whole ZIP is built in memory before the first byte is sent, like every PDF r
 **Entries:**
 
 - One entry per resolved customer, sorted by name (`lower(firstName)`, `lower(lastName)`, `id`), the listing `name` order.
-- Entry name: `estado-de-cuenta-<nombre>-<id8>-<from>-<to>.pdf`.
-  - `<nombre>` = `businessName` when present, else `firstName lastName`. It is folded to ASCII (accents removed), lower-cased, every run of characters outside `[a-z0-9]` becomes `-`, trimmed of `-`, and cut to 40 characters. Empty result → `cliente`.
-  - `<id8>` = the first 8 characters of the customer id. It keeps names unique (two «Ana López») and lets support find the customer.
-  - Example: `estado-de-cuenta-ana-lopez-3f2a9c1e-2026-11-01-2026-12-01.pdf`.
-  - The single route keeps a user-data-free name because it goes into a response header (E7). Entry names are not headers, and the user needs to tell 50 files apart. The sanitization keeps them ASCII and path-safe (no `/`, no `..`). Q3 asks the owner to confirm names in filenames.
-- No manifest or index file in v0.
+- **v1 (frontend Q3):** entry name = the customer name `«firstName lastName».pdf` (trimmed; `businessName` is **not** used), e.g. `Ana López.pdf`. Implemented in `src/sales/customer-bulk-statements.naming.ts` + `src/shared/zip/safe-file-name.ts`:
+  - NFC-normalized; accents and `ñ` kept; `< > : " / \ | ? *` → `-`; tabs/newlines → space, runs of whitespace collapsed; C0/C1 controls, zero-width and bidi characters removed; leading/trailing dots and spaces trimmed; Windows reserved stems (`CON`, `NUL`, `COM1`, …) get `_`; at most 100 code points.
+  - Equal names (case-insensitive, on the final file name) are disambiguated in ZIP order: `Ana López.pdf`, `Ana López (2).pdf`, `Ana López (3).pdf`.
+  - Nothing usable left → `cliente-<first 8 characters of the id>.pdf`.
+  - Names are UTF-8 with the ZIP UTF-8 flag (general-purpose bit 11).
+  - The ZIP file name stays user-data-free because it goes into a response header (E7): `estados-de-cuenta-<from>-<to>.zip`.
+- Entry timestamps: the business-timezone wall time of the download.
+- No manifest or index file.
 
 ### 3.3 Synchronous, at most 50 customers
 
@@ -198,16 +228,13 @@ The single statement route is unchanged. For one customer, the frontend keeps us
 
 ### 3.6 ZIP writer
 
-There is no ZIP library in the repo (E19). **Recommendation: a small in-repo, store-only ZIP writer** (no compression), about 120 lines plus tests:
+**v1 (implemented, `src/shared/zip/zip-writer.ts`, commit 1ab4920b):** an in-repo in-memory ZIP writer, no new dependency (frontend Q7):
 
-- local file headers, central directory and end-of-central-directory record;
+- local file headers, central directory and end-of-central-directory record; no data descriptors, comments or extra fields;
 - CRC-32 from Node's built-in `zlib.crc32` (Node 24 in the image, E19);
-- ASCII entry names (§3.2), so no UTF-8 flag is needed;
-- no Zip64: 50 entries and a few MB are far below the 65,535-entry and 4 GB limits.
-
-Store-only is enough because PDF content streams are usually already compressed. That is **not verified** for `@react-pdf/renderer` output (§11). If it turns out uncompressed, `zlib.deflateRawSync` per entry is a small addition.
-
-The alternative is a dependency (`archiver`, `yazl`). That is a dependency change, so it needs owner approval (Q7).
+- **DEFLATE** (`zlib.deflateRawSync`) per entry when requested, **falling back to STORE** for an entry when deflate does not make it smaller; the bulk statements request DEFLATE;
+- **UTF-8 entry names** (flag bit 11), NFC-normalized; duplicate or unsafe names are rejected (`ZipBuildError`);
+- no Zip64: at most 65,535 entries and 32-bit sizes/offsets, far above 50 entries and a few MB.
 
 ### 3.7 Deferred: async job design (not in v0)
 
@@ -226,7 +253,7 @@ Written down so the owner can compare. Build it only if 50 per request turns out
 
 ### 4.1 Route
 
-`POST /customers/bulk/export`, permission `read:Customer`. `read:Sale` adds the metric columns (§5).
+`POST /customers/bulk/export`, permissions `read:Customer` **and** `export:Customer` (v1, owner correction). `read:Sale` adds the metric columns (§5).
 
 ```json
 {
@@ -320,7 +347,7 @@ Metric columns (**only with `read:Sale`**, appended after column 20):
 
 ### 4.4 Permission behavior
 
-- Route guard: `read:Customer`.
+- Route guard: `read:Customer` + `export:Customer` (the latter as an explicit row or `manage:all`, §5).
 - The service branches on `request.ability.can('read', 'Sale')` like the listing (E20, E21):
   - with it: metric columns, metric filters and metric sorts allowed;
   - without it: no metric columns. A metric param in `filter`, or a metric `sortBy` → `400 LISTING_PARAM_REQUIRES_PERMISSION`, the same body as the listing, `field` = the listing param name (no `filter.` prefix). A stale «todos los del filtro» selection fails visibly, as a stale saved view does in the table.
@@ -344,14 +371,18 @@ Metric columns (**only with `read:Sale`**, appended after column 20):
 | Route | Route guard (all pairs required, E30) | Data branch |
 |---|---|---|
 | `POST /customers/bulk/statements` | `read:Sale` + `read:Customer` | — |
-| `POST /customers/bulk/export` | `read:Customer` | `read:Sale` adds the metric columns and allows metric params (§4.4) |
+| `POST /customers/bulk/export` | `read:Customer` + **`export:Customer`** (v1) | `read:Sale` adds the metric columns and allows metric params (§4.4) |
 
 - **Statements need both.** `read:Sale` is the single statement's permission (E1). `read:Customer` is needed because the selection comes from the customer table, and filter mode evaluates the customer listing (`read:Customer`, E20). Since `read:Sale` is always present here, metric filters never raise `LISTING_PARAM_REQUIRES_PERMISSION` on this route.
-- **No new permission.** There is no `export` action today (E31). Exporting the table is reading it in bulk, so `read:Customer` gates it like the table. If the owner wants a separate «Exportar clientes» permission, it is a new action in the permission registry (Q4).
+- **v1: new special permission `export:Customer`** (owner: «Nonono, perdon, exportar datos de clientes debe ser un permiso nuevo especial.»). New action `export` in `AppActions`; registry row `export:Customer` «Exportar datos de clientes (CSV)» (`src/auth/authorization/domain/permission.ts`), upserted by the permission seeder on boot (no migration). Not granted to the seeded Manager / Cashier roles.
+  - CASL `manage` is a wildcard, so the route guard alone would let `manage:Customer` through. The controller additionally requires an **explicit** `export:Customer` rule or `manage:all` (`src/customers/bulk/customer-export.permission.ts`). So **`manage:Customer` does NOT imply export; `manage:all` (Super Admin) does.** A `manage:Customer`-only caller gets the standard `403 INSUFFICIENT_PERMISSIONS` and a `forbidden` log line.
+  - Roles that hold `manage:Customer` today cannot export until `export:Customer` is granted in Admin → Roles.
 
 ### 5.1 Audit
 
-The repo has no audit pattern for exports or reads (E17). v0 writes **one structured log line per request**: action, tenant id, user id, selection mode, resolved count, `from`/`to` or sort, duration and outcome. No customer data and no ids are logged. A persisted audit table is out of v0 (Q4).
+The repo has no audit pattern for exports or reads (E17). v1 writes **one structured log line per request** (`customers.bulk.export` / `customers.bulk.statements`): tenant id, user id, selection mode, count, sort or `from`/`to`, size, durations and outcome (`ok`, `rejected`, `forbidden`; statements also `busy`, `aborted`, `failed`) with the error code. No customer data and no ids are logged.
+
+**FUTURE item (owner: «Por ahora no, pero dejalo anotado para platicarlo despues»):** a persisted export audit table (who exported what, when). Not built; to discuss with the owner later.
 
 ## 6. Limits summary
 
@@ -360,42 +391,43 @@ The repo has no audit pattern for exports or reads (E17). v0 writes **one struct
 | `customerIds`, `excludeIds` | ≤ 1,000 each |
 | Statement customers per request | 1–50 |
 | Statement period | 1–366 days, `[from, to)` |
-| Concurrent bulk statement runs | 1 per process (`429` otherwise) |
+| Concurrent bulk statement runs | 1 per process / replica, across all tenants (`429` otherwise) |
 | CSV rows per request | ≤ 10,000 (0 allowed) |
 | Request body | Nest's default JSON limit (100 KB per the framework default; not set in the repo, E34) |
 | Rate limit | none beyond the busy guard (no app-wide throttler, E33) |
 
 ## 7. Errors
 
-The checks run in this order: body and `filter` validation → permission params → selection resolution → size → generation.
+The checks run in this order: route permissions → reserved `filter` keys → body shape → (statements: busy check) → `filter` validation → permission params → selection resolution → size → generation. (v1: the statements busy check runs before the `filter` is validated.)
 
 | HTTP | Body / code | When | Route |
 |---|---|---|---|
-| 400 | standard per-field validation body | `selection` missing; `mode` not `ids`/`filter`; keys of the other mode; `customerIds` empty, > 1,000 or non-UUID; `excludeIds` > 1,000 or non-UUID; unknown body key; `page`/`limit`/`sortBy`/`sortOrder` inside `filter`; `from`/`to` missing, malformed, `to <= from` or > 366 days; bad `sortBy`/`sortOrder` | both |
+| 400 | standard per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing; `mode` not `ids`/`filter`; keys of the other mode; `customerIds` empty, > 1,000 or non-UUID; `excludeIds` > 1,000 or non-UUID; unknown body key; `page`/`limit`/`sortBy`/`sortOrder`, an unknown param (incl. `__proto__`/`constructor`/`prototype`) or a non-string value inside `filter`; `from`/`to` missing, malformed, `to <= from` or > 366 days; bad `sortBy`/`sortOrder` | both |
 | 400 | `LISTING_INVALID_ENUM_VALUE`, `LISTING_TOO_MANY_VALUES`, `LISTING_INVALID_UUID`, `LISTING_INVALID_NUMBER`, `LISTING_INVALID_DATE`, `LISTING_INVERTED_RANGE` (EXISTS, E29) | a bad value inside `filter`, same rules and `field` names as the listing | both |
 | 400 | `LISTING_PARAM_REQUIRES_PERMISSION` (EXISTS, E22) | metric filter in `filter` or metric `sortBy` without `read:Sale` | export |
 | 400 | **NEW** `BULK_SELECTION_TOO_LARGE`, `details: { count, max }` | resolved customers > 50 (statements) or > 10,000 (export) | both |
 | 400 | **NEW** `BULK_SELECTION_EMPTY` | the selection resolves to 0 customers | statements |
-| 403 | `INSUFFICIENT_PERMISSIONS` | a route permission missing (§5) | both |
-| 404 | **NEW** `BULK_CUSTOMERS_NOT_FOUND`, `details: { customerIds: [...] }` | ids mode: an id is unknown, foreign or deleted (§2.4); or deleted mid-run (§3.5) | both |
+| 403 | `INSUFFICIENT_PERMISSIONS` (domain body, code in `error`) | a route permission missing (§5); export: `manage:Customer` without the explicit `export:Customer` | both |
+| 404 | **NEW** `BULK_CUSTOMERS_NOT_FOUND`, `details: { missingIds: [...] }` | ids mode: an id is unknown, foreign or deleted (§2.4); or deleted mid-run (§3.5) | both |
 | 413 | framework body | body over the JSON limit (not reachable within the caps) | both |
-| 429 | **NEW** `BULK_EXPORT_BUSY` + `Retry-After: 10` | another bulk statement run is in progress (§3.3) | statements |
-| 500 | `PDF_GENERATION_FAILED` (EXISTS, E6) | any statement failed to render; nothing sent | statements |
+| 429 | **NEW** `BULK_EXPORT_BUSY`, `details: { retryAfterSeconds: 10 }`, header `Retry-After: 10` (not CORS-exposed) | another bulk statement run is in progress on this process (§3.3) | statements |
+| 500 | `PDF_GENERATION_FAILED` (EXISTS, E6; Nest body, code in `message`) | any statement failed to render; nothing sent | statements |
+| 503 | `BULK_EXPORT_TIMEOUT` `{deadlineSeconds: 120}` | a bulk statements run exceeds its 120 s deadline (slot freed at once) | statements |
 
-The new codes use the listing envelope `{ statusCode, code, message, field, details? }` (E29), with `field: "selection"` (or `"customerIds"` for the 404).
+The new `BULK_*` selection codes use the listing envelope `{ statusCode, code, message, field, details? }` (E29), with `field: "selection"` (or `"customerIds"` for the 404). `BULK_EXPORT_BUSY` has no `field`.
 
 ```json
 { "statusCode": 400, "code": "BULK_SELECTION_TOO_LARGE", "message": "selection resolves to 73 customers; max 50", "field": "selection", "details": { "count": 73, "max": 50 } }
 ```
 
 ```json
-{ "statusCode": 404, "code": "BULK_CUSTOMERS_NOT_FOUND", "message": "2 customers not found", "field": "customerIds", "details": { "customerIds": ["uuid-a", "uuid-b"] } }
+{ "statusCode": 404, "code": "BULK_CUSTOMERS_NOT_FOUND", "message": "2 customers not found", "field": "customerIds", "details": { "missingIds": ["uuid-a", "uuid-b"] } }
 ```
 
 ## 8. Module placement
 
-- **Selection resolver + CSV export:** customers module, next to the listing (`src/customers/listing/`). It reuses `CustomersListingQueryDto` rules, the SQL builder and the reader (E23–E25). A new controller is registered before `CustomersController`, as the listing controller is (E20). `bulk` is not a UUID, so the `:id` routes would reject it anyway.
-- **Bulk statements:** controller registered in `PdfGenerationModule`, like the single statement (E1, E9). `CustomersModule` exports the selection resolver, and `PdfGenerationModule` imports `CustomersModule`. `CustomersModule` imports only `AuthModule` and nothing imports it except `AppModule` (E39), so this adds no cycle.
+- **Selection resolver + CSV export:** customers module, in `src/customers/bulk/` (v1), next to the listing. It reuses `CustomersListingQueryDto` rules, the SQL builder and the reader (E23–E25). A new controller is registered before `CustomersController`, as the listing controller is (E20). `bulk` is not a UUID, so the `:id` routes would reject it anyway.
+- **Bulk statements:** controller and service in `src/sales/customer-bulk-statements*` (v1), registered in `PdfGenerationModule`, like the single statement (E1, E9). `CustomersModule` exports the selection resolver, and `PdfGenerationModule` imports `CustomersModule`. `CustomersModule` imports only `AuthModule` and nothing imports it except `AppModule` (E39), so this adds no cycle.
 
 ## 9. Recommended UI flow
 
@@ -403,6 +435,7 @@ The new codes use the listing envelope `{ statusCode, code, message, field, deta
 2. **Statements:** disable the button when N > 50, with «Máximo 50 clientes por descarga». Ask for the period (presets → `from`/`to`). Show a spinner (expect up to ~15 s). On `429`, retry after `Retry-After` and show «Otra descarga en curso». On `404 BULK_CUSTOMERS_NOT_FOUND`, drop the ids and offer to retry.
 3. **CSV:** send the current filter and sort. Disable when N > 10,000. Save the blob as `clientes-<fecha>.csv`.
 4. Without `read:Sale`: hide «Estados de cuenta». The CSV omits the metric columns; tell the user if useful.
+5. v1: hide «Exportar CSV» unless the user holds `export:Customer` (or `manage:all`); `manage:Customer` alone is not enough. Read the file name from `Content-Disposition` (CORS-exposed). On `429` use `details.retryAfterSeconds` (the `Retry-After` header is not CORS-exposed). Full flow: handoff 32.
 
 ## 10. Size and risk
 
@@ -430,6 +463,8 @@ WU1 comes first. WU2 → WU3 and WU4 → WU5 are independent of each other after
 
 ## 11. Not verified
 
+v1 status: render time and size were **measured** (§0.1); the ZIP writer deflates with a store fallback, so PDF compression no longer matters; nested `filter` errors keep the plain listing param names (`parseCustomerBulkFilter`). Still not verified: replicas / proxy timeouts, Excel on a real es-MX Windows PC, real branch sizes. The v0 list follows.
+
 - **Render time and size per statement:** no measurement exists in the repo. The 100–300 ms and 50–150 KB figures are estimates; §3.3 makes measuring them a gate.
 - **Whether `@react-pdf/renderer` output is already compressed** (affects the store-only ZIP, §3.6).
 - **Number of API replicas** in Dokploy, and any reverse-proxy timeout. The deploy checklist mentions Dokploy but not replicas or timeouts. A proxy timeout under ~30 s would break the statements request.
@@ -438,6 +473,8 @@ WU1 comes first. WU2 → WU3 and WU4 → WU5 are independent of each other after
 - **Branch size:** the 10,000-row cap assumes branches well under that. The real customer count is unknown here (Q1).
 
 ## 12. Open questions
+
+**All answered (2026-11-27), see §0.1.** Kept for the record.
 
 1. **[OWNER]** How many customers do you usually want at once? Is **50 statements per download** enough (for example, «todos los que deben»)? Is **10,000 rows** per CSV enough? Above that, the async job of §3.7 (statements) or streaming (CSV) would be needed.
 2. **[OWNER]** **ZIP with one PDF per customer** (proposed), or do you mainly print them all, so that **one merged PDF** is worth a later extra?
