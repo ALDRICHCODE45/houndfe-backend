@@ -30,6 +30,11 @@ import { TenantsModule } from '../tenants/tenants.module';
 import { SalesCustomerStatementController } from '../sales/sales-customer-statement.controller';
 import { CustomerStatementService } from '../sales/customer-statement.service';
 import { CollectionReceiptPdfController } from '../sales/collection-receipt-pdf.controller';
+import { CustomersModule } from '../customers/customers.module';
+import { CustomerBulkSelectionResolver } from '../customers/bulk';
+import { CustomerBulkStatementsController } from '../sales/customer-bulk-statements.controller';
+import { CustomerBulkStatementsService } from '../sales/customer-bulk-statements.service';
+import { CustomerBulkStatementsRunGuard } from '../sales/customer-bulk-statements.busy-guard';
 
 describe('PdfGenerationModule', () => {
   it('registers PdfGenerationService as a provider', () => {
@@ -150,5 +155,40 @@ describe('PdfGenerationModule', () => {
     expect(
       Reflect.getMetadata(PATH_METADATA, CollectionReceiptPdfController),
     ).toBe('collections/:collectionId/pdf');
+  });
+
+  // customers-bulk-actions / T3 (S5) — POST /customers/bulk/statements. Same
+  // placement as the single statement; the selection resolver comes from
+  // CustomersModule, which imports only AuthModule (no cycle).
+  describe('bulk statements route (customers-bulk-actions S5)', () => {
+    const meta = (key: string, module: object) =>
+      (Reflect.getMetadata(key, module) ?? []) as unknown[];
+
+    it('registers the bulk statements controller, service and run guard here, not in SalesModule', () => {
+      expect(meta(MODULE_METADATA.CONTROLLERS, PdfGenerationModule)).toContain(
+        CustomerBulkStatementsController,
+      );
+      expect(meta(MODULE_METADATA.CONTROLLERS, SalesModule)).not.toContain(
+        CustomerBulkStatementsController,
+      );
+      expect(meta(MODULE_METADATA.PROVIDERS, PdfGenerationModule)).toEqual(
+        expect.arrayContaining([
+          CustomerBulkStatementsService,
+          CustomerBulkStatementsRunGuard,
+        ]),
+      );
+    });
+
+    it('imports CustomersModule (selection resolver); CustomersModule imports neither this module nor SalesModule', () => {
+      expect(meta(MODULE_METADATA.IMPORTS, PdfGenerationModule)).toContain(
+        CustomersModule,
+      );
+      expect(meta(MODULE_METADATA.EXPORTS, CustomersModule)).toContain(
+        CustomerBulkSelectionResolver,
+      );
+      const customersImports = meta(MODULE_METADATA.IMPORTS, CustomersModule);
+      expect(customersImports).not.toContain(PdfGenerationModule);
+      expect(customersImports).not.toContain(SalesModule);
+    });
   });
 });

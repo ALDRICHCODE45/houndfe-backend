@@ -46,20 +46,42 @@ import { PdfGenerationController } from './pdf-generation.controller';
 import { PdfGenerationService } from './pdf-generation.service';
 import { SalesCustomerStatementController } from '../sales/sales-customer-statement.controller';
 import { CollectionReceiptPdfController } from '../sales/collection-receipt-pdf.controller';
+import { CustomersModule } from '../customers/customers.module';
+import { CustomerBulkStatementsController } from '../sales/customer-bulk-statements.controller';
+import { CustomerBulkStatementsService } from '../sales/customer-bulk-statements.service';
+import { CustomerBulkStatementsRunGuard } from '../sales/customer-bulk-statements.busy-guard';
 
 @Module({
-  imports: [AuthModule, SalesModule, TenantsModule, CashRegisterModule],
-  providers: [PdfGenerationService, CashClosingPdfService],
+  // customers-bulk-actions / T3 — CustomersModule exports the bulk selection
+  // resolver; it imports only AuthModule, so no module cycle.
+  imports: [
+    AuthModule,
+    SalesModule,
+    TenantsModule,
+    CashRegisterModule,
+    CustomersModule,
+  ],
+  providers: [
+    PdfGenerationService,
+    CashClosingPdfService,
+    // customers-bulk-actions / T3 — `POST /customers/bulk/statements`; the
+    // run guard is a singleton: one bulk statements run per process.
+    CustomerBulkStatementsService,
+    CustomerBulkStatementsRunGuard,
+  ],
   // sales-history-redesign S11 — `GET /customers/:customerId/statement/pdf`
   // lives in src/sales but is registered here: this module already imports
   // SalesModule (which exports CustomerStatementService), so no module cycle.
   // customer-collection / T3 — `GET /collections/:collectionId/pdf`, same
   // pattern (SalesModule exports CollectionReadService).
+  // customers-bulk-actions / T3 — `POST /customers/bulk/statements`, same
+  // pattern (+ CustomersModule for the selection resolver).
   controllers: [
     PdfGenerationController,
     CashClosingPdfController,
     SalesCustomerStatementController,
     CollectionReceiptPdfController,
+    CustomerBulkStatementsController,
   ],
   exports: [PdfGenerationService],
 })

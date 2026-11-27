@@ -48,12 +48,14 @@ export class SalesCustomerStatementController {
     @Query() query: CustomerStatementQueryDto,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
-    const statement = await this.statementService.getStatement(
+    const pdf = await renderCustomerStatementPdfFor(
+      {
+        statementService: this.statementService,
+        pdfGenerationService: this.pdfGenerationService,
+      },
       customerId,
       query,
     );
-    const pdf =
-      await this.pdfGenerationService.renderCustomerStatementPdf(statement);
 
     res.set({
       'Content-Type': 'application/pdf',
@@ -65,6 +67,28 @@ export class SalesCustomerStatementController {
     });
     res.send(pdf);
   }
+}
+
+/**
+ * The one "statement PDF for a customer and period" path: snapshot read
+ * (`404 CUSTOMER_NOT_FOUND` for an unknown / foreign customer) then render
+ * (`500 PDF_GENERATION_FAILED`). Shared by this route and the bulk statements
+ * ZIP (customers-bulk-actions / T3), so every ZIP entry is what this route
+ * returns for the same customer and period.
+ */
+export async function renderCustomerStatementPdfFor(
+  deps: {
+    statementService: CustomerStatementService;
+    pdfGenerationService: PdfGenerationService;
+  },
+  customerId: string,
+  range: Pick<CustomerStatementQueryDto, 'from' | 'to'>,
+): Promise<Buffer> {
+  const statement = await deps.statementService.getStatement(customerId, {
+    from: range.from,
+    to: range.to,
+  });
+  return deps.pdfGenerationService.renderCustomerStatementPdf(statement);
 }
 
 /** Fixed, user-data-free filename; every component is re-sanitized here. */
