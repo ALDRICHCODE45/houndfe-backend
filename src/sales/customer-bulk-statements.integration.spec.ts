@@ -110,6 +110,8 @@ describeIfDb('POST /customers/bulk/statements (PostgreSQL)', () => {
   /** When set, every render waits for it (concurrency test). */
   let gate: Promise<void> | null = null;
   let renderStarted: (() => void) | null = null;
+  /** Releases `gate`; also called in `afterEach` so nothing stays pending. */
+  let releaseGate: (() => void) | null = null;
 
   beforeAll(async () => {
     // Real render method without `onModuleInit` (no font CDN preflight).
@@ -188,6 +190,8 @@ describeIfDb('POST /customers/bulk/statements (PostgreSQL)', () => {
   });
 
   afterEach(async () => {
+    releaseGate?.();
+    releaseGate = null;
     renderMs.length = 0;
     gate = null;
     renderStarted = null;
@@ -492,14 +496,24 @@ describeIfDb('POST /customers/bulk/statements (PostgreSQL)', () => {
       from: FROM,
       to: TO,
     });
+    const forbidden = {
+      statusCode: 403,
+      error: 'INSUFFICIENT_PERMISSIONS',
+      message: 'Insufficient permissions',
+      timestamp: expect.any(String) as unknown,
+    };
     const r1 = await bulk(
       noSale,
       payload(await customer(noSale, 'Ana')),
     ).expect(403);
-    expect(r1.body.code ?? r1.body.error).toBeDefined();
-    await bulk(noCustomer, payload(await customer(noCustomer, 'Ana'))).expect(
-      403,
-    );
+    expect(r1.body).toEqual(forbidden);
+    expect(r1.headers['content-disposition']).toBeUndefined();
+    const r2 = await bulk(
+      noCustomer,
+      payload(await customer(noCustomer, 'Ana')),
+    ).expect(403);
+    expect(r2.body).toEqual(forbidden);
+    expect(r2.headers['content-disposition']).toBeUndefined();
     expect(renderMs).toHaveLength(0);
   });
 
@@ -511,23 +525,25 @@ describeIfDb('POST /customers/bulk/statements (PostgreSQL)', () => {
       from: FROM,
       to: TO,
     };
-    let release!: () => void;
-    gate = new Promise<void>((resolve) => (release = resolve));
+    gate = new Promise<void>((resolve) => (releaseGate = resolve));
     const started = new Promise<void>((resolve) => (renderStarted = resolve));
 
     const first = bulkZip(b, payload).then((res) => res);
-    await started;
+    try {
+      await started;
 
-    const busy = await bulk(b, payload).expect(429);
-    expect(busy.headers['retry-after']).toBe('10');
-    expect(busy.body).toEqual({
-      statusCode: 429,
-      code: 'BULK_EXPORT_BUSY',
-      message: 'another bulk statements download is in progress; retry later',
-      details: { retryAfterSeconds: 10 },
-    });
-
-    release();
+      const busy = await bulk(b, payload).expect(429);
+      expect(busy.headers['retry-after']).toBe('10');
+      expect(busy.body).toEqual({
+        statusCode: 429,
+        code: 'BULK_EXPORT_BUSY',
+        message: 'another bulk statements download is in progress; retry later',
+        details: { retryAfterSeconds: 10 },
+      });
+    } finally {
+      // A failing assertion must not leave the first run (and the suite) hanging.
+      releaseGate?.();
+    }
     expect((await first).status).toBe(200);
 
     gate = null;

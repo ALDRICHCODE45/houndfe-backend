@@ -55,7 +55,7 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
   - Equal names (case-insensitive) are disambiguated in ZIP order: `Ana López.pdf`, `Ana López (2).pdf`, `Ana López (3).pdf`.
   - A name with nothing usable left → `cliente-<first 8 characters of the customer id>.pdf`.
   - Names are UTF-8 (ZIP flag set); Windows 10+ Explorer, macOS and `unzip` show them correctly.
-- File dates inside the ZIP are the business local time of the download.
+- File dates inside the ZIP are the business local time of the download, whatever the server time zone is. Known limit: the ZIP format stores a local wall time and the in-repo writer encodes it from the server's local clock, so a download whose business time falls in the **server's** spring-forward hour (only possible on a server whose `TZ` observes DST; never with `TZ=UTC`) gets file dates one hour later. The PDFs are not affected.
 - Entries are deflate-compressed when that makes them smaller.
 
 ## 4. Limits and timing
@@ -66,9 +66,15 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 | Customers per ZIP | **1–50** (owner L2.1) |
 | Period | 1–366 days |
 | Concurrent bulk statement downloads | **1 per server process**: a second one → `429` (§5) |
+| Run time | **120 s** per download (server deadline): after that → `503 BULK_EXPORT_TIMEOUT` (§5) |
 
 - More than 50 resolved customers → `400 BULK_SELECTION_TOO_LARGE` before anything is rendered. Disable the button when `N > 50` («Máximo 50 clientes por descarga»), where N = selected rows, or `filterSummary.count − unticked` for «todos los del filtro».
-- The request is **synchronous**: PDFs are rendered one at a time. Measured with the real PDF engine: ≈ 50 ms for a statement with no movements, ≈ 180 ms median / ≈ 210 ms p95 for one with 20 sales and 10 payments (≈ 35 KB each). 50 statements → roughly 3–11 s. Show a spinner and do not set a client timeout under ~30 s.
+- The request is **synchronous**: PDFs are rendered one at a time. Measured with the real PDF engine: ≈ 50 ms for a statement with no movements, ≈ 180 ms median / ≈ 210 ms p95 for one with 20 sales and 10 payments (≈ 35 KB each). 50 statements → roughly 3–11 s. Show a spinner and do not set a client timeout under ~30 s (the server gives up at 120 s anyway).
+
+### 4.1 Known limits (by design)
+
+- **The run slot is process-wide** (review R1): one bulk statements download per server process (per replica), shared by **all branches / tenants** of that process. It protects the API's CPU (rendering runs on the event loop), not a tenant: a run in one branch makes a concurrent request from another branch get `429`. With several replicas, each one runs one download at a time.
+- **Per-run deadline** (`BULK_STATEMENTS_RUN_DEADLINE_MS` = 120 s, review R4-001): the slot can never stay held by a stuck run (a stalled database read, a renderer waiting on a remote resource). When the deadline passes, the request fails with `503 BULK_EXPORT_TIMEOUT` and the slot is freed at once, without waiting for the stuck statement; the run stops before its next step and a late result is discarded. A client disconnect frees the slot the same way, even in the middle of a render. Because a stuck render is not killed, its work may still finish in the background after the slot has been given to the next run; that work never touches the slot again.
 
 ## 5. Errors
 
@@ -81,10 +87,11 @@ Checks run in this order: body / `filter` validation → busy check → selectio
 | 400 | `BULK_SELECTION_TOO_LARGE` (`details: { count, max: 50 }`) | more than 50 customers |
 | 400 | `BULK_SELECTION_EMPTY` | the selection resolves to 0 customers (e.g. a filter that matches nobody) |
 | 401 | standard | missing or invalid token |
-| 403 | `INSUFFICIENT_PERMISSIONS` | no `read:Sale` or no `read:Customer` |
+| 403 | `{ statusCode: 403, error: "INSUFFICIENT_PERMISSIONS", message: "Insufficient permissions", timestamp }` (code in `error`) | no `read:Sale` or no `read:Customer` |
 | 404 | `BULK_CUSTOMERS_NOT_FOUND` (`details: { missingIds }`) | ids mode: an id is unknown, from another branch, or deleted. Also if a customer is deleted while the ZIP is being built (`missingIds` = that id). Nothing is sent |
 | 429 | `BULK_EXPORT_BUSY` (`details: { retryAfterSeconds: 10 }`) + header `Retry-After: 10` | another bulk statements download is running on the server |
 | 500 | `PDF_GENERATION_FAILED` | a statement failed to render; nothing is sent |
+| 503 | `BULK_EXPORT_TIMEOUT` (`details: { deadlineSeconds: 120 }`) | the download did not finish within the 120 s server deadline (§4.1); nothing is sent |
 
 ```json
 { "statusCode": 429, "code": "BULK_EXPORT_BUSY", "message": "another bulk statements download is in progress; retry later", "details": { "retryAfterSeconds": 10 } }
@@ -94,8 +101,12 @@ Checks run in this order: body / `filter` validation → busy check → selectio
 { "statusCode": 400, "code": "BULK_SELECTION_TOO_LARGE", "message": "selection resolves to 73 customers; max 50", "field": "selection", "details": { "count": 73, "max": 50 } }
 ```
 
-UI suggestions: on `429`, show «Otra descarga de estados de cuenta está en curso» and retry after `Retry-After` seconds (or let the user retry). On `404 BULK_CUSTOMERS_NOT_FOUND`, drop `missingIds` from the selection, tell the user («N clientes ya no existen y se quitaron de la selección»), and resend.
+```json
+{ "statusCode": 503, "code": "BULK_EXPORT_TIMEOUT", "message": "the bulk statements download took too long and was stopped; retry with fewer customers", "details": { "deadlineSeconds": 120 } }
+```
+
+UI suggestions: on `503 BULK_EXPORT_TIMEOUT`, show «La descarga tardó demasiado; inténtalo con menos clientes» (it should not happen with ≤ 50 customers unless the server is in trouble). On `429`, show «Otra descarga de estados de cuenta está en curso» and retry after `Retry-After` seconds (or let the user retry). On `404 BULK_CUSTOMERS_NOT_FOUND`, drop `missingIds` from the selection, tell the user («N clientes ya no existen y se quitaron de la selección»), and resend.
 
 ## 6. Audit
 
-No audit table for now (owner L5). Every run writes one structured server log line (`customers.bulk.statements`): user id, branch id, selection mode, period, customer count, ZIP size, render and total durations, and the outcome (`ok`, `rejected`, `busy`, `aborted`, `failed`) with the error code. No customer data and no customer ids are logged. If the client disconnects mid-run, rendering stops before the next PDF.
+No audit table for now (owner L5). Every run writes one structured server log line (`customers.bulk.statements`): user id, branch id, selection mode, period, customer count, ZIP size, render and total durations, and the outcome (`ok`, `rejected`, `busy`, `aborted`, `timeout`, `failed`) with the error code (warn level for every non-`ok` outcome). No customer data and no customer ids are logged. If the client disconnects mid-run, the run stops at once (no further PDF is rendered, the slot is freed) and the request ends quietly: no response is written (the client is gone) and no error-level log or `500` is produced, only the `aborted` line.

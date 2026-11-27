@@ -30,7 +30,11 @@ import type { PdfGenerationService } from '../pdf-generation/pdf-generation.serv
 import { createAppValidationPipe } from '../shared/listing/app-validation.pipe';
 import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import type { CustomerStatementService } from './customer-statement.service';
-import { BulkExportBusyException } from './customer-bulk-statements.busy-guard';
+import {
+  BulkExportBusyException,
+  BulkExportTimeoutException,
+  BulkStatementsAbortedError,
+} from './customer-bulk-statements.busy-guard';
 import { CustomerBulkStatementsController } from './customer-bulk-statements.controller';
 import { CustomerBulkStatementsRunGuard } from './customer-bulk-statements.busy-guard';
 import { CustomerBulkStatementsService } from './customer-bulk-statements.service';
@@ -176,6 +180,35 @@ describe('CustomerBulkStatementsController — POST /customers/bulk/statements',
       res as never,
     );
     expect(seen?.aborted).toBe(true);
+  });
+
+  it('a client abort ends quietly: no rethrow (no 500, no error-level log), nothing sent, listener removed', async () => {
+    const build = jest.fn().mockRejectedValue(new BulkStatementsAbortedError());
+    const res = fakeResponse();
+    await expect(
+      world(build).statements(
+        body,
+        { ability: {}, user } as never,
+        res as never,
+      ),
+    ).resolves.toBeUndefined();
+    expect(res.send).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled();
+    expect(res.setHeader).not.toHaveBeenCalled();
+    expect(res.listenerCount('close')).toBe(0);
+  });
+
+  it('503 BULK_EXPORT_TIMEOUT propagates (Nest sends the 503 body)', async () => {
+    const build = jest.fn().mockRejectedValue(new BulkExportTimeoutException());
+    const res = fakeResponse();
+    await expect(
+      world(build).statements(
+        body,
+        { ability: {}, user } as never,
+        res as never,
+      ),
+    ).rejects.toBeInstanceOf(BulkExportTimeoutException);
+    expect(res.send).not.toHaveBeenCalled();
   });
 
   it('missing request.ability is a wiring error', async () => {

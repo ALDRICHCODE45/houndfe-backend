@@ -15,7 +15,9 @@ import type { AppAbility } from '../auth/authorization/domain/permission';
 import type { CustomerBulkSelectionResolver } from '../customers/bulk';
 import type { PdfGenerationService } from '../pdf-generation/pdf-generation.service';
 import {
+  BULK_STATEMENTS_RUN_DEADLINE_MS,
   BulkExportBusyException,
+  BulkExportTimeoutException,
   CustomerBulkStatementsRunGuard,
 } from './customer-bulk-statements.busy-guard';
 import {
@@ -318,14 +320,17 @@ describe('CustomerBulkStatementsService', () => {
       },
     });
     const first = service.build(body, ability(), actor);
-    await new Promise(setImmediate);
+    try {
+      await new Promise(setImmediate);
 
-    await expect(service.build(body, ability(), actor)).rejects.toBeInstanceOf(
-      BulkExportBusyException,
-    );
-    expect(resolver.resolve).toHaveBeenCalledTimes(1);
-
-    release();
+      await expect(
+        service.build(body, ability(), actor),
+      ).rejects.toBeInstanceOf(BulkExportBusyException);
+      expect(resolver.resolve).toHaveBeenCalledTimes(1);
+    } finally {
+      // A failing assertion must not leave the first run (and the suite) hanging.
+      release();
+    }
     await expect(first).resolves.toMatchObject({ count: 3 });
     expect(
       logged()
@@ -348,6 +353,80 @@ describe('CustomerBulkStatementsService', () => {
     expect(pdf.renderCustomerStatementPdf).toHaveBeenCalledTimes(1);
     expect(guard.busy).toBe(false);
     expect(logged()).toEqual([expect.objectContaining({ outcome: 'aborted' })]);
+  });
+
+  it('a client abort during a stuck render frees the slot at once, logs aborted, and the late render is ignored', async () => {
+    const controller = new AbortController();
+    let finish!: (buffer: Buffer) => void;
+    const { service, guard, pdf } = world({
+      render: () =>
+        new Promise<Buffer>((resolve) => {
+          finish = resolve;
+          controller.abort();
+        }),
+    });
+    try {
+      await expect(
+        service.build(body, ability(), actor, { signal: controller.signal }),
+      ).rejects.toBeInstanceOf(BulkStatementsAbortedError);
+      expect(guard.busy).toBe(false);
+      expect(logged()).toEqual([
+        expect.objectContaining({ outcome: 'aborted' }),
+      ]);
+    } finally {
+      finish(Buffer.from('%PDF-late'));
+    }
+    await new Promise(setImmediate);
+    await new Promise(setImmediate);
+    // The late render does not trigger the next one.
+    expect(pdf.renderCustomerStatementPdf).toHaveBeenCalledTimes(1);
+    expect(guard.busy).toBe(false);
+  });
+
+  describe('per-run deadline (R4-001)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers({
+        doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'],
+      });
+    });
+    afterEach(() => jest.useRealTimers());
+
+    it(`a render that never settles → 503 BULK_EXPORT_TIMEOUT after ${BULK_STATEMENTS_RUN_DEADLINE_MS} ms; the slot is free, logged as timeout; the late render is ignored`, async () => {
+      let finish!: (buffer: Buffer) => void;
+      const { service, guard, pdf } = world({
+        render: () =>
+          new Promise<Buffer>((resolve) => {
+            finish = resolve;
+          }),
+      });
+      const run = service
+        .build(body, ability(), actor)
+        .catch((e: unknown) => e);
+      await new Promise(setImmediate);
+      expect(guard.busy).toBe(true);
+
+      await jest.advanceTimersByTimeAsync(BULK_STATEMENTS_RUN_DEADLINE_MS - 1);
+      expect(guard.busy).toBe(true);
+      await jest.advanceTimersByTimeAsync(1);
+
+      const error = (await run) as HttpException;
+      expect(error).toBeInstanceOf(BulkExportTimeoutException);
+      expect(error.getStatus()).toBe(503);
+      expect(guard.busy).toBe(false);
+      expect(logged()).toEqual([
+        expect.objectContaining({
+          outcome: 'timeout',
+          code: 'BULK_EXPORT_TIMEOUT',
+          rendered: 0,
+        }),
+      ]);
+
+      finish(Buffer.from('%PDF-late'));
+      await new Promise(setImmediate);
+      await new Promise(setImmediate);
+      expect(pdf.renderCustomerStatementPdf).toHaveBeenCalledTimes(1);
+      expect(guard.busy).toBe(false);
+    });
   });
 
   it('one structured log line per successful run: user, tenant, mode, count, period, outcome, duration, size; no customer data', async () => {

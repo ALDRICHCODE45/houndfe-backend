@@ -11,7 +11,11 @@
  * - DOS timestamps in a ZIP are wall-clock fields encoded from the server's
  *   local time; `businessWallClock` returns a Date whose LOCAL getters show
  *   the business-timezone wall time, so the files look right in Mexico
- *   whatever the server TZ is.
+ *   whatever the server TZ is (verified under several server zones). Known
+ *   limit: the ZIP writer (src/shared/zip) reads local getters, so a business
+ *   wall time that falls in the SERVER's spring-forward gap does not exist
+ *   locally and comes out shifted forward by the gap (+1 h, at most once a
+ *   year, only on a server whose TZ observes DST; none with TZ=UTC).
  */
 import { createFileNameAllocator } from '../shared/zip';
 
@@ -55,7 +59,8 @@ export function buildBulkStatementsZipFilename(range: {
 
 /**
  * A Date whose local (server-TZ) fields equal the wall time of `instant` in
- * `timeZone`. Only for encoding ZIP DOS timestamps; not a real instant.
+ * `timeZone`. Only for encoding ZIP DOS timestamps; not a real instant. Inside
+ * a server-TZ spring-forward gap no such Date exists (see the header note).
  */
 export function businessWallClock(instant: Date, timeZone: string): Date {
   const parts: Record<string, number> = {};

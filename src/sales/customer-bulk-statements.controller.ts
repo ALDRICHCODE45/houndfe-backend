@@ -20,6 +20,7 @@ import { TenantContextGuard } from '../shared/tenant/tenant-context.guard';
 import {
   BULK_EXPORT_RETRY_AFTER_SECONDS,
   BulkExportBusyException,
+  BulkStatementsAbortedError,
 } from './customer-bulk-statements.busy-guard';
 import { CustomerBulkStatementsService } from './customer-bulk-statements.service';
 import { CustomerBulkStatementsBodyDto } from './dto/customer-bulk-statements.dto';
@@ -39,6 +40,7 @@ type BulkRequest = Request & { ability?: AppAbility; user: AuthenticatedUser };
  * Permissions: `read:Sale` (the single statement's) AND `read:Customer` (the
  * selection reads the customer table; contract §5). The whole ZIP is built
  * before any response header, so an error never arrives as half a ZIP.
+ * A client disconnect ends the request quietly (no response, no error log).
  */
 @Controller('customers/bulk')
 @UseGuards(JwtAuthGuard, TenantContextGuard, PermissionsGuard)
@@ -62,8 +64,8 @@ export class CustomerBulkStatementsController {
         'PermissionsGuard must attach request.ability (bulk statements wiring).',
       );
     }
-    // A client that disconnects before the ZIP is sent stops the run before
-    // the next render (the busy slot is released by the service).
+    // A client that disconnects before the ZIP is sent stops the run at once
+    // (the run guard frees the busy slot without waiting for the render).
     const abort = new AbortController();
     const onClose = () => {
       if (!res.writableEnded) abort.abort();
@@ -78,6 +80,10 @@ export class CustomerBulkStatementsController {
         { signal: abort.signal },
       );
     } catch (error) {
+      // The client is gone: nothing to answer. End quietly instead of letting
+      // Nest's filter log an unknown error as a 500 (the service already
+      // logged the run as `aborted`, at warn level).
+      if (error instanceof BulkStatementsAbortedError) return;
       if (error instanceof BulkExportBusyException) {
         res.setHeader('Retry-After', String(BULK_EXPORT_RETRY_AFTER_SECONDS));
       }

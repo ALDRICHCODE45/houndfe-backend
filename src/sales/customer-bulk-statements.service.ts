@@ -4,7 +4,10 @@
  * frontend L3.3).
  *
  * 1. One run per process (`CustomerBulkStatementsRunGuard` → `429
- *    BULK_EXPORT_BUSY`), held for the whole run and released in `finally`.
+ *    BULK_EXPORT_BUSY`), held for the whole run and time-bounded: the run
+ *    (each render included) is raced against a 120 s deadline (`503
+ *    BULK_EXPORT_TIMEOUT`) and the client abort, so a stuck read / render or
+ *    a disconnect frees the slot at once (review R4-001).
  * 2. The selection is resolved by the shared resolver: cap 50 (owner L2.1),
  *    `name` order (`lower(firstName)`, `lower(lastName)`, `id`), 0 customers
  *    → `400 BULK_SELECTION_EMPTY`; ids mode is strict (`404
@@ -14,7 +17,8 @@
  *    each entry is what `GET /customers/:id/statement/pdf` returns for that
  *    customer and period (owner L2.2). One render at a time, yielding to the
  *    event loop between renders (`setImmediate`), so other requests run in
- *    between; a client abort stops before the next render.
+ *    between. After a deadline or client abort the run signal fires: the
+ *    loop never starts another render, and a late render result is ignored.
  * 4. A customer deleted mid-run (the single path's `404 CUSTOMER_NOT_FOUND`)
  *    → `404 BULK_CUSTOMERS_NOT_FOUND` with that id (§3.5). A render failure
  *    → `500 PDF_GENERATION_FAILED` for the whole request. The ZIP is built in
@@ -41,6 +45,9 @@ import { PdfGenerationService } from '../pdf-generation/pdf-generation.service';
 import { buildZip, type ZipEntryInput } from '../shared/zip';
 import {
   BulkExportBusyException,
+  BulkExportTimeoutException,
+  BulkStatementsAbortedError,
+  BULK_STATEMENTS_RUN_DEADLINE_MS,
   CustomerBulkStatementsRunGuard,
 } from './customer-bulk-statements.busy-guard';
 import {
@@ -59,13 +66,8 @@ export const BULK_STATEMENTS_MAX_CUSTOMERS = 50;
 const DEFAULT_BUSINESS_TIMEZONE = 'America/Mexico_City';
 const LOG_EVENT = 'customers.bulk.statements';
 
-/** The client closed the connection; the run stopped before the next render. */
-export class BulkStatementsAbortedError extends Error {
-  constructor() {
-    super('bulk statements request aborted by the client');
-    this.name = 'BulkStatementsAbortedError';
-  }
-}
+// Defined next to the run guard (which raises it); re-exported for callers.
+export { BulkStatementsAbortedError };
 
 export interface CustomerBulkStatementsActor {
   userId: string;
@@ -148,8 +150,12 @@ export class CustomerBulkStatementsService {
     const renderMs: number[] = [];
     const elapsed = () => Math.round(performance.now() - startedAt);
     try {
-      const result = await this.runGuard.run(() =>
-        this.run(body, ability, renderMs, options.signal),
+      const result = await this.runGuard.run(
+        (runSignal) => this.run(body, ability, renderMs, runSignal),
+        {
+          signal: options.signal,
+          deadlineMs: BULK_STATEMENTS_RUN_DEADLINE_MS,
+        },
       );
       this.logger.log(
         JSON.stringify({
@@ -169,9 +175,11 @@ export class CustomerBulkStatementsService {
           ? 'busy'
           : error instanceof BulkStatementsAbortedError
             ? 'aborted'
-            : error instanceof HttpException && error.getStatus() < 500
-              ? 'rejected'
-              : 'failed';
+            : error instanceof BulkExportTimeoutException
+              ? 'timeout'
+              : error instanceof HttpException && error.getStatus() < 500
+                ? 'rejected'
+                : 'failed';
       this.logger.warn(
         JSON.stringify({
           ...base,
@@ -189,7 +197,8 @@ export class CustomerBulkStatementsService {
     body: CustomerBulkStatementsBodyDto,
     ability: CustomerBulkSelectionOptions['ability'],
     renderMs: number[],
-    signal: AbortSignal | undefined,
+    /** Fires on the run deadline or the client abort (run guard). */
+    signal: AbortSignal,
   ): Promise<CustomerBulkStatementsResult> {
     const resolved = await this.resolver.resolve(body.selection, {
       ability,
@@ -198,6 +207,7 @@ export class CustomerBulkStatementsService {
       sortOrder: 'asc',
       rejectEmpty: true,
     });
+    if (signal.aborted) throw new BulkStatementsAbortedError();
     const customers = await this.resolver.readRows(resolved);
     const names = allocateStatementEntryNames(customers);
     const range = { from: body.from, to: body.to };
@@ -208,7 +218,7 @@ export class CustomerBulkStatementsService {
 
     const entries: ZipEntryInput[] = [];
     for (const [index, customer] of customers.entries()) {
-      if (signal?.aborted) throw new BulkStatementsAbortedError();
+      if (signal.aborted) throw new BulkStatementsAbortedError();
       const t0 = performance.now();
       let data: Buffer;
       try {
@@ -218,12 +228,14 @@ export class CustomerBulkStatementsService {
           throw bulkCustomersNotFound([customer.id]);
         throw error;
       }
+      // Stopped while this render was stuck: drop its late result.
+      if (signal.aborted) throw new BulkStatementsAbortedError();
       renderMs.push(performance.now() - t0);
       entries.push({ name: names[index], data });
       // Let other requests run between two renders (contract §3.3 guard 1).
       await yieldToEventLoop();
     }
-    if (signal?.aborted) throw new BulkStatementsAbortedError();
+    if (signal.aborted) throw new BulkStatementsAbortedError();
 
     const zip = buildZip(entries, {
       compression: 'deflate',
