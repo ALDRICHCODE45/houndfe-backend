@@ -1,6 +1,9 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
-import { parseCustomerBulkFilter } from './customer-bulk-filter';
+import {
+  assertNoReservedBulkFilterKeys,
+  parseCustomerBulkFilter,
+} from './customer-bulk-filter';
 
 function rejection(run: () => unknown): Record<string, unknown> {
   try {
@@ -103,5 +106,46 @@ describe('parseCustomerBulkFilter (contract §2.1, §2.3, §4.4)', () => {
     expect(parseCustomerBulkFilter({ city: ['Zapopan', 'León'] })).toEqual({
       city: ['Zapopan', 'León'],
     });
+  });
+
+  // Advisory R3-filter-proto-key: JSON.parse keeps `__proto__` as an OWN key;
+  // it must be rejected like any unknown param, never hit the setter.
+  it.each([
+    ['{"__proto__":"x"}', '__proto__'],
+    ['{"__proto__":["hasDebt"]}', '__proto__'],
+    ['{"__proto__":{"hasDebt":"true"}}', '__proto__'],
+    ['{"constructor":"x"}', 'constructor'],
+    ['{"constructor":["x"]}', 'constructor'],
+    ['{"prototype":"x"}', 'prototype'],
+    ['{"hasDebt":"true","__proto__":"x"}', '__proto__'],
+  ])(
+    'own reserved key %s → 400 whitelistValidation on %s',
+    (json, property) => {
+      const raw = JSON.parse(json) as Record<string, unknown>;
+      for (const run of [
+        () => parseCustomerBulkFilter(raw),
+        () => assertNoReservedBulkFilterKeys(raw),
+      ]) {
+        const body = rejection(run);
+        expect(body.code).toBeUndefined();
+        expect(body.message).toEqual([
+          expect.objectContaining({
+            property,
+            constraints: {
+              whitelistValidation: `property ${property} should not exist`,
+            },
+          }),
+        ]);
+      }
+    },
+  );
+
+  it('assertNoReservedBulkFilterKeys ignores non-objects and ordinary keys', () => {
+    expect(() => assertNoReservedBulkFilterKeys(undefined)).not.toThrow();
+    expect(() => assertNoReservedBulkFilterKeys(null)).not.toThrow();
+    expect(() => assertNoReservedBulkFilterKeys('x')).not.toThrow();
+    expect(() =>
+      assertNoReservedBulkFilterKeys({ hasDebt: 'true', nope: 'x' }),
+    ).not.toThrow();
   });
 });

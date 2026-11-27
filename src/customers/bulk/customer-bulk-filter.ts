@@ -13,7 +13,12 @@
  * - `page`, `limit`, `sortBy`, `sortOrder` are rejected (no pagination; the
  *   order is a top-level field of the action);
  * - every value must be a string or an array of strings (what a query string
- *   can carry), so a JSON number/boolean/object never reaches the parsers.
+ *   can carry), so a JSON number/boolean/object never reaches the parsers;
+ * - `__proto__`, `constructor` and `prototype` are rejected like any unknown
+ *   param (advisory R3-filter-proto-key). `JSON.parse` keeps them as OWN keys,
+ *   but the global pipe's class-transformer silently drops them from the
+ *   nested `filter`, so the controller must also check the RAW body with
+ *   `assertNoReservedBulkFilterKeys`.
  */
 import { plainToInstance } from 'class-transformer';
 import { ValidationError, validateSync } from 'class-validator';
@@ -32,7 +37,23 @@ export const BULK_FILTER_REJECTED_KEYS: ReadonlySet<string> = new Set([
   'sortOrder',
 ]);
 
+/**
+ * Object-prototype keys: never valid listing params, and dropped (or turned
+ * into prototype writes) by naive object copies and class-transformer.
+ */
+export const BULK_FILTER_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
 const exceptionFactory = createListingValidationExceptionFactory();
+
+function whitelistError(key: string): ValidationError {
+  return fieldError(key, {
+    whitelistValidation: `property ${key} should not exist`,
+  });
+}
 
 function fieldError(
   property: string,
@@ -43,6 +64,19 @@ function fieldError(
     children: [],
     constraints,
   });
+}
+
+/**
+ * Throws the same 400 an unknown filter param gets when the RAW (pre-pipe)
+ * `selection.filter` carries an own reserved key. Non-objects are ignored
+ * (the DTO rejects them).
+ */
+export function assertNoReservedBulkFilterKeys(raw: unknown): void {
+  if (raw === null || typeof raw !== 'object') return;
+  const errors = Object.keys(raw)
+    .filter((key) => BULK_FILTER_RESERVED_KEYS.has(key))
+    .map(whitelistError);
+  if (errors.length > 0) throw exceptionFactory(errors);
 }
 
 /** What a query-string value can be: a string or a repeated param. */
@@ -63,14 +97,14 @@ export function parseCustomerBulkFilter(
   raw: Readonly<Record<string, unknown>>,
 ): CustomerListingFilters {
   const shapeErrors: ValidationError[] = [];
-  const candidate: Record<string, unknown> = {};
+  // Null prototype: an own `__proto__` key can never reach a setter.
+  const candidate = Object.create(null) as Record<string, unknown>;
   for (const [key, value] of Object.entries(raw)) {
-    if (BULK_FILTER_REJECTED_KEYS.has(key)) {
-      shapeErrors.push(
-        fieldError(key, {
-          whitelistValidation: `property ${key} should not exist`,
-        }),
-      );
+    if (
+      BULK_FILTER_REJECTED_KEYS.has(key) ||
+      BULK_FILTER_RESERVED_KEYS.has(key)
+    ) {
+      shapeErrors.push(whitelistError(key));
     } else if (!isUrlValue(value)) {
       shapeErrors.push(
         fieldError(key, {
@@ -82,7 +116,7 @@ export function parseCustomerBulkFilter(
     }
   }
 
-  const dto = plainToInstance(CustomersListingQueryDto, candidate);
+  const dto = plainToInstance(CustomersListingQueryDto, { ...candidate });
   const errors = [
     ...shapeErrors,
     ...validateSync(dto, {

@@ -8,7 +8,9 @@
  * before it is complete. Above 10,000 rows the request fails with
  * `400 BULK_SELECTION_TOO_LARGE` instead of a truncated file. One structured
  * log line per export (no audit table for now, owner L5): who, branch, mode,
- * row count, sort, duration, outcome — never customer data or ids.
+ * row count, sort, duration, outcome — never customer data or ids. A caller
+ * the route guard lets through but the explicit `export:Customer` check
+ * rejects is logged by `logDenied` (outcome `forbidden`).
  */
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -116,6 +118,29 @@ export class CustomersBulkExportService {
       );
       throw error;
     }
+  }
+
+  /**
+   * One `forbidden` warn line for a request rejected by the explicit
+   * `export:Customer` check (R3-denied-export-unlogged): who, branch, mode and
+   * a reason code — never the selection itself.
+   */
+  logDenied(
+    body: CustomersBulkExportBodyDto,
+    actor: CustomersBulkExportActor,
+    reason: string,
+  ): void {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'customers.bulk.export',
+        tenantId: actor.tenantId,
+        userId: actor.userId,
+        mode: body.selection.mode,
+        outcome: 'forbidden',
+        code: 'INSUFFICIENT_PERMISSIONS',
+        reason,
+      }),
+    );
   }
 
   private now(): Date {

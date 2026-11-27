@@ -10,17 +10,33 @@ import type { Request } from 'express';
  */
 export const APP_EXPOSED_HEADERS = ['Content-Disposition'] as const;
 
+/** Caller headers first, then the app ones; case-insensitive dedupe. */
+function mergeExposedHeaders(caller: CorsOptions['exposedHeaders']): string[] {
+  const list =
+    typeof caller === 'string' ? caller.split(',') : [...(caller ?? [])];
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const header of [...list, ...APP_EXPOSED_HEADERS]) {
+    const name = header.trim();
+    if (name === '' || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    merged.push(name);
+  }
+  return merged;
+}
+
 /**
  * The app-wide CORS delegate used by `main.ts`: `editorialCors` with
- * `Content-Disposition` exposed. The origin and credentials options are passed
- * through untouched; editorial routes keep their own `exposedHeaders`.
+ * `Content-Disposition` exposed, merged with any caller `exposedHeaders`
+ * (string or array). The origin and credentials options are passed through
+ * untouched; editorial routes keep their own `exposedHeaders`.
  */
 export function appCors(
   options: CorsOptions = {},
 ): CorsOptionsDelegate<Request> {
   return editorialCors({
     ...options,
-    exposedHeaders: [...APP_EXPOSED_HEADERS],
+    exposedHeaders: mergeExposedHeaders(options.exposedHeaders),
   });
 }
 

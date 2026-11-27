@@ -181,4 +181,34 @@ describe('CustomersBulkExportService (contract §4, owner L2.1)', () => {
     });
     warn.mockRestore();
   });
+
+  // Advisory R3-denied-export-unlogged.
+  it('logDenied writes ONE forbidden warn line: who, tenant, mode, reason — no customer data', () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const { service, resolver } = world(true);
+    service.logDenied(
+      {
+        selection: { mode: 'ids', customerIds: [ROW.id] },
+      } as CustomersBulkExportBodyDto,
+      actor,
+      'EXPORT_PERMISSION_NOT_EXPLICIT',
+    );
+    expect(resolver.resolve).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String((warn.mock.calls[0] as unknown[])[0]);
+    expect(JSON.parse(line)).toEqual({
+      event: 'customers.bulk.export',
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      mode: 'ids',
+      outcome: 'forbidden',
+      code: 'INSUFFICIENT_PERMISSIONS',
+      reason: 'EXPORT_PERMISSION_NOT_EXPLICIT',
+    });
+    expect(line).not.toMatch(/3f2a9c1e/);
+    warn.mockRestore();
+  });
 });

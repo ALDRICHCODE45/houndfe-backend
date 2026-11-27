@@ -8,6 +8,8 @@ import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { Server } from 'node:http';
 import request from 'supertest';
+import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-options.interface';
+import type { Request } from 'express';
 import { appCors } from './editorial-cors';
 
 @Controller()
@@ -97,5 +99,68 @@ describe.each([
     expect(response.headers['access-control-expose-headers']).toBe(
       exposedEditorial,
     );
+  });
+});
+
+// Advisory R3-appcors-overrides-exposed: caller exposedHeaders are merged
+// (deduped) with Content-Disposition, never silently discarded.
+describe('appCors — caller exposedHeaders', () => {
+  function resolve(options: CorsOptions, url = '/customers/bulk/export') {
+    const req = {
+      method: 'POST',
+      originalUrl: url,
+      get: () => undefined,
+    } as unknown as Request;
+    let resolved: CorsOptions | undefined;
+    appCors(options)(req, (err, value) => {
+      expect(err).toBeNull();
+      resolved = value;
+    });
+    return resolved;
+  }
+
+  it.each<[CorsOptions['exposedHeaders'], string[]]>([
+    [undefined, ['Content-Disposition']],
+    ['X-Request-Id', ['X-Request-Id', 'Content-Disposition']],
+    [
+      'X-Request-Id, X-Total',
+      ['X-Request-Id', 'X-Total', 'Content-Disposition'],
+    ],
+    [['X-Request-Id'], ['X-Request-Id', 'Content-Disposition']],
+    [
+      ['content-disposition', 'X-A'],
+      ['content-disposition', 'X-A'],
+    ],
+    ['', ['Content-Disposition']],
+    [[], ['Content-Disposition']],
+  ])('%j → %j', (exposedHeaders, expected) => {
+    const options: CorsOptions = { origin: ['https://allowed.test'] };
+    if (exposedHeaders !== undefined) options.exposedHeaders = exposedHeaders;
+    expect(resolve(options)).toEqual({
+      origin: ['https://allowed.test'],
+      exposedHeaders: expected,
+    });
+  });
+
+  it('does not mutate the caller options', () => {
+    const options: CorsOptions = { exposedHeaders: ['X-A'] };
+    resolve(options);
+    expect(options).toEqual({ exposedHeaders: ['X-A'] });
+  });
+
+  it('editorial routes still use their own exposed headers', () => {
+    const req = {
+      method: 'GET',
+      originalUrl: '/products/id/editorial',
+      get: () => undefined,
+    } as unknown as Request;
+    let resolved: CorsOptions | undefined;
+    appCors({ exposedHeaders: 'X-A' })(req, (_err, value) => {
+      resolved = value;
+    });
+    expect(resolved?.exposedHeaders).toEqual([
+      'Editorial-Contract-Version',
+      'Editorial-Vocabulary-Revision',
+    ]);
   });
 });
