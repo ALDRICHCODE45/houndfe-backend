@@ -168,6 +168,19 @@ export interface CustomersListingReadInput {
    * timezone (local date of `lastPurchaseAt` for `noPurchaseMoreThanDays`).
    */
   metrics: { overdueBefore: Date; timeZone: string } | null;
+  /**
+   * customers-bulk-actions — INTERNAL id conditions of the bulk selection
+   * (`src/customers/bulk`), never a public listing param. `include`: only
+   * these customers (ids mode); `exclude`: never these (filter mode +
+   * `excludeIds`). Absent (the listing) = no id condition at all, so the
+   * `GET /customers/listing` statements are unchanged.
+   */
+  ids?: CustomerListingIdConditions;
+}
+
+export interface CustomerListingIdConditions {
+  include?: string[];
+  exclude?: string[];
 }
 
 export interface CustomersListingSummary {

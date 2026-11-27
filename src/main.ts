@@ -13,7 +13,7 @@ import { installSupplierBodyParser } from './procurement/suppliers/supplier-http
 import { installPurchaseOrderBodyParser } from './procurement/purchase-orders/po-body-parser';
 import { installInventoryBodyParser } from './inventory/http/inventory-body-parser';
 import { installConversationBatchBodyParser } from './conversations/presentation/conversation-body-parser';
-import { editorialCors } from './catalog-editorial/http/editorial-cors';
+import { appCors } from './catalog-editorial/http/editorial-cors';
 import { DomainExceptionFilter } from './shared/filters/domain-exception.filter';
 import { PrismaExceptionFilter } from './shared/filters/prisma-exception.filter';
 import { createAppValidationPipe } from './shared/listing/app-validation.pipe';
@@ -44,18 +44,20 @@ async function bootstrap() {
   // En producción debe estar seteado con los orígenes legítimos
   // (p.ej. https://sistem.houndfe.com,http://localhost:4173).
   // Sin la variable se permite todo con warning (fallback de desarrollo).
+  // `appCors` expone `Content-Disposition` (nombre del CSV / ZIP) sin cambiar
+  // orígenes ni credenciales.
   const corsOrigins = (process.env.CORS_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
 
   if (corsOrigins.length > 0) {
-    app.enableCors(editorialCors({ origin: corsOrigins, credentials: true }));
+    app.enableCors(appCors({ origin: corsOrigins, credentials: true }));
   } else {
     logger.warn(
       'CORS_ORIGINS no definido — CORS abierto a cualquier origen (solo para desarrollo)',
     );
-    app.enableCors(editorialCors());
+    app.enableCors(appCors());
   }
 
   // HD-04d2a — sanitize malformed/primitive bodies on the `/human-decisions`

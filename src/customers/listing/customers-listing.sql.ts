@@ -22,6 +22,7 @@ import { escapeLike } from '../customers.service';
 import { customerSalesMetricsSql } from './customer-sales-metrics.sql';
 import type {
   CustomerListingFilters,
+  CustomerListingIdConditions,
   CustomersListingReadInput,
 } from './customer-listing.types';
 import {
@@ -433,17 +434,37 @@ function orderBy(input: CustomersListingReadInput, alias: string): Prisma.Sql {
   return Prisma.raw(`ORDER BY ${items.join(', ')}`);
 }
 
+/**
+ * customers-bulk-actions — the internal bulk-selection id conditions (on
+ * alias `c`). Nothing for the listing (`ids` absent) or an empty exclusion.
+ */
+function idConditions(ids: CustomerListingIdConditions | undefined) {
+  const conditions: Prisma.Sql[] = [];
+  if (ids?.include) {
+    conditions.push(Prisma.sql`c."id" = ANY (${ids.include}::text[])`);
+  }
+  if (ids?.exclude && ids.exclude.length > 0) {
+    conditions.push(Prisma.sql`c."id" <> ALL (${ids.exclude}::text[])`);
+  }
+  return conditions;
+}
+
 function candidatesCte(
   tenantId: string,
   filters: CustomerListingFilters,
+  ids?: CustomerListingIdConditions,
 ): Prisma.Sql {
   const columns = Prisma.raw(
     CUSTOMER_COLUMNS.map((column) => `c."${column}"`).join(', '),
   );
+  const conditions = [
+    ...customerFilterConditions(tenantId, filters),
+    ...idConditions(ids),
+  ];
   return Prisma.sql`c AS (
     SELECT ${columns}, ${viaPetOnlyColumn(filters)} AS "viaPetOnly"
     FROM "customers" c
-    WHERE ${Prisma.join(customerFilterConditions(tenantId, filters), ' AND ')}
+    WHERE ${Prisma.join(conditions, ' AND ')}
   )`;
 }
 
@@ -524,7 +545,7 @@ export function buildListingPageSql(
   );
 
   return Prisma.sql`
-    WITH ${candidatesCte(tenantId, input.filters)},
+    WITH ${candidatesCte(tenantId, input.filters, input.ids)},
     ${page}
     SELECT ${customerSelect},
       gpl."name" AS "globalPriceListName",
@@ -568,7 +589,7 @@ export function buildListingSummarySql(
   tenantId: string,
   input: CustomersListingReadInput,
 ): Prisma.Sql {
-  const cte = candidatesCte(tenantId, input.filters);
+  const cte = candidatesCte(tenantId, input.filters, input.ids);
   if (!input.metrics) {
     return Prisma.sql`WITH ${cte} SELECT COUNT(*)::int AS "count" FROM c`;
   }

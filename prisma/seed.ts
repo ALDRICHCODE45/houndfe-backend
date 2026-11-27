@@ -1369,6 +1369,9 @@ async function main() {
       permissionKey('Backorder', 'update'),
     ];
 
+    // customers-bulk-actions / T1 (owner L3): `export:Customer` is a special
+    // grant. Super Admin gets it from the registry loop above; Manager and
+    // Cashier deliberately do NOT (assign it from Admin → Roles).
     const cashierPermissionKeys: SeedPermissionKey[] = [
       permissionKey('Sale', 'create'),
       permissionKey('Sale', 'read'),

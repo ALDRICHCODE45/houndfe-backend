@@ -23,6 +23,10 @@ export type AppActions =
   | 'batch_delete'
   // shipping-zones / T1 (S3) — decide an unknown postal code's delivery zone.
   | 'validate'
+  // customers-bulk-actions / T1 (owner L3) — export customer data as a file
+  // (`export:Customer`). Checked as an EXPLICIT row: `manage:Customer` does
+  // not imply it (see src/customers/bulk/customer-export.permission.ts).
+  | 'export'
   | 'manage';
 
 /** All possible subjects (resources) in the application. */
@@ -301,6 +305,17 @@ export const PERMISSION_REGISTRY: readonly PermissionDefinition[] = [
     subject: 'Customer',
     action: 'manage',
     description: 'Full customer management',
+  },
+  // customers-bulk-actions / T1 (owner L3: «exportar datos de clientes debe
+  // ser un permiso nuevo especial»). `POST /customers/bulk/export` needs this
+  // EXPLICIT row (or the super admin's `manage:all`); `manage:Customer` is not
+  // enough. PermissionSeeder upserts it on boot, so existing databases get it
+  // with the deploy (no data migration); no default role grant besides Super
+  // Admin (prisma/seed.ts).
+  {
+    subject: 'Customer',
+    action: 'export',
+    description: 'Exportar datos de clientes (CSV)',
   },
 
   // Sale permissions

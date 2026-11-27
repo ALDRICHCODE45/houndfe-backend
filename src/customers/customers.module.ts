@@ -11,12 +11,24 @@ import {
   CustomersListingService,
 } from './listing/customers-listing.service';
 import { PrismaCustomersListingReader } from './listing/prisma-customers-listing.reader';
+import {
+  CUSTOMER_BULK_SELECTION_READER,
+  PrismaCustomerBulkSelectionReader,
+} from './bulk/customer-bulk-selection.reader';
+import { CustomerBulkSelectionResolver } from './bulk/customer-bulk-selection.resolver';
+import { CustomersBulkExportService } from './bulk/customers-bulk-export.service';
+import { CustomersBulkController } from './bulk/customers-bulk.controller';
 
 @Module({
   imports: [AuthModule], // Provides JwtAuthGuard, PermissionsGuard, CaslAbilityFactory
   // customers-listing: `GET /customers/listing` must be registered before
-  // `GET /customers/:id` (contract §3.1).
-  controllers: [CustomersListingController, CustomersController],
+  // `GET /customers/:id` (contract §3.1). customers-bulk-actions: the bulk
+  // controller (`POST /customers/bulk/*`) is registered before it as well.
+  controllers: [
+    CustomersListingController,
+    CustomersBulkController,
+    CustomersController,
+  ],
   providers: [
     CustomersService,
     {
@@ -29,7 +41,15 @@ import { PrismaCustomersListingReader } from './listing/prisma-customers-listing
       useClass: PrismaCustomersListingReader,
     },
     { provide: CUSTOMERS_LISTING_CLOCK, useValue: () => new Date() },
+    // customers-bulk-actions / T1: selection resolver (also used by the bulk
+    // statements, T3) and the CSV export.
+    {
+      provide: CUSTOMER_BULK_SELECTION_READER,
+      useClass: PrismaCustomerBulkSelectionReader,
+    },
+    CustomerBulkSelectionResolver,
+    CustomersBulkExportService,
   ],
-  exports: [CustomersService],
+  exports: [CustomersService, CustomerBulkSelectionResolver],
 })
 export class CustomersModule {}

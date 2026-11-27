@@ -4,6 +4,26 @@ import type {
 } from '@nestjs/common/interfaces/external/cors-options.interface';
 import type { Request } from 'express';
 
+/**
+ * Response headers every route exposes to a cross-origin frontend
+ * (customers-bulk-actions / T1, frontend L3.9): the CSV / ZIP filename.
+ */
+export const APP_EXPOSED_HEADERS = ['Content-Disposition'] as const;
+
+/**
+ * The app-wide CORS delegate used by `main.ts`: `editorialCors` with
+ * `Content-Disposition` exposed. The origin and credentials options are passed
+ * through untouched; editorial routes keep their own `exposedHeaders`.
+ */
+export function appCors(
+  options: CorsOptions = {},
+): CorsOptionsDelegate<Request> {
+  return editorialCors({
+    ...options,
+    exposedHeaders: [...APP_EXPOSED_HEADERS],
+  });
+}
+
 /** Preserve deployment origin policy and unrelated routes' default reflection. */
 export function editorialCors(
   options: CorsOptions = {},

@@ -35,7 +35,9 @@ describe('purchase-order permission registry', () => {
           'ChatbotSettingsAllBranches',
           // restock-backorder / T5a: additive backorder permissions.
           'Backorder',
-        ].includes(p.subject),
+        ].includes(p.subject) &&
+        // customers-bulk-actions / T1: additive export:Customer row only.
+        !(p.subject === 'Customer' && p.action === 'export'),
     );
     expect(
       createHash('sha256').update(JSON.stringify(prior)).digest('hex'),
