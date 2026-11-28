@@ -400,6 +400,8 @@ The repo has no audit pattern for exports or reads (E17). v1 writes **one struct
 
 The checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → (statements: busy check) → `filter` validation → permission params → selection resolution → size → generation. (v1: the statements busy check runs before the `filter` is validated.)
 
+Reserved keys (`__proto__`, `constructor`, `prototype`) are checked in the top level, `selection` and nested objects up to 4 levels deep (arrays are not walked; deeper paths still get a `400`, as an unknown property of their parent). If `selection.filter` holds one, only that error is reported.
+
 | HTTP | Body / code | When | Route |
 |---|---|---|---|
 | 400 | standard per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing; `mode` not `ids`/`filter`; keys of the other mode; `customerIds` empty, > 1,000 or non-UUID; `excludeIds` > 1,000 or non-UUID; unknown body key (incl. `__proto__`/`constructor`/`prototype` anywhere in the body); `page`/`limit`/`sortBy`/`sortOrder`, an unknown param (incl. `__proto__`/`constructor`/`prototype`) or a non-string value inside `filter`; `from`/`to` missing, malformed, `to <= from` or > 366 days; bad `sortBy`/`sortOrder` | both |

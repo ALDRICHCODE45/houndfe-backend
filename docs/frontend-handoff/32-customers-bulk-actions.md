@@ -143,6 +143,8 @@ Measured on the test database: 10,000 rows with metrics ≈ 1.1 s, ≈ 1.1 MB.
 
 Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → `filter` values → metric-param permission → ids existence → size.
 
+Reserved keys (`__proto__`, `constructor`, `prototype`) are checked in the top level, `selection` and nested objects up to 4 levels deep (arrays are not walked; deeper paths still get a `400`, as an unknown property of their parent). If `selection.filter` holds one, only that error is reported.
+
 | HTTP | Body / code | When |
 |---|---|---|
 | 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error: "Bad Request" }` | `selection` missing / not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key (incl. `__proto__` / `constructor` / `prototype` anywhere in the body); bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (incl. `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or day value |
@@ -211,6 +213,8 @@ Synchronous; PDFs are rendered one at a time on the API process. Measured with t
 ### 4.5 Errors
 
 Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → **busy check** → `filter` values → ids existence → size / empty → rendering. The busy check comes before the `filter` is validated, so during another run even an invalid request gets `429`.
+
+Reserved keys (`__proto__`, `constructor`, `prototype`) are checked in the top level, `selection` and nested objects up to 4 levels deep (arrays are not walked; deeper paths still get a `400`, as an unknown property of their parent). If `selection.filter` holds one, only that error is reported.
 
 | HTTP | Body / code | When |
 |---|---|---|

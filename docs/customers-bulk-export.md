@@ -155,6 +155,8 @@ Above 10,000 resolved customers the request fails with `400 BULK_SELECTION_TOO_L
 
 Checks run in this order: body / `filter` validation → permission params → selection (ids existence) → size.
 
+Reserved keys (`__proto__`, `constructor`, `prototype`) are checked in the top level, `selection` and nested objects up to 4 levels deep (arrays are not walked; deeper paths still get a `400`, as an unknown property of their parent). If `selection.filter` holds one, only that error is reported.
+
 | HTTP | Body / code | When |
 |---|---|---|
 | 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing or not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key (including `__proto__` / `constructor` / `prototype` anywhere in the body); bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (including `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or `N`-day value (listing rules) |

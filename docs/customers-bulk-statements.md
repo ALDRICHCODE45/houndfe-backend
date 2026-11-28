@@ -80,6 +80,8 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 
 Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → busy check → `filter` values → ids existence → size / empty → rendering. Because the busy check comes before the `filter` values, a request with an invalid filter gets `429` (not `400`) while another run is in progress.
 
+Reserved keys (`__proto__`, `constructor`, `prototype`) are checked in the top level, `selection` and nested objects up to 4 levels deep (arrays are not walked; deeper paths still get a `400`, as an unknown property of their parent). If `selection.filter` holds one, only that error is reported.
+
 | HTTP | Body / code | When |
 |---|---|---|
 | 400 | Nest per-field validation body | `selection` invalid (see the export guide §7); `from` / `to` missing, not an exact `YYYY-MM-DD`, `to <= from`, or more than 366 days; unknown body key |
