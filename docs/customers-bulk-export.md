@@ -54,6 +54,7 @@ Unknown body keys → `400`.
   - `filter: {}` = every customer of the branch.
 - `excludeIds` (optional): 0–1,000 UUIDs never exported. Ids that do not match the filter or do not exist are ignored.
 - `customerIds` is rejected in this mode (`400`).
+- Reserved keys outside `filter`: an own `__proto__` / `constructor` / `prototype` key anywhere else in the body (top level, inside `selection`, or in a nested object) → `400` too, with the body an unknown property gets at that path (`property` names the key; nested keys appear under their parents' `children`).
 - The filter is evaluated when the request arrives: a customer deleted since the table loaded just does not match.
 
 ## 4. Response `200`
@@ -64,7 +65,7 @@ Unknown body keys → `400`.
 | `Content-Disposition` | `attachment; filename="clientes-<YYYY-MM-DD>.csv"` (local business date, `America/Mexico_City` by default) |
 | `Cache-Control` | `no-store` |
 
-- **CORS:** `Content-Disposition` is now listed in `Access-Control-Expose-Headers` for every route (editorial routes keep their own list), so a cross-origin frontend can read the filename (`response.headers.get('Content-Disposition')`). Origins and credentials are unchanged; any `exposedHeaders` configured server-side is merged with it, not replaced.
+- **CORS:** `Content-Disposition` and `Retry-After` are now listed in `Access-Control-Expose-Headers` for every route (editorial routes keep their own list), so a cross-origin frontend can read the filename (`response.headers.get('Content-Disposition')`) and the `429` back-off. Origins and credentials are unchanged; any `exposedHeaders` configured server-side is merged with it, not replaced.
 - Download it as a blob (POST, so a plain link does not work), as you do for the PDFs.
 - The file is built completely before the first byte: an error never arrives as half a file.
 - A selection matching nothing → `200` with the header row only.
@@ -156,7 +157,7 @@ Checks run in this order: body / `filter` validation → permission params → s
 
 | HTTP | Body / code | When |
 |---|---|---|
-| 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing or not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key; bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (including `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or `N`-day value (listing rules) |
+| 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing or not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key (including `__proto__` / `constructor` / `prototype` anywhere in the body); bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (including `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or `N`-day value (listing rules) |
 | 400 | `LISTING_INVALID_NUMBER`, `LISTING_INVERTED_RANGE`, `LISTING_INVALID_DATE`, `LISTING_INVALID_ENUM_VALUE`, `LISTING_TOO_MANY_VALUES`, `LISTING_INVALID_UUID` | a bad value inside `filter`; same rules, `field` names and `details` as the listing — `field` is the plain param name (`"openDebtMin"`, never `"filter.openDebtMin"`) |
 | 400 | `LISTING_PARAM_REQUIRES_PERMISSION` (`details.required: "read:Sale"`) | metric filter in `filter` or metric `sortBy` without `read:Sale`; `field` = first offending filter in the listing order, then `sortBy` |
 | 400 | `BULK_SELECTION_TOO_LARGE` (`details: { count, max }`) | more than 10,000 customers |

@@ -269,9 +269,10 @@ describeIfDb('POST /customers/bulk/export (PostgreSQL)', () => {
         'attachment; filename="clientes-2026-11-26.csv"',
       );
       expect(res.headers['cache-control']).toBe('no-store');
-      // S3: the cross-origin frontend can read the filename.
+      // S3: the cross-origin frontend can read the filename (and the 429
+      // back-off of the statements route).
       expect(res.headers['access-control-expose-headers']).toBe(
-        'Content-Disposition',
+        'Content-Disposition,Retry-After',
       );
       expect(res.headers['access-control-allow-origin']).toBe(ORIGIN);
 

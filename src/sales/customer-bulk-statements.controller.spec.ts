@@ -391,3 +391,196 @@ describe('CustomerBulkStatementsController — reserved keys in selection.filter
     expect(findPage).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Reserved keys OUTSIDE `selection.filter` (top level, `selection`, nested
+ * plain objects): the shared interceptor rejects them before the pipe strips
+ * them, with the 400 an ordinary unknown property gets at that path.
+ */
+describe('CustomerBulkStatementsController — reserved keys anywhere in the body (HTTP)', () => {
+  let app: INestApplication;
+  const server = () => app.getHttpServer() as Server;
+  const summarize = jest.fn().mockResolvedValue({ count: 1 });
+  const findPage = jest.fn().mockResolvedValue([]);
+  const getStatement = jest.fn();
+  const renderCustomerStatementPdf = jest.fn();
+
+  beforeAll(async () => {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const { can, build } = new AbilityBuilder<AppAbility>(createMongoAbility);
+    can('read', 'Sale');
+    can('read', 'Customer');
+    const granted = build();
+    const attach = {
+      canActivate: (ctx: ExecutionContext) => {
+        const req = ctx.switchToHttp().getRequest<Record<string, unknown>>();
+        req.user = user;
+        req.ability = granted;
+        return true;
+      },
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [CustomerBulkStatementsController],
+      providers: [
+        {
+          provide: CustomerBulkStatementsService,
+          useFactory: () =>
+            new CustomerBulkStatementsService(
+              new CustomerBulkSelectionResolver(
+                { summarize, findPage, listOptions: jest.fn() },
+                { findExistingIds: jest.fn() },
+                config,
+                () => new Date('2026-11-27T12:00:00.000Z'),
+              ),
+              { getStatement } as unknown as CustomerStatementService,
+              {
+                renderCustomerStatementPdf,
+              } as unknown as PdfGenerationService,
+              new CustomerBulkStatementsRunGuard(),
+              config,
+            ),
+        },
+      ],
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue(attach)
+      .overrideGuard(TenantContextGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(PermissionsGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.useGlobalPipes(createAppValidationPipe());
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    summarize.mockClear();
+    findPage.mockClear();
+    getStatement.mockClear();
+    renderCustomerStatementPdf.mockClear();
+  });
+
+  const post = (raw: string) =>
+    request(server())
+      .post('/customers/bulk/statements')
+      .set('Content-Type', 'application/json')
+      .send(raw);
+
+  const topLevel = (key: string, value: string) =>
+    `{"selection":{"mode":"filter","filter":{}},"from":"2026-11-01","to":"2026-12-01","${key}":${value}}`;
+  const inSelection = (key: string, value: string) =>
+    `{"selection":{"mode":"filter","filter":{},"${key}":${value}},"from":"2026-11-01","to":"2026-12-01"}`;
+
+  const nothingRead = () => {
+    expect(summarize).not.toHaveBeenCalled();
+    expect(findPage).not.toHaveBeenCalled();
+    expect(getStatement).not.toHaveBeenCalled();
+    expect(renderCustomerStatementPdf).not.toHaveBeenCalled();
+  };
+
+  /** The 400 body an ordinary unknown key `nope` gets, renamed to `key`. */
+  const unknownBodyFor = async (
+    build: (key: string, value: string) => string,
+    key: string,
+  ): Promise<unknown> => {
+    const control = await post(build('nope', '"x"'));
+    expect(control.status).toBe(400);
+    return JSON.parse(
+      JSON.stringify(control.body).replace(/nope/g, key),
+    ) as unknown;
+  };
+
+  it('control: a valid body passes validation and reaches the readers', async () => {
+    const res = await post(
+      '{"selection":{"mode":"filter","filter":{}},"from":"2026-11-01","to":"2026-12-01"}',
+    );
+    expect(res.status).not.toBe(400);
+    expect(summarize).toHaveBeenCalled();
+  });
+
+  it('control: an ordinary unknown top-level key → the normal 400', async () => {
+    const res = await post(topLevel('nope', '"x"'));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      statusCode: 400,
+      error: 'Bad Request',
+      message: [
+        expect.objectContaining({
+          property: 'nope',
+          constraints: {
+            whitelistValidation: 'property nope should not exist',
+          },
+        }),
+      ],
+    });
+    nothingRead();
+  });
+
+  const cases: Array<[string, string]> = [
+    ['__proto__', '"x"'],
+    ['__proto__', '["x"]'],
+    ['__proto__', '{"a":"b"}'],
+    ['constructor', '"x"'],
+    ['constructor', '["x"]'],
+    ['constructor', '{"a":"b"}'],
+    ['prototype', '"x"'],
+    ['prototype', '["x"]'],
+    ['prototype', '{"a":"b"}'],
+  ];
+
+  it.each(cases)(
+    'own top-level %s key (value %s) → the unknown-property 400, nothing read',
+    async (key, value) => {
+      const expected = await unknownBodyFor(topLevel, key);
+      const res = await post(topLevel(key, value));
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(expected);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          message: [
+            expect.objectContaining({
+              property: key,
+              constraints: {
+                whitelistValidation: `property ${key} should not exist`,
+              },
+            }),
+          ],
+        }),
+      );
+      nothingRead();
+    },
+  );
+
+  it.each(cases)(
+    'own %s key inside selection (value %s) → the unknown-property 400, nothing read',
+    async (key, value) => {
+      const expected = await unknownBodyFor(inSelection, key);
+      const res = await post(inSelection(key, value));
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(expected);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          message: [
+            expect.objectContaining({
+              property: 'selection',
+              children: [
+                expect.objectContaining({
+                  property: key,
+                  constraints: {
+                    whitelistValidation: `property ${key} should not exist`,
+                  },
+                }),
+              ],
+            }),
+          ],
+        }),
+      );
+      nothingRead();
+    },
+  );
+});

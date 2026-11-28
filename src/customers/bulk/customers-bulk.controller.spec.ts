@@ -253,3 +253,245 @@ describe('CustomersBulkController — reserved keys in selection.filter (HTTP)',
     },
   );
 });
+
+/**
+ * Reserved keys OUTSIDE `selection.filter`: Nest's validation pipe strips own
+ * `__proto__` / `constructor` / `prototype` keys anywhere in the body, so the
+ * interceptor rejects them at the top level and inside `selection` (and any
+ * nested plain object) with the 400 an ordinary unknown property gets there.
+ */
+describe('CustomersBulkController — reserved keys anywhere in the body (HTTP)', () => {
+  let app: INestApplication;
+  const server = () => app.getHttpServer() as Server;
+  const summarize = jest.fn().mockResolvedValue({ count: 0 });
+  const findPage = jest.fn().mockResolvedValue([]);
+  const exporter = ability([
+    ['read', 'Customer'],
+    ['export', 'Customer'],
+  ]);
+
+  beforeAll(async () => {
+    const config = { get: () => undefined } as unknown as ConfigService;
+    const attach = {
+      canActivate: (ctx: ExecutionContext) => {
+        const req = ctx.switchToHttp().getRequest<Record<string, unknown>>();
+        req.user = user;
+        req.ability = exporter;
+        return true;
+      },
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [CustomersBulkController],
+      providers: [
+        {
+          provide: CustomersBulkExportService,
+          useFactory: () =>
+            new CustomersBulkExportService(
+              new CustomerBulkSelectionResolver(
+                { summarize, findPage, listOptions: jest.fn() },
+                { findExistingIds: jest.fn() },
+                config,
+                () => new Date('2026-11-27T12:00:00.000Z'),
+              ),
+              config,
+              () => new Date('2026-11-27T12:00:00.000Z'),
+            ),
+        },
+      ],
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue(attach)
+      .overrideGuard(TenantContextGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(PermissionsGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    app.useGlobalPipes(createAppValidationPipe());
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    summarize.mockClear();
+    findPage.mockClear();
+  });
+
+  const post = (raw: string) =>
+    request(server())
+      .post('/customers/bulk/export')
+      .set('Content-Type', 'application/json')
+      .send(raw);
+
+  const topLevel = (key: string, value: string) =>
+    `{"selection":{"mode":"filter","filter":{}},"sortOrder":"asc","${key}":${value}}`;
+  const inSelection = (key: string, value: string) =>
+    `{"selection":{"mode":"filter","filter":{},"${key}":${value}},"sortOrder":"asc"}`;
+
+  /** The 400 body an ordinary unknown key `nope` gets, renamed to `key`. */
+  const unknownBodyFor = async (
+    build: (key: string, value: string) => string,
+    key: string,
+  ): Promise<unknown> => {
+    const control = await post(build('nope', '"x"'));
+    expect(control.status).toBe(400);
+    return JSON.parse(
+      JSON.stringify(control.body).replace(/nope/g, key),
+    ) as unknown;
+  };
+
+  it('control: a valid body exports (200)', async () => {
+    const res = await post(
+      '{"selection":{"mode":"filter","filter":{}},"sortOrder":"asc"}',
+    );
+    expect(res.status).toBe(200);
+    expect(summarize).toHaveBeenCalled();
+  });
+
+  it('control: an ordinary unknown top-level key → the normal 400', async () => {
+    const res = await post(topLevel('nope', '"x"'));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      statusCode: 400,
+      error: 'Bad Request',
+      message: [
+        expect.objectContaining({
+          property: 'nope',
+          constraints: {
+            whitelistValidation: 'property nope should not exist',
+          },
+        }),
+      ],
+    });
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
+  const cases: Array<[string, string]> = [
+    ['__proto__', '"x"'],
+    ['__proto__', '["x"]'],
+    ['__proto__', '{"a":"b"}'],
+    ['constructor', '"x"'],
+    ['constructor', '["x"]'],
+    ['constructor', '{"a":"b"}'],
+    ['prototype', '"x"'],
+    ['prototype', '["x"]'],
+    ['prototype', '{"a":"b"}'],
+  ];
+
+  it.each(cases)(
+    'own top-level %s key (value %s) → the unknown-property 400, nothing read',
+    async (key, value) => {
+      const expected = await unknownBodyFor(topLevel, key);
+      const res = await post(topLevel(key, value));
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(expected);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          message: [
+            expect.objectContaining({
+              property: key,
+              constraints: {
+                whitelistValidation: `property ${key} should not exist`,
+              },
+            }),
+          ],
+        }),
+      );
+      expect(summarize).not.toHaveBeenCalled();
+      expect(findPage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(cases)(
+    'own %s key inside selection (value %s) → the unknown-property 400, nothing read',
+    async (key, value) => {
+      const expected = await unknownBodyFor(inSelection, key);
+      const res = await post(inSelection(key, value));
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(expected);
+      expect(res.body).toEqual(
+        expect.objectContaining({
+          message: [
+            expect.objectContaining({
+              property: 'selection',
+              children: [
+                expect.objectContaining({
+                  property: key,
+                  constraints: {
+                    whitelistValidation: `property ${key} should not exist`,
+                  },
+                }),
+              ],
+            }),
+          ],
+        }),
+      );
+      expect(summarize).not.toHaveBeenCalled();
+      expect(findPage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports every offending path at once (top level + selection)', async () => {
+    const res = await post(
+      '{"selection":{"mode":"filter","filter":{},"constructor":"x"},"__proto__":"y"}',
+    );
+    expect(res.status).toBe(400);
+    const message = (
+      res.body as {
+        message: Array<{ property: string; children?: unknown[] }>;
+      }
+    ).message;
+    expect(message.map((e) => e.property).sort()).toEqual([
+      '__proto__',
+      'selection',
+    ]);
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
+  it('a reserved key in a nested plain object below selection → 400 naming the path', async () => {
+    const res = await post(
+      '{"selection":{"mode":"filter","filter":{},"extra":{"prototype":"x"}}}',
+    );
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        message: [
+          expect.objectContaining({
+            property: 'selection',
+            children: [
+              expect.objectContaining({
+                property: 'extra',
+                children: [
+                  expect.objectContaining({
+                    property: 'prototype',
+                    constraints: {
+                      whitelistValidation:
+                        'property prototype should not exist',
+                    },
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(summarize).not.toHaveBeenCalled();
+  });
+
+  it('arrays of strings and ordinary keys are left to the pipe', async () => {
+    const res = await post(
+      '{"selection":{"mode":"filter","filter":{},"excludeIds":["__proto__"]}}',
+    );
+    expect(res.status).toBe(400);
+    expect(
+      (res.body as { message: Array<{ property: string }> }).message.map(
+        (e) => e.property,
+      ),
+    ).toEqual(['selection']);
+    expect(JSON.stringify(res.body)).toContain('isUuid');
+  });
+});

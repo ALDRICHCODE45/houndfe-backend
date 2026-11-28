@@ -79,6 +79,82 @@ export function assertNoReservedBulkFilterKeys(raw: unknown): void {
   if (errors.length > 0) throw exceptionFactory(errors);
 }
 
+/** How many object levels of the raw body are checked for reserved keys. */
+export const MAX_RESERVED_KEY_DEPTH = 4;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The errors for every own reserved key of `raw` and of its nested plain
+ * objects (arrays are not walked), shaped exactly like the global pipe's: a
+ * reserved key is a `whitelistValidation` error on that property, nested
+ * under its parents' `children`. `skip(path)` excludes a subtree checked elsewhere.
+ */
+function reservedKeyErrors(
+  raw: Record<string, unknown>,
+  path: readonly string[],
+  skip: (path: readonly string[]) => boolean,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  for (const key of Object.keys(raw)) {
+    if (BULK_FILTER_RESERVED_KEYS.has(key)) {
+      // Exactly the pipe's unknown-property error (no `children` on a leaf).
+      errors.push(
+        Object.assign(new ValidationError(), {
+          property: key,
+          constraints: {
+            whitelistValidation: `property ${key} should not exist`,
+          },
+        }),
+      );
+      continue;
+    }
+    const value = Object.getOwnPropertyDescriptor(raw, key)?.value as unknown;
+    const childPath = [...path, key];
+    if (
+      !isPlainObject(value) ||
+      childPath.length >= MAX_RESERVED_KEY_DEPTH ||
+      skip(childPath)
+    ) {
+      continue;
+    }
+    const children = reservedKeyErrors(value, childPath, skip);
+    if (children.length > 0) {
+      errors.push(
+        Object.assign(new ValidationError(), { property: key, children }),
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Throws the 400 an unknown property gets when the RAW (pre-pipe) body
+ * carries an own reserved key at the top level, inside `selection` or in any
+ * nested plain object (up to `MAX_RESERVED_KEY_DEPTH` levels): the global
+ * pipe would strip it silently. `selection.filter` keeps its own check
+ * (`assertNoReservedBulkFilterKeys`, plain param names), run first.
+ */
+export function assertNoReservedBulkBodyKeys(body: unknown): void {
+  if (!isPlainObject(body)) return;
+  const selection = Object.getOwnPropertyDescriptor(body, 'selection')
+    ?.value as unknown;
+  if (isPlainObject(selection)) {
+    assertNoReservedBulkFilterKeys(
+      Object.getOwnPropertyDescriptor(selection, 'filter')?.value,
+    );
+  }
+  const errors = reservedKeyErrors(
+    body,
+    [],
+    (path) =>
+      path.length === 2 && path[0] === 'selection' && path[1] === 'filter',
+  );
+  if (errors.length > 0) throw exceptionFactory(errors);
+}
+
 /** What a query-string value can be: a string or a repeated param. */
 function isUrlValue(value: unknown): boolean {
   return (

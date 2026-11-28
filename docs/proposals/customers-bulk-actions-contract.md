@@ -31,12 +31,12 @@ Answers to §12 (owner relayed by the frontend, 2026-11-27, task log L2–L5):
 | Q6 | Owner: «Asumimos Excel en es-MX y mantenemos el truco `="03100"` para el CP.» | Comma separator, `="03100"` CP kept |
 | Q7 | Frontend: «tu decisión técnica. Si el ZIP propio queda bien testeado, va sin dependencia nueva.» | In-repo ZIP writer, no dependency (§3.6), with DEFLATE + store fallback |
 | Q8 | Frontend: «las columnas están bien.» | 28 columns of §4.3 unchanged |
-| Q9 | Frontend: «exponé `Content-Disposition` en CORS (`exposedHeaders`).» | `Content-Disposition` is in `Access-Control-Expose-Headers` on every route (editorial routes keep their own list; caller-configured `exposedHeaders` are merged). Only that header is exposed — **`Retry-After` is not**, so a cross-origin client reads `details.retryAfterSeconds` of the 429 body |
+| Q9 | Frontend: «exponé `Content-Disposition` en CORS (`exposedHeaders`).» | `Content-Disposition` and `Retry-After` are in `Access-Control-Expose-Headers` on every route (editorial routes keep their own list; caller-configured `exposedHeaders` are merged), so a cross-origin client can read the filename and the 429 back-off (`details.retryAfterSeconds` of the 429 body carries the same value) |
 | Q10 | Frontend: «404 estricto con la lista de ids faltantes.» | Strict 404, ids in **`details.missingIds`** (v0 said `details.customerIds`) |
 
 Other changes found during implementation:
 
-- **Reserved filter keys:** an own `__proto__` / `constructor` / `prototype` key inside `selection.filter` → `400` (same body as any unknown param), on both routes. Known gap: the global validation pipe silently strips such keys at the **top level of the body or of `selection`** (outside `filter`), so they are ignored instead of rejected.
+- **Reserved filter keys:** an own `__proto__` / `constructor` / `prototype` key inside `selection.filter` → `400` (same body as any unknown param), on both routes. The same keys anywhere else in the body (top level, `selection`, nested objects) → `400` with the body an unknown property gets at that path (rejected before the global validation pipe, which would otherwise strip them silently).
 - **Bulk statements guard order:** the one-run-per-process check happens **before** the selection is resolved, so during another run even a request with a bad `filter` value gets `429`, not the `400`.
 - **One run per replica, across tenants:** the busy slot is an in-memory singleton, by design.
 - **Measured:** 10,000 CSV rows with metrics ≈ 1.1 s, ≈ 1.1 MB. Statements: ≈ 50 ms for an empty statement, ≈ 180 ms median / ≈ 210 ms p95 for 20 sales + 10 payments (≈ 35 KB each); a run of 50 full statements ≈ 9–10 s. Below the 400 ms p95 gate of §3.3, so the cap stays 50 in-process.
@@ -398,11 +398,11 @@ The repo has no audit pattern for exports or reads (E17). v1 writes **one struct
 
 ## 7. Errors
 
-The checks run in this order: route permissions → reserved `filter` keys → body shape → (statements: busy check) → `filter` validation → permission params → selection resolution → size → generation. (v1: the statements busy check runs before the `filter` is validated.)
+The checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → (statements: busy check) → `filter` validation → permission params → selection resolution → size → generation. (v1: the statements busy check runs before the `filter` is validated.)
 
 | HTTP | Body / code | When | Route |
 |---|---|---|---|
-| 400 | standard per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing; `mode` not `ids`/`filter`; keys of the other mode; `customerIds` empty, > 1,000 or non-UUID; `excludeIds` > 1,000 or non-UUID; unknown body key; `page`/`limit`/`sortBy`/`sortOrder`, an unknown param (incl. `__proto__`/`constructor`/`prototype`) or a non-string value inside `filter`; `from`/`to` missing, malformed, `to <= from` or > 366 days; bad `sortBy`/`sortOrder` | both |
+| 400 | standard per-field validation body `{ statusCode, message: [ValidationError…], error }` | `selection` missing; `mode` not `ids`/`filter`; keys of the other mode; `customerIds` empty, > 1,000 or non-UUID; `excludeIds` > 1,000 or non-UUID; unknown body key (incl. `__proto__`/`constructor`/`prototype` anywhere in the body); `page`/`limit`/`sortBy`/`sortOrder`, an unknown param (incl. `__proto__`/`constructor`/`prototype`) or a non-string value inside `filter`; `from`/`to` missing, malformed, `to <= from` or > 366 days; bad `sortBy`/`sortOrder` | both |
 | 400 | `LISTING_INVALID_ENUM_VALUE`, `LISTING_TOO_MANY_VALUES`, `LISTING_INVALID_UUID`, `LISTING_INVALID_NUMBER`, `LISTING_INVALID_DATE`, `LISTING_INVERTED_RANGE` (EXISTS, E29) | a bad value inside `filter`, same rules and `field` names as the listing | both |
 | 400 | `LISTING_PARAM_REQUIRES_PERMISSION` (EXISTS, E22) | metric filter in `filter` or metric `sortBy` without `read:Sale` | export |
 | 400 | **NEW** `BULK_SELECTION_TOO_LARGE`, `details: { count, max }` | resolved customers > 50 (statements) or > 10,000 (export) | both |
@@ -410,7 +410,7 @@ The checks run in this order: route permissions → reserved `filter` keys → b
 | 403 | `INSUFFICIENT_PERMISSIONS` (domain body, code in `error`) | a route permission missing (§5); export: `manage:Customer` without the explicit `export:Customer` | both |
 | 404 | **NEW** `BULK_CUSTOMERS_NOT_FOUND`, `details: { missingIds: [...] }` | ids mode: an id is unknown, foreign or deleted (§2.4); or deleted mid-run (§3.5) | both |
 | 413 | framework body | body over the JSON limit (not reachable within the caps) | both |
-| 429 | **NEW** `BULK_EXPORT_BUSY`, `details: { retryAfterSeconds: 10 }`, header `Retry-After: 10` (not CORS-exposed) | another bulk statement run is in progress on this process (§3.3) | statements |
+| 429 | **NEW** `BULK_EXPORT_BUSY`, `details: { retryAfterSeconds: 10 }`, header `Retry-After: 10` (CORS-exposed) | another bulk statement run is in progress on this process (§3.3) | statements |
 | 500 | `PDF_GENERATION_FAILED` (EXISTS, E6; Nest body, code in `message`) | any statement failed to render; nothing sent | statements |
 | 503 | `BULK_EXPORT_TIMEOUT` `{deadlineSeconds: 120}` | a bulk statements run exceeds its 120 s deadline (slot freed at once) | statements |
 
@@ -435,7 +435,7 @@ The new `BULK_*` selection codes use the listing envelope `{ statusCode, code, m
 2. **Statements:** disable the button when N > 50, with «Máximo 50 clientes por descarga». Ask for the period (presets → `from`/`to`). Show a spinner (expect up to ~15 s). On `429`, retry after `Retry-After` and show «Otra descarga en curso». On `404 BULK_CUSTOMERS_NOT_FOUND`, drop the ids and offer to retry.
 3. **CSV:** send the current filter and sort. Disable when N > 10,000. Save the blob as `clientes-<fecha>.csv`.
 4. Without `read:Sale`: hide «Estados de cuenta». The CSV omits the metric columns; tell the user if useful.
-5. v1: hide «Exportar CSV» unless the user holds `export:Customer` (or `manage:all`); `manage:Customer` alone is not enough. Read the file name from `Content-Disposition` (CORS-exposed). On `429` use `details.retryAfterSeconds` (the `Retry-After` header is not CORS-exposed). Full flow: handoff 32.
+5. v1: hide «Exportar CSV» unless the user holds `export:Customer` (or `manage:all`); `manage:Customer` alone is not enough. Read the file name from `Content-Disposition` (CORS-exposed). On `429` use `details.retryAfterSeconds` or the `Retry-After` header (both CORS-readable). Full flow: handoff 32.
 
 ## 10. Size and risk
 

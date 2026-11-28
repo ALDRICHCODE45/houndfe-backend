@@ -6,9 +6,13 @@ import type { Request } from 'express';
 
 /**
  * Response headers every route exposes to a cross-origin frontend
- * (customers-bulk-actions / T1, frontend L3.9): the CSV / ZIP filename.
+ * (customers-bulk-actions / T1, frontend L3.9): the CSV / ZIP filename and
+ * the `429 BULK_EXPORT_BUSY` back-off.
  */
-export const APP_EXPOSED_HEADERS = ['Content-Disposition'] as const;
+export const APP_EXPOSED_HEADERS = [
+  'Content-Disposition',
+  'Retry-After',
+] as const;
 
 /** Caller headers first, then the app ones; case-insensitive dedupe. */
 function mergeExposedHeaders(caller: CorsOptions['exposedHeaders']): string[] {
@@ -27,7 +31,7 @@ function mergeExposedHeaders(caller: CorsOptions['exposedHeaders']): string[] {
 
 /**
  * The app-wide CORS delegate used by `main.ts`: `editorialCors` with
- * `Content-Disposition` exposed, merged with any caller `exposedHeaders`
+ * `Content-Disposition` and `Retry-After` exposed, merged with any caller `exposedHeaders`
  * (string or array). The origin and credentials options are passed through
  * untouched; editorial routes keep their own `exposedHeaders`.
  */

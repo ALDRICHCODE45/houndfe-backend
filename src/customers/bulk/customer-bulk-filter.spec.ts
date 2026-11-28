@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
 import {
+  assertNoReservedBulkBodyKeys,
   assertNoReservedBulkFilterKeys,
   parseCustomerBulkFilter,
 } from './customer-bulk-filter';
@@ -146,6 +147,85 @@ describe('parseCustomerBulkFilter (contract §2.1, §2.3, §4.4)', () => {
     expect(() => assertNoReservedBulkFilterKeys('x')).not.toThrow();
     expect(() =>
       assertNoReservedBulkFilterKeys({ hasDebt: 'true', nope: 'x' }),
+    ).not.toThrow();
+  });
+});
+
+describe('assertNoReservedBulkBodyKeys (raw body, before the pipe)', () => {
+  const parse = (json: string) => JSON.parse(json) as unknown;
+
+  it('ignores non-objects, arrays and bodies without reserved keys', () => {
+    for (const body of [undefined, null, 'x', ['__proto__']]) {
+      expect(() => assertNoReservedBulkBodyKeys(body)).not.toThrow();
+    }
+    expect(() =>
+      assertNoReservedBulkBodyKeys(
+        parse(
+          '{"selection":{"mode":"ids","customerIds":["__proto__","constructor"]},"nope":{"a":"b"}}',
+        ),
+      ),
+    ).not.toThrow();
+  });
+
+  it('does not walk arrays (object items included: the DTO rejects them)', () => {
+    expect(() =>
+      assertNoReservedBulkBodyKeys(
+        parse('{"selection":{"excludeIds":[{"__proto__":"x"}]}}'),
+      ),
+    ).not.toThrow();
+  });
+
+  it('a reserved key in selection.filter keeps the filter check (plain name)', () => {
+    const body = rejection(() =>
+      assertNoReservedBulkBodyKeys(
+        parse('{"__proto__":"y","selection":{"filter":{"constructor":"x"}}}'),
+      ),
+    );
+    expect(body.message).toEqual([
+      expect.objectContaining({
+        property: 'constructor',
+        constraints: {
+          whitelistValidation: 'property constructor should not exist',
+        },
+      }),
+    ]);
+  });
+
+  it('nests the error under its parents, down to 4 object levels', () => {
+    const body = rejection(() =>
+      assertNoReservedBulkBodyKeys(parse('{"a":{"b":{"c":{"prototype":1}}}}')),
+    );
+    expect(body.message).toEqual([
+      {
+        property: 'a',
+        children: [
+          {
+            property: 'b',
+            children: [
+              {
+                property: 'c',
+                children: [
+                  {
+                    property: 'prototype',
+                    constraints: {
+                      whitelistValidation:
+                        'property prototype should not exist',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('stops at the depth bound', () => {
+    expect(() =>
+      assertNoReservedBulkBodyKeys(
+        parse('{"a":{"b":{"c":{"d":{"__proto__":1}}}}}'),
+      ),
     ).not.toThrow();
   });
 });

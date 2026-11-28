@@ -1,9 +1,19 @@
 /**
  * customers-bulk-actions / T1 (S3, frontend L3.9) — the app-wide CORS config
  * exposes `Content-Disposition` so a cross-origin frontend can read the CSV /
- * ZIP filename. Origins, credentials and the editorial overrides are unchanged.
+ * ZIP filename, and `Retry-After` so it can read the 429 back-off. Origins,
+ * credentials and the editorial overrides are unchanged.
  */
-import { Controller, Get, Header, Post } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Header,
+  HttpException,
+  HttpStatus,
+  Post,
+  Res,
+} from '@nestjs/common';
+import type { Response } from 'express';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { Server } from 'node:http';
@@ -18,6 +28,11 @@ class Probe {
   @Header('Content-Disposition', 'attachment; filename="clientes-x.csv"')
   export() {
     return 'csv';
+  }
+  @Post('customers/bulk/statements')
+  busy(@Res() res: Response) {
+    res.set('Retry-After', '10');
+    throw new HttpException('busy', HttpStatus.TOO_MANY_REQUESTS);
   }
   @Get('products/id/editorial')
   editorial() {
@@ -52,13 +67,19 @@ describe.each([
     await app.close();
   });
 
-  it('exposes Content-Disposition on an actual cross-origin response', async () => {
+  it('exposes Content-Disposition and Retry-After on an actual cross-origin response', async () => {
     const response = await request(server())
       .post('/customers/bulk/export')
       .set('Origin', 'https://allowed.test');
     expect(response.status).toBe(201);
     expect(response.headers['access-control-expose-headers']).toBe(
-      'Content-Disposition',
+      'Content-Disposition,Retry-After',
+    );
+    const exposed = String(response.headers['access-control-expose-headers'])
+      .split(',')
+      .map((h) => h.trim().toLowerCase());
+    expect(exposed).toEqual(
+      expect.arrayContaining(['content-disposition', 'retry-after']),
     );
     expect(response.headers['content-disposition']).toBe(
       'attachment; filename="clientes-x.csv"',
@@ -68,6 +89,20 @@ describe.each([
     );
     expect(response.headers['access-control-allow-credentials']).toBe(
       configured ? 'true' : undefined,
+    );
+  });
+
+  it('a 429 exposes Retry-After cross-origin', async () => {
+    const response = await request(server())
+      .post('/customers/bulk/statements')
+      .set('Origin', 'https://allowed.test');
+    expect(response.status).toBe(429);
+    expect(response.headers['retry-after']).toBe('10');
+    expect(response.headers['access-control-expose-headers']).toBe(
+      'Content-Disposition,Retry-After',
+    );
+    expect(response.headers['access-control-allow-origin']).toBe(
+      configured ? 'https://allowed.test' : '*',
     );
   });
 
@@ -103,7 +138,7 @@ describe.each([
 });
 
 // Advisory R3-appcors-overrides-exposed: caller exposedHeaders are merged
-// (deduped) with Content-Disposition, never silently discarded.
+// (deduped) with Content-Disposition and Retry-After, never silently discarded.
 describe('appCors — caller exposedHeaders', () => {
   function resolve(options: CorsOptions, url = '/customers/bulk/export') {
     const req = {
@@ -120,19 +155,27 @@ describe('appCors — caller exposedHeaders', () => {
   }
 
   it.each<[CorsOptions['exposedHeaders'], string[]]>([
-    [undefined, ['Content-Disposition']],
-    ['X-Request-Id', ['X-Request-Id', 'Content-Disposition']],
+    [undefined, ['Content-Disposition', 'Retry-After']],
+    ['X-Request-Id', ['X-Request-Id', 'Content-Disposition', 'Retry-After']],
     [
       'X-Request-Id, X-Total',
-      ['X-Request-Id', 'X-Total', 'Content-Disposition'],
+      ['X-Request-Id', 'X-Total', 'Content-Disposition', 'Retry-After'],
     ],
-    [['X-Request-Id'], ['X-Request-Id', 'Content-Disposition']],
+    [['X-Request-Id'], ['X-Request-Id', 'Content-Disposition', 'Retry-After']],
     [
       ['content-disposition', 'X-A'],
-      ['content-disposition', 'X-A'],
+      ['content-disposition', 'X-A', 'Retry-After'],
     ],
-    ['', ['Content-Disposition']],
-    [[], ['Content-Disposition']],
+    [
+      ['RETRY-AFTER', 'X-A'],
+      ['RETRY-AFTER', 'X-A', 'Content-Disposition'],
+    ],
+    [
+      'retry-after, content-disposition',
+      ['retry-after', 'content-disposition'],
+    ],
+    ['', ['Content-Disposition', 'Retry-After']],
+    [[], ['Content-Disposition', 'Retry-After']],
   ])('%j → %j', (exposedHeaders, expected) => {
     const options: CorsOptions = { origin: ['https://allowed.test'] };
     if (exposedHeaders !== undefined) options.exposedHeaders = exposedHeaders;

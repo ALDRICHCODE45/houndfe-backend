@@ -22,23 +22,12 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import type { AuthenticatedUser } from '../../auth/interfaces/jwt-payload.interface';
 import { InsufficientPermissionsError } from '../../shared/domain/domain-error';
 import { TenantContextGuard } from '../../shared/tenant/tenant-context.guard';
-import { assertNoReservedBulkFilterKeys } from './customer-bulk-filter';
+import { assertNoReservedBulkBodyKeys } from './customer-bulk-filter';
 import { holdsCustomerExportPermission } from './customer-export.permission';
 import { CustomersBulkExportBodyDto } from './customers-bulk-export.dto';
 import { CustomersBulkExportService } from './customers-bulk-export.service';
 
 type BulkRequest = Request & { ability?: AppAbility; user: AuthenticatedUser };
-
-/** `selection.filter` of the raw JSON body, before the validation pipe. */
-function rawFilter(body: unknown): unknown {
-  if (body === null || typeof body !== 'object') return undefined;
-  const selection: unknown = Object.getOwnPropertyDescriptor(
-    body,
-    'selection',
-  )?.value;
-  if (selection === null || typeof selection !== 'object') return undefined;
-  return Object.getOwnPropertyDescriptor(selection, 'filter')?.value;
-}
 
 /**
  * Advisory R3-filter-proto-key: Nest's `ValidationPipe` deletes own
@@ -46,12 +35,14 @@ function rawFilter(body: unknown): unknown {
  * (`stripProtoKeys`) before validating, so an unknown filter param spelled
  * that way would be silently accepted. Interceptors run after the guards and
  * before the pipes: reject it here with the 400 any unknown filter param gets.
+ * The same holds anywhere else in the body (top level, `selection`, nested
+ * plain objects): those get the 400 an unknown property gets at that path.
  */
 @Injectable()
 export class RejectReservedBulkFilterKeysInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const req = context.switchToHttp().getRequest<Request>();
-    assertNoReservedBulkFilterKeys(rawFilter(req.body));
+    assertNoReservedBulkBodyKeys(req.body);
     return next.handle();
   }
 }

@@ -65,6 +65,7 @@ Shapes come from the code: `src/customers/bulk/**`, `src/sales/customer-bulk-sta
   - `filter: {}` = every customer of the branch.
 - `excludeIds`: optional, 0–1,000 UUIDs never included. Ids that do not match or do not exist are ignored.
 - `customerIds` in this mode → `400`.
+- Reserved keys outside `filter`: an own `__proto__` / `constructor` / `prototype` key anywhere else in the body (top level, inside `selection`, or in a nested object) → `400` too, with the body an unknown property gets at that path (`property` names the key; nested keys appear under their parents' `children`).
 - The filter is evaluated when the request arrives: a customer deleted since the table loaded just does not match (no 404).
 
 ### 2.3 Limits
@@ -103,7 +104,7 @@ Over the cap → `400 BULK_SELECTION_TOO_LARGE` with `details: { count, max }`, 
 | `Content-Disposition` | `attachment; filename="clientes-<YYYY-MM-DD>.csv"` (local business date, `America/Mexico_City` by default) |
 | `Cache-Control` | `no-store` |
 
-- `Content-Disposition` is in `Access-Control-Expose-Headers` on every route, so a cross-origin frontend can read it.
+- `Content-Disposition` (and `Retry-After`) are in `Access-Control-Expose-Headers` on every route, so a cross-origin frontend can read them.
 - The file is built completely before the first byte: an error never arrives as half a file.
 - A selection matching nothing → `200` with the header row only (no `BULK_SELECTION_EMPTY` on this route).
 
@@ -140,11 +141,11 @@ Measured on the test database: 10,000 rows with metrics ≈ 1.1 s, ≈ 1.1 MB.
 
 ### 3.5 Errors
 
-Checks run in this order: route permissions → reserved `filter` keys → body shape → `filter` values → metric-param permission → ids existence → size.
+Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → `filter` values → metric-param permission → ids existence → size.
 
 | HTTP | Body / code | When |
 |---|---|---|
-| 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error: "Bad Request" }` | `selection` missing / not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key; bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (incl. `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or day value |
+| 400 | Nest per-field validation body `{ statusCode, message: [ValidationError…], error: "Bad Request" }` | `selection` missing / not an object; `mode` not `ids` / `filter`; a key of the other mode; `customerIds` empty, > 1,000 or not UUIDs; `excludeIds` > 1,000 or not UUIDs; unknown body or selection key (incl. `__proto__` / `constructor` / `prototype` anywhere in the body); bad `sortBy` / `sortOrder`; inside `filter`: `page` / `limit` / `sortBy` / `sortOrder`, an unknown param (incl. `__proto__` / `constructor` / `prototype`), a non-string value, a bad boolean or day value |
 | 400 | `LISTING_INVALID_NUMBER`, `LISTING_INVERTED_RANGE`, `LISTING_INVALID_DATE`, `LISTING_INVALID_ENUM_VALUE`, `LISTING_TOO_MANY_VALUES`, `LISTING_INVALID_UUID` | a bad value inside `filter`; same rules, `field` and `details` as the listing |
 | 400 | `LISTING_PARAM_REQUIRES_PERMISSION` (`details.required: "read:Sale"`) | without `read:Sale`: a metric filter in `filter` or a metric `sortBy`; `field` = first offending filter in listing order, then `sortBy` |
 | 400 | `BULK_SELECTION_TOO_LARGE` (`details: { count, max: 10000 }`) | more than 10,000 customers |
@@ -209,7 +210,7 @@ Synchronous; PDFs are rendered one at a time on the API process. Measured with t
 
 ### 4.5 Errors
 
-Checks run in this order: route permissions → reserved `filter` keys → body shape → **busy check** → `filter` values → ids existence → size / empty → rendering. The busy check comes before the `filter` is validated, so during another run even an invalid request gets `429`.
+Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → **busy check** → `filter` values → ids existence → size / empty → rendering. The busy check comes before the `filter` is validated, so during another run even an invalid request gets `429`.
 
 | HTTP | Body / code | When |
 |---|---|---|
@@ -220,7 +221,7 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 | 401 | standard | missing or invalid token |
 | 403 | `INSUFFICIENT_PERMISSIONS` | no `read:Sale` or no `read:Customer` |
 | 404 | `BULK_CUSTOMERS_NOT_FOUND` (`details: { missingIds }`) | ids mode: an id is unknown, foreign or deleted; also a customer deleted while the ZIP is built (`missingIds` = that id) |
-| 429 | `BULK_EXPORT_BUSY` (`details: { retryAfterSeconds: 10 }`) + header `Retry-After: 10` | another bulk statements run is in progress on this server process |
+| 429 | `BULK_EXPORT_BUSY` (`details: { retryAfterSeconds: 10 }`) + header `Retry-After: 10` (CORS-exposed) | another bulk statements run is in progress on this server process |
 | 500 | `PDF_GENERATION_FAILED` (Nest body `{ statusCode: 500, message: "PDF_GENERATION_FAILED", error }`) | a statement failed to render; nothing is sent |
 | 503 | `BULK_EXPORT_TIMEOUT` `{ deadlineSeconds: 120 }` | the run exceeded its 120 s deadline; the server stopped it and freed the slot. Retry with fewer customers |
 
@@ -235,8 +236,6 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 ## 5. Known limits
 
 - **One bulk statements run per server replica, across all tenants, by design.** The busy slot is in memory; a second download anywhere on the same process gets `429`. With several replicas the guard is per replica.
-- **`Retry-After` is not CORS-exposed** (only `Content-Disposition` is). A cross-origin frontend must read `details.retryAfterSeconds` from the 429 body.
-- **Reserved keys outside `selection.filter` are silently stripped.** `__proto__` / `constructor` / `prototype` at the top level of the body or inside `selection` (not in `filter`) are removed by the global validation pipe instead of returning `400`. Inside `filter` they are rejected.
 - **Statements are synchronous**: ≈ 9–10 s for 50 full statements; rendering blocks the event loop one PDF at a time (it yields between PDFs). Each run is bounded by a 120 s deadline (`503 BULK_EXPORT_TIMEOUT`). If the user cancels the download, the server frees the slot at once (even mid-PDF) and answers nothing (no 500). There is one bulk statements run per API process at a time, shared by every branch (by design, to protect the CPU): plan for `429 BULK_EXPORT_BUSY`.
 - On a timeout or a client disconnect the stalled read/render is abandoned, not cancelled: it may finish in the background, and a retry can start meanwhile.
 - No audit table: every request writes one structured server log line (`customers.bulk.export` / `customers.bulk.statements`) with user, branch, mode, count, outcome and durations; no customer data or ids.
@@ -244,7 +243,7 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 
 ## 6. What did not change
 
-`GET /customers/listing` and its options, `GET /customers/:customerId/statement/pdf`, and every other customer route are unchanged. The only cross-cutting change is CORS: `Content-Disposition` is now exposed on every route (editorial routes keep their own exposed headers).
+`GET /customers/listing` and its options, `GET /customers/:customerId/statement/pdf`, and every other customer route are unchanged. The only cross-cutting change is CORS: `Content-Disposition` and `Retry-After` are now exposed on every route (editorial routes keep their own exposed headers).
 
 ## 7. Recommended UI flow
 
@@ -269,6 +268,6 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 3. **CSV:** send the current filter (as `selection.filter`) and the table's `sortBy` / `sortOrder`. Disable when N > 10,000 («Máximo 10,000 clientes por archivo»). Without `read:Sale`, the file has no metric columns; do not send metric filters / sorts (they get `400 LISTING_PARAM_REQUIRES_PERMISSION`).
 4. **Statements:** disable when N > 50 («Máximo 50 clientes por descarga») or N = 0. Ask for the period (presets → `from` / `to`). Show a spinner (expect up to ~10 s for 50).
 5. **`404 BULK_CUSTOMERS_NOT_FOUND`:** remove `details.missingIds` from the selection, tell the user («N clientes ya no existen y se quitaron de la selección»), and offer to retry with the remaining ids (if none remain, close the action).
-6. **`429 BULK_EXPORT_BUSY`:** show «Otra descarga de estados de cuenta está en curso» and retry after `details.retryAfterSeconds` (10) — or `Retry-After` when same-origin — or let the user retry.
+6. **`429 BULK_EXPORT_BUSY`:** show «Otra descarga de estados de cuenta está en curso» and retry after `details.retryAfterSeconds` (10) — or the `Retry-After` header (CORS-exposed) — or let the user retry.
 7. **`503 BULK_EXPORT_TIMEOUT`:** «La descarga tardó demasiado; probá con menos clientes». Suggest splitting the selection.
 8. **`400 BULK_SELECTION_TOO_LARGE` / `BULK_SELECTION_EMPTY`:** the count changed since the table loaded; refresh the table and show `details.max`.

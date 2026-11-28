@@ -25,7 +25,7 @@ The **selection object** is the same one as the CSV export: see `docs/customers-
 
 | Field | Type | Notes |
 |---|---|---|
-| `selection` | object, required | `ids` mode or `filter` + `excludeIds` mode, exactly as in `docs/customers-bulk-export.md` §3 (same limits, same validation, same strict 404 in ids mode). Reserved keys (`__proto__`, `constructor`, `prototype`) inside `filter` → `400`, like any unknown param |
+| `selection` | object, required | `ids` mode or `filter` + `excludeIds` mode, exactly as in `docs/customers-bulk-export.md` §3 (same limits, same validation, same strict 404 in ids mode). Reserved keys (`__proto__`, `constructor`, `prototype`) inside `filter` → `400`, like any unknown param; anywhere else in the body (top level, `selection`, nested objects) → `400` like an unknown property there |
 | `from` | `YYYY-MM-DD`, required | Same rules as the single statement: exact local date in the business timezone (`America/Mexico_City` by default), inclusive |
 | `to` | `YYYY-MM-DD`, required | Exclusive (`[from, to)`), `from < to`, at most **366 days** |
 
@@ -42,7 +42,7 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 | `Content-Length` | ZIP size in bytes |
 | `Cache-Control` | `no-store` |
 
-- `Content-Disposition` is exposed through CORS (`Access-Control-Expose-Headers`), so a cross-origin frontend can read the filename. Download as a blob (POST: a plain link does not work).
+- `Content-Disposition` and `Retry-After` are exposed through CORS (`Access-Control-Expose-Headers`), so a cross-origin frontend can read the filename and the `429` back-off. Download as a blob (POST: a plain link does not work).
 - The whole ZIP is built before the first byte is sent: an error never arrives as half a ZIP.
 
 ### 3.1 ZIP contents
@@ -78,7 +78,7 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 
 ## 5. Errors
 
-Checks run in this order: route permissions → reserved `filter` keys → body shape → busy check → `filter` values → ids existence → size / empty → rendering. Because the busy check comes before the `filter` values, a request with an invalid filter gets `429` (not `400`) while another run is in progress.
+Checks run in this order: route permissions → reserved keys (anywhere in the body) → body shape → busy check → `filter` values → ids existence → size / empty → rendering. Because the busy check comes before the `filter` values, a request with an invalid filter gets `429` (not `400`) while another run is in progress.
 
 | HTTP | Body / code | When |
 |---|---|---|
