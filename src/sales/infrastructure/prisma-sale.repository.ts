@@ -49,6 +49,56 @@ import type {
 } from '../dto/sales-list-filter.types';
 import { toStaffSaleHoldView } from '../domain/sale-hold';
 
+/**
+ * Customer summary joined on every draft response read (single draft and
+ * `GET /sales/drafts` list) — one constant so both shapes cannot drift.
+ */
+const DRAFT_CUSTOMER_SUMMARY_INCLUDE = {
+  select: { id: true, firstName: true, lastName: true },
+} as const;
+
+/**
+ * `customer` / `shippingAddress` summaries of a draft response, from a sale
+ * row loaded with `customer: DRAFT_CUSTOMER_SUMMARY_INCLUDE` and the
+ * shipping snapshot columns. `null` when there is no customer / no snapshot.
+ */
+function toDraftSummaries(row: {
+  customer: { id: string; firstName: string; lastName: string | null } | null;
+  shippingAddressId: string | null;
+  shippingStreet: string | null;
+  shippingExteriorNumber: string | null;
+  shippingInteriorNumber: string | null;
+  shippingZipCode: string | null;
+  shippingNeighborhood: string | null;
+  shippingMunicipality: string | null;
+  shippingCity: string | null;
+  shippingState: string | null;
+}): Pick<DraftSaleResponse, 'customer' | 'shippingAddress'> {
+  return {
+    customer: row.customer
+      ? {
+          id: row.customer.id,
+          firstName: row.customer.firstName,
+          lastName: row.customer.lastName,
+        }
+      : null,
+    shippingAddress:
+      row.shippingStreet != null
+        ? {
+            id: row.shippingAddressId,
+            street: row.shippingStreet,
+            exteriorNumber: row.shippingExteriorNumber,
+            interiorNumber: row.shippingInteriorNumber,
+            zipCode: row.shippingZipCode,
+            neighborhood: row.shippingNeighborhood,
+            municipality: row.shippingMunicipality,
+            city: row.shippingCity,
+            state: row.shippingState,
+          }
+        : null,
+  };
+}
+
 function extractLegacyReference(metadataJson: unknown): string | null {
   if (!metadataJson || typeof metadataJson !== 'object') {
     return null;
@@ -779,13 +829,7 @@ export class PrismaSaleRepository implements ISaleRepository {
       where: { id },
       include: {
         items: ITEMS_WITH_PET_STATUS,
-        customer: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
+        customer: DRAFT_CUSTOMER_SUMMARY_INCLUDE,
         // Unit 3 — W2: load veto + applied-promo for draft preview.
         promotionVetoes: {
           select: { promotionId: true },
@@ -908,31 +952,33 @@ export class PrismaSaleRepository implements ISaleRepository {
       // charge path uses (Unit 5) — single source of truth, no math
       // duplication.
       ...sale.previewTotals(),
-      customer: saleData.customer
-        ? {
-            id: saleData.customer.id,
-            firstName: saleData.customer.firstName,
-            lastName: saleData.customer.lastName,
-          }
-        : null,
-      shippingAddress:
-        saleData.shippingStreet != null
-          ? {
-              id: saleData.shippingAddressId,
-              street: saleData.shippingStreet,
-              exteriorNumber: saleData.shippingExteriorNumber,
-              interiorNumber: saleData.shippingInteriorNumber,
-              zipCode: saleData.shippingZipCode,
-              neighborhood: saleData.shippingNeighborhood,
-              municipality: saleData.shippingMunicipality,
-              city: saleData.shippingCity,
-              state: saleData.shippingState,
-            }
-          : null,
+      ...toDraftSummaries(saleData),
     };
   }
 
   async findDraftsByUserId(userId: string): Promise<Sale[]> {
+    return (await this.loadDraftsByUserId(userId)).map(({ sale }) => sale);
+  }
+
+  /**
+   * drafts-customer-summary — `GET /sales/drafts` rows: `toResponse()` plus
+   * the SAME `customer` / `shippingAddress` summaries as
+   * `findDraftResponseById` (shared `toDraftSummaries` mapper). One
+   * `findMany` with the customer joined through `include` — no per-row reads.
+   */
+  async findDraftResponsesByUserId(
+    userId: string,
+  ): Promise<DraftSaleResponse[]> {
+    return (await this.loadDraftsByUserId(userId)).map(
+      ({ sale, summaries }) => ({ ...sale.toResponse(), ...summaries }),
+    );
+  }
+
+  private async loadDraftsByUserId(
+    userId: string,
+  ): Promise<
+    Array<{ sale: Sale; summaries: ReturnType<typeof toDraftSummaries> }>
+  > {
     const prisma = this.tenantPrisma.getClient();
     // See findById above for why we pass `where: { tenantId }` on the
     // promotion-junction includes (createTenantScopedPrisma does NOT
@@ -947,6 +993,8 @@ export class PrismaSaleRepository implements ISaleRepository {
       include: {
         items: ITEMS_WITH_PET_STATUS,
         shippingAddress: { select: { id: true } },
+        // drafts-customer-summary — joined summary for the list rows.
+        customer: DRAFT_CUSTOMER_SUMMARY_INCLUDE,
         // Unit 3 — W2: load veto + applied-promo on the draft-list path too.
         promotionVetoes: { select: { promotionId: true }, where: { tenantId } },
         // Unit 6 close-out: load MANUAL opt-in set on the draft-list path so
@@ -959,8 +1007,9 @@ export class PrismaSaleRepository implements ISaleRepository {
       orderBy: { createdAt: 'desc' },
     });
 
-    return sales.map((saleData) =>
-      Sale.fromPersistence({
+    return sales.map((saleData) => ({
+      summaries: toDraftSummaries(saleData),
+      sale: Sale.fromPersistence({
         id: (saleData as any).id,
         userId: (saleData as any).userId,
         status: (saleData as any).status as SaleStatus,
@@ -1051,7 +1100,7 @@ export class PrismaSaleRepository implements ISaleRepository {
           ((saleData as any).sourceQuotation as { id: string } | null)?.id ??
           null,
       }),
-    );
+    }));
   }
 
   async lockSaleForUpdate(id: string): Promise<void> {

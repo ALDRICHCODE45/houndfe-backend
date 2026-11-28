@@ -1889,8 +1889,9 @@ export class SalesService {
    * Get all draft sales for a user.
    */
   async getUserDrafts(userId: string) {
-    const sales = await this.saleRepo.findDraftsByUserId(userId);
-    return sales.map((sale) => sale.toResponse());
+    // drafts-customer-summary — each row also carries `customer` and
+    // `shippingAddress` (same shape as the single-draft responses).
+    return this.saleRepo.findDraftResponsesByUserId(userId);
   }
 
   /**

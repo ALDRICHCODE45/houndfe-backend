@@ -4469,6 +4469,172 @@ describe('PrismaSaleRepository', () => {
     });
   });
 
+  // drafts-customer-summary — GET /sales/drafts rows carry the same
+  // `customer` / `shippingAddress` summaries as findDraftResponseById, from
+  // ONE findMany (relations joined via include; no per-row lookups).
+  describe('findDraftResponsesByUserId', () => {
+    function draftRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'sale-d1',
+        userId: 'user-1',
+        status: 'DRAFT',
+        channel: 'POS',
+        register: 'Principal',
+        deliveryStatus: 'NOT_APPLICABLE',
+        customerId: null,
+        shippingAddressId: null,
+        sellerUserId: null,
+        dueDate: null,
+        confirmedAt: null,
+        folio: null,
+        createdAt: new Date('2026-11-01T10:00:00.000Z'),
+        updatedAt: new Date('2026-11-01T10:00:00.000Z'),
+        customer: null,
+        shippingAddress: null,
+        items: [
+          {
+            id: 'item-d1',
+            saleId: 'sale-d1',
+            productId: 'p-1',
+            variantId: null,
+            productName: 'Croquetas',
+            variantName: null,
+            quantity: 2,
+            unitPriceCents: 7500,
+            unitPriceCurrency: 'MXN',
+            originalPriceCents: null,
+            priceSource: 'DEFAULT',
+            appliedPriceListId: null,
+            customPriceCents: null,
+            discountType: null,
+            discountValue: null,
+            discountAmountCents: null,
+            prePriceCentsBeforeDiscount: null,
+            discountTitle: null,
+            discountedAt: null,
+            promotionId: null,
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    const withCustomerAndAddress = () =>
+      draftRow({
+        id: 'sale-d2',
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        customer: { id: 'cust-1', firstName: 'Rosa', lastName: 'Pérez' },
+        shippingAddress: { id: 'addr-1' },
+        shippingStreet: 'Av. Reforma',
+        shippingExteriorNumber: '10',
+        shippingInteriorNumber: null,
+        shippingZipCode: '06600',
+        shippingNeighborhood: 'Juárez',
+        shippingMunicipality: 'Cuauhtémoc',
+        shippingCity: 'CDMX',
+        shippingState: 'CDMX',
+        shippingVisualReferences: 'Portón negro',
+        shippingCarrierPhone: '5555555555',
+        shippingLabel: 'Casa',
+        shippingLatitude: 19.4,
+        shippingLongitude: -99.1,
+      });
+
+    it('issues ONE tenant-scoped findMany (user DRAFTs, newest first) that joins the customer summary', async () => {
+      prisma.sale.findMany.mockResolvedValue([]);
+
+      await repo.findDraftResponsesByUserId('user-1');
+
+      expect(prisma.sale.findMany).toHaveBeenCalledTimes(1);
+      expect(prisma.sale.findUnique).not.toHaveBeenCalled();
+      expect(prisma.sale.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user-1', status: 'DRAFT' },
+          orderBy: { createdAt: 'desc' },
+          include: expect.objectContaining({
+            customer: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+            promotionVetoes: {
+              select: { promotionId: true },
+              where: { tenantId: 'tenant-1' },
+            },
+            promotionOptIns: {
+              select: { promotionId: true },
+              where: { tenantId: 'tenant-1' },
+            },
+            appliedPromotion: { where: { tenantId: 'tenant-1' } },
+          }),
+        }),
+      );
+    });
+
+    it('returns customer + shippingAddress identical to findDraftResponseById for the same row', async () => {
+      const row = withCustomerAndAddress();
+      prisma.sale.findMany.mockResolvedValue([row]);
+      prisma.sale.findUnique.mockResolvedValue(row);
+
+      const [listed] = await repo.findDraftResponsesByUserId('user-1');
+      const single = await repo.findDraftResponseById('sale-d2');
+
+      expect(listed.customer).toEqual({
+        id: 'cust-1',
+        firstName: 'Rosa',
+        lastName: 'Pérez',
+      });
+      expect(listed.shippingAddress).toEqual({
+        id: 'addr-1',
+        street: 'Av. Reforma',
+        exteriorNumber: '10',
+        interiorNumber: null,
+        zipCode: '06600',
+        neighborhood: 'Juárez',
+        municipality: 'Cuauhtémoc',
+        city: 'CDMX',
+        state: 'CDMX',
+      });
+      expect(listed.customer).toEqual(single!.customer);
+      expect(listed.shippingAddress).toEqual(single!.shippingAddress);
+    });
+
+    it('returns the same nulls as findDraftResponseById when the draft has no customer / no snapshot', async () => {
+      const row = draftRow();
+      prisma.sale.findMany.mockResolvedValue([row]);
+      prisma.sale.findUnique.mockResolvedValue(row);
+
+      const [listed] = await repo.findDraftResponsesByUserId('user-1');
+      const single = await repo.findDraftResponseById('sale-d1');
+
+      expect(listed.customer).toBeNull();
+      expect(listed.shippingAddress).toBeNull();
+      expect(single!.customer).toBeNull();
+      expect(single!.shippingAddress).toBeNull();
+    });
+
+    it('keeps every existing toResponse field (incl. preview totals) and the repository order', async () => {
+      const rows = [withCustomerAndAddress(), draftRow()];
+      prisma.sale.findMany.mockResolvedValue(rows);
+      // Same rows through the legacy Sale[] path → the pre-change wire rows.
+      const legacy = (await repo.findDraftsByUserId('user-1')).map((s) =>
+        s.toResponse(),
+      );
+
+      const result = await repo.findDraftResponsesByUserId('user-1');
+
+      expect(result.map((r) => r.id)).toEqual(['sale-d2', 'sale-d1']);
+      result.forEach((row, i) => {
+        const rest: Record<string, unknown> = { ...row };
+        delete rest.customer;
+        delete rest.shippingAddress;
+        expect(rest).toEqual(legacy[i]);
+      });
+      expect(result[1].subtotalCents).toBe(15000);
+      expect(result[1].totalCents).toBe(15000);
+      expect(result[1].discountCents).toBe(0);
+    });
+  });
+
   describe('delete', () => {
     it('deletes a DRAFT sale once after the transactional tenant-qualified row lock and status read', async () => {
       const saleId = 'sale-7';

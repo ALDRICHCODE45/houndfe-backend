@@ -62,6 +62,7 @@ function makeMockSaleRepo(overrides: Partial<ISaleRepository> = {}) {
     saveDraftItems: jest.fn(),
     findById: jest.fn(),
     findDraftsByUserId: jest.fn(),
+    findDraftResponsesByUserId: jest.fn(),
     delete: jest.fn(),
     findByIdForUpdate: jest.fn(),
     acquireChargeIdempotency: jest.fn(),
@@ -7939,54 +7940,65 @@ describe('SalesService', () => {
   });
 
   describe('getUserDrafts', () => {
+    // drafts-customer-summary — rows come from the repository's draft
+    // response read (toResponse() + customer + shippingAddress summaries).
+    const asRow = (sale: Sale) => ({
+      ...sale.toResponse(),
+      customer: null,
+      shippingAddress: null,
+    });
+
     it('should return all drafts for a user', async () => {
       const drafts = [
         Sale.create({ id: 'sale-11', userId: 'user-1' }),
         Sale.create({ id: 'sale-12', userId: 'user-1' }),
       ];
 
-      saleRepo.findDraftsByUserId.mockResolvedValue(drafts);
+      saleRepo.findDraftResponsesByUserId.mockResolvedValue(drafts.map(asRow));
 
       const result = await service.getUserDrafts('user-1');
 
+      expect(saleRepo.findDraftResponsesByUserId).toHaveBeenCalledWith(
+        'user-1',
+      );
       expect(result).toHaveLength(2);
       expect(result[0].id).toBe('sale-11');
       expect(result[1].id).toBe('sale-12');
     });
 
     it('should return empty array when no drafts exist', async () => {
-      saleRepo.findDraftsByUserId.mockResolvedValue([]);
+      saleRepo.findDraftResponsesByUserId.mockResolvedValue([]);
 
       const result = await service.getUserDrafts('user-2');
 
       expect(result).toHaveLength(0);
     });
 
-    // Regression guard for the POS $0.00 bug: the session-tab list
-    // (getUserDrafts) MUST return drafts whose subtotalCents/totalCents
-    // are populated from previewTotals(), not the persisted 0.
-    it('surfaces preview totals for every draft returned to the POS session-tab list', async () => {
-      const draft = Sale.create({ id: 'sale-tab-1', userId: 'user-1' });
-      draft.addItem({
-        id: 'item-tab-1',
-        saleId: 'sale-tab-1',
-        productId: 'prod-1',
-        variantId: null,
-        productName: 'Aspirina',
-        variantName: null,
-        quantity: 2,
-        unitPriceCents: 7500,
-        unitPriceCurrency: 'MXN',
-      });
-
-      saleRepo.findDraftsByUserId.mockResolvedValue([draft]);
+    it('returns each row with its customer and shippingAddress summaries verbatim', async () => {
+      const row = {
+        ...Sale.create({ id: 'sale-cust', userId: 'user-1' }).toResponse(),
+        customerId: 'cust-1',
+        shippingAddressId: 'addr-1',
+        customer: { id: 'cust-1', firstName: 'Rosa', lastName: null },
+        shippingAddress: {
+          id: 'addr-1',
+          street: 'Av. Reforma',
+          exteriorNumber: '10',
+          interiorNumber: null,
+          zipCode: '06600',
+          neighborhood: null,
+          municipality: null,
+          city: 'CDMX',
+          state: 'CDMX',
+        },
+      };
+      saleRepo.findDraftResponsesByUserId.mockResolvedValue([row]);
 
       const result = await service.getUserDrafts('user-1');
 
-      expect(result).toHaveLength(1);
-      expect(result[0].subtotalCents).toBe(15000);
-      expect(result[0].totalCents).toBe(15000);
-      expect(result[0].discountCents).toBe(0);
+      expect(result).toEqual([row]);
+      expect(saleRepo.findDraftsByUserId).not.toHaveBeenCalled();
+      expect(saleRepo.findDraftResponseById).not.toHaveBeenCalled();
     });
 
     // S15: Create Unlimited Drafts per User
@@ -8004,9 +8016,9 @@ describe('SalesService', () => {
 
       // Mock getUserDrafts to return all 6 created drafts
       const allDraftsFromRepo = createdDraftIds.map((id) =>
-        Sale.create({ id, userId }),
+        asRow(Sale.create({ id, userId })),
       );
-      saleRepo.findDraftsByUserId.mockResolvedValue(allDraftsFromRepo);
+      saleRepo.findDraftResponsesByUserId.mockResolvedValue(allDraftsFromRepo);
 
       const allDrafts = await service.getUserDrafts(userId);
 

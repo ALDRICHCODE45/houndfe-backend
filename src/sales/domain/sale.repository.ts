@@ -172,6 +172,14 @@ export interface ISaleRepository {
   findDraftsByUserId(userId: string): Promise<Sale[]>;
 
   /**
+   * drafts-customer-summary — the current user's DRAFT rows as served by
+   * `GET /sales/drafts`: `toResponse()` plus the same `customer` /
+   * `shippingAddress` summaries as `findDraftResponseById`, newest first,
+   * loaded with a bounded number of queries (no per-row reads).
+   */
+  findDraftResponsesByUserId(userId: string): Promise<DraftSaleResponse[]>;
+
+  /**
    * Delete a sale by ID
    */
   delete(id: string): Promise<void>;
