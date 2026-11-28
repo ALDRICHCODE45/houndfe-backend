@@ -182,6 +182,62 @@ describe('CustomerBulkStatementsController — POST /customers/bulk/statements',
     expect(seen?.aborted).toBe(true);
   });
 
+  it('a client that disconnected before the handler ran aborts the run signal at once', async () => {
+    let seen: AbortSignal | undefined;
+    const res = fakeResponse();
+    const build = jest.fn(
+      (
+        _b: unknown,
+        _a: unknown,
+        _u: unknown,
+        opts: { signal: AbortSignal },
+      ) => {
+        seen = opts.signal;
+        return Promise.resolve({ filename: 'x.zip', zip: Buffer.alloc(0) });
+      },
+    );
+    // The close event already fired while guards/pipes ran, so the late
+    // `res.on('close')` listener would never see it.
+    await world(build).statements(
+      body,
+      {
+        ability: {},
+        user,
+        destroyed: true,
+        socket: { destroyed: true },
+      } as never,
+      res as never,
+    );
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it('a consumed request body (req.destroyed) with a live socket does NOT abort the run', async () => {
+    let seen: AbortSignal | undefined;
+    const res = fakeResponse();
+    const build = jest.fn(
+      (
+        _b: unknown,
+        _a: unknown,
+        _u: unknown,
+        opts: { signal: AbortSignal },
+      ) => {
+        seen = opts.signal;
+        return Promise.resolve({ filename: 'x.zip', zip: Buffer.alloc(0) });
+      },
+    );
+    await world(build).statements(
+      body,
+      {
+        ability: {},
+        user,
+        destroyed: true,
+        socket: { destroyed: false },
+      } as never,
+      res as never,
+    );
+    expect(seen?.aborted).toBe(false);
+  });
+
   it('a client abort ends quietly: no rethrow (no 500, no error-level log), nothing sent, listener removed', async () => {
     const build = jest.fn().mockRejectedValue(new BulkStatementsAbortedError());
     const res = fakeResponse();

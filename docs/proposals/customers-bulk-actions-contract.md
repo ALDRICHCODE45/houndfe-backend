@@ -40,7 +40,7 @@ Other changes found during implementation:
 - **Bulk statements guard order:** the one-run-per-process check happens **before** the selection is resolved, so during another run even a request with a bad `filter` value gets `429`, not the `400`.
 - **One run per replica, across tenants:** the busy slot is an in-memory singleton, by design.
 - **Measured:** 10,000 CSV rows with metrics ≈ 1.1 s, ≈ 1.1 MB. Statements: ≈ 50 ms for an empty statement, ≈ 180 ms median / ≈ 210 ms p95 for 20 sales + 10 payments (≈ 35 KB each); a run of 50 full statements ≈ 9–10 s. Below the 400 ms p95 gate of §3.3, so the cap stays 50 in-process.
-- **Pending (advisory follow-up):** a per-run deadline for bulk statements with a new timeout error code, and quiet handling of client aborts.
+- **Shipped in e55240d0 (advisory follow-up):** a 120 s per-run deadline for bulk statements (`503 BULK_EXPORT_TIMEOUT`, slot freed at once) and quiet handling of client aborts (no 500). Known limit: on timeout or abort the stalled read/render is abandoned, not cancelled, and may finish in the background holding its DB connection; a later run can start meanwhile.
 
 ## 0. Requests and disposition
 
@@ -380,7 +380,7 @@ Metric columns (**only with `read:Sale`**, appended after column 20):
 
 ### 5.1 Audit
 
-The repo has no audit pattern for exports or reads (E17). v1 writes **one structured log line per request** (`customers.bulk.export` / `customers.bulk.statements`): tenant id, user id, selection mode, count, sort or `from`/`to`, size, durations and outcome (`ok`, `rejected`, `forbidden`; statements also `busy`, `aborted`, `failed`) with the error code. No customer data and no ids are logged.
+The repo has no audit pattern for exports or reads (E17). v1 writes **one structured log line per request** (`customers.bulk.export` / `customers.bulk.statements`): tenant id, user id, selection mode, count, sort or `from`/`to`, size, durations and outcome (`ok`, `rejected`, `forbidden`; statements also `busy`, `aborted`, `failed`, `timeout`) with the error code. No customer data and no ids are logged.
 
 **FUTURE item (owner: «Por ahora no, pero dejalo anotado para platicarlo despues»):** a persisted export audit table (who exported what, when). Not built; to discuss with the owner later.
 

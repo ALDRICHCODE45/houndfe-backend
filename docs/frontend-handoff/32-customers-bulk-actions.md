@@ -237,8 +237,8 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 - **One bulk statements run per server replica, across all tenants, by design.** The busy slot is in memory; a second download anywhere on the same process gets `429`. With several replicas the guard is per replica.
 - **`Retry-After` is not CORS-exposed** (only `Content-Disposition` is). A cross-origin frontend must read `details.retryAfterSeconds` from the 429 body.
 - **Reserved keys outside `selection.filter` are silently stripped.** `__proto__` / `constructor` / `prototype` at the top level of the body or inside `selection` (not in `filter`) are removed by the global validation pipe instead of returning `400`. Inside `filter` they are rejected.
-- **Statements are synchronous**: ≈ 9–10 s for 50 full statements; rendering blocks the event loop one PDF at a time (it yields between PDFs). Each run is bounded by a 120 s deadline (`503 BULK_EXPORT_TIMEOUT`). If the user cancels the download, the server stops before the next PDF and answers nothing (no 500). There is one bulk statements run per API process at a time, shared by every branch (by design, to protect the CPU): plan for `429 BULK_EXPORT_BUSY`.
-- If the client disconnects mid-run, rendering stops before the next PDF (quiet abort handling is in the advisory follow-up).
+- **Statements are synchronous**: ≈ 9–10 s for 50 full statements; rendering blocks the event loop one PDF at a time (it yields between PDFs). Each run is bounded by a 120 s deadline (`503 BULK_EXPORT_TIMEOUT`). If the user cancels the download, the server frees the slot at once (even mid-PDF) and answers nothing (no 500). There is one bulk statements run per API process at a time, shared by every branch (by design, to protect the CPU): plan for `429 BULK_EXPORT_BUSY`.
+- On a timeout or a client disconnect the stalled read/render is abandoned, not cancelled: it may finish in the background, and a retry can start meanwhile.
 - No audit table: every request writes one structured server log line (`customers.bulk.export` / `customers.bulk.statements`) with user, branch, mode, count, outcome and durations; no customer data or ids.
 - No async job and no streaming: 50 PDFs and 10,000 rows per request are hard caps.
 
@@ -270,4 +270,5 @@ Checks run in this order: route permissions → reserved `filter` keys → body 
 4. **Statements:** disable when N > 50 («Máximo 50 clientes por descarga») or N = 0. Ask for the period (presets → `from` / `to`). Show a spinner (expect up to ~10 s for 50).
 5. **`404 BULK_CUSTOMERS_NOT_FOUND`:** remove `details.missingIds` from the selection, tell the user («N clientes ya no existen y se quitaron de la selección»), and offer to retry with the remaining ids (if none remain, close the action).
 6. **`429 BULK_EXPORT_BUSY`:** show «Otra descarga de estados de cuenta está en curso» and retry after `details.retryAfterSeconds` (10) — or `Retry-After` when same-origin — or let the user retry.
-7. **`400 BULK_SELECTION_TOO_LARGE` / `BULK_SELECTION_EMPTY`:** the count changed since the table loaded; refresh the table and show `details.max`.
+7. **`503 BULK_EXPORT_TIMEOUT`:** «La descarga tardó demasiado; probá con menos clientes». Suggest splitting the selection.
+8. **`400 BULK_SELECTION_TOO_LARGE` / `BULK_SELECTION_EMPTY`:** the count changed since the table loaded; refresh the table and show `details.max`.

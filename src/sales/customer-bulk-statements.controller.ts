@@ -71,6 +71,13 @@ export class CustomerBulkStatementsController {
       if (!res.writableEnded) abort.abort();
     };
     res.on('close', onClose);
+    // The client may have disconnected while guards, interceptors or pipes
+    // ran: that close event already fired, so check the current state too.
+    // Not `req.destroyed`: the request stream is destroyed as soon as the body
+    // parser has read the body, while the client is still connected.
+    if (res.destroyed || req.socket?.destroyed) {
+      abort.abort();
+    }
     let result: Awaited<ReturnType<CustomerBulkStatementsService['build']>>;
     try {
       result = await this.service.build(

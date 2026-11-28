@@ -78,7 +78,7 @@ Period presets stay in the frontend, as for the single statement: «Este mes» =
 
 ## 5. Errors
 
-Checks run in this order: body / `filter` validation → busy check → selection (ids existence) → size → rendering.
+Checks run in this order: route permissions → reserved `filter` keys → body shape → busy check → `filter` values → ids existence → size / empty → rendering. Because the busy check comes before the `filter` values, a request with an invalid filter gets `429` (not `400`) while another run is in progress.
 
 | HTTP | Body / code | When |
 |---|---|---|
